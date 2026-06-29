@@ -79,10 +79,22 @@ public final class ElementRegistry {
               Date().timeIntervalSince(lastPruneAt) > 30 else { return }
         lastPruneAt = Date()
         let before = storage.count
-        // Iterate a SNAPSHOT (filter makes a new dictionary) so we never mutate `storage`
-        // while iterating it.
-        for (ref, stored) in storage.filter({ !$0.value.element.isAlive }) {
-            elementToRef[stored.element] = nil
+        // Bound the sweep by wall clock: each `isAlive` is a cross-process AX call, and this runs
+        // under the host's request lock, so a table full of slow/wedged targets could otherwise
+        // stall the connection for seconds. Collect dead entries first (never mutate `storage`
+        // while iterating it), then delete. A partial scan is fine — the hysteresis below backs off
+        // so we don't immediately re-pay it, and the next window resumes pruning.
+        let sweepDeadline = Date().addingTimeInterval(0.5)
+        var dead: [(ref: String, element: AXElement)] = []
+        for (ref, stored) in storage {
+            if Date() >= sweepDeadline { break }
+            // A short per-probe messaging timeout so one hung element can't consume the whole
+            // budget — a wall-clock check between probes can't preempt a single in-flight AX call.
+            stored.element.setMessagingTimeout(1)
+            if !stored.element.isAlive { dead.append((ref, stored.element)) }
+        }
+        for (ref, element) in dead {
+            elementToRef[element] = nil
             controlParents[ref] = nil
             storage[ref] = nil
         }
@@ -267,27 +279,38 @@ public final class ElementRegistry {
 
     public func find(pid: pid_t, role: String?, titleContains: String?,
                      identifier: String? = nil, valueContains: String? = nil, actionable: Bool? = nil,
-                     limit: Int, maxDepth: Int = 12) -> [Match] {
+                     limit: Int, maxDepth: Int = 12, budget: TimeInterval = 2) -> [Match] {
         let app = AXElement.application(pid: pid)
         app.setMessagingTimeout(5)
+        // Bound the walk by wall clock: `limit` caps results but not nodes traversed, and a big tree
+        // (or wait_for polling this every ~150ms) would otherwise issue thousands of IPC calls with
+        // no ceiling. The `visited` set guards malformed/cyclic trees.
+        let deadline = Date().addingTimeInterval(budget)
         var results: [Match] = []
-
-        func matches(_ element: AXElement) -> Bool {
-            ElementRegistry.elementMatches(
-                role: element.role, title: element.title, identifier: element.identifier,
-                value: element.value, actions: element.actions,
-                roleFilter: role, titleContains: titleContains, identifierFilter: identifier,
-                valueContains: valueContains, actionable: actionable)
-        }
+        var visited: Set<AXElement> = [app]
 
         func visit(_ element: AXElement, depth: Int) {
-            if results.count >= limit { return }
-            if matches(element) {
-                results.append(match(ref(for: element, pid: pid), element))
+            if results.count >= limit || Date() >= deadline { return }
+            // One bulk IPC read for role/identifier/title/value/frame/children rather than a
+            // separate cross-process call per attribute. `actions` isn't in the bulk set (it uses a
+            // different AX API), so fetch it only when the `actionable` filter needs it.
+            let attrs = element.snapshotAttributes()
+            let actionsForMatch = actionable != nil ? element.actions : []
+            if ElementRegistry.elementMatches(
+                role: attrs.role, title: attrs.title, identifier: attrs.identifier,
+                value: attrs.value, actions: actionsForMatch,
+                roleFilter: role, titleContains: titleContains, identifierFilter: identifier,
+                valueContains: valueContains, actionable: actionable) {
+                // Keep Match.actions populated (find_elements surfaces it), paying the actions read
+                // only for matched rows when we didn't already fetch them for the filter.
+                let actions = actionable != nil ? actionsForMatch : element.actions
+                results.append(Match(ref: ref(for: element, pid: pid), role: attrs.role ?? "AXUnknown",
+                                     title: attrs.title, identifier: attrs.identifier,
+                                     frame: attrs.frame, actions: actions))
             }
             if depth < maxDepth {
-                for child in element.children {
-                    if results.count >= limit { return }
+                for child in attrs.children where visited.insert(child).inserted {
+                    if results.count >= limit || Date() >= deadline { return }
                     visit(child, depth: depth + 1)
                 }
             }
