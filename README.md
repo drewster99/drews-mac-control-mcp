@@ -93,7 +93,9 @@ Why this matters: you grant Accessibility **once, to the host**, and every MCP c
 
 ### Capture, discovery, simulator
 
-`screenshot(target, …)`, `ocr(path)`, `list_running_apps()`, `list_simulators()`, `sim(action, …)`.
+`screenshot(target, …)`, `ocr(path)`, `list_running_apps()`, `list_simulators()`, `sim(action, …)`, `open(target, application?, background?, newInstance?)`.
+
+`open` is the grant-free equivalent of double-clicking in Finder: it opens a file, folder, URL, or app via `/usr/bin/open`. The target is passed as a literal argument-array element (never through a shell), and the option form (`-u` for URLs, `-a`/`-b` for apps, `--` before file operands) keeps a target that starts with `-` from being read as a flag.
 
 ---
 

@@ -19,7 +19,7 @@ public final class MCPServer {
     }
 
     public static func defaultTools() -> [Tool] {
-        [ListAppsTool(), ListSimulatorsTool(), SimTool()]
+        [ListAppsTool(), ListSimulatorsTool(), SimTool(), OpenTool()]
     }
 
     /// Handle one JSON-RPC line. Returns the response bytes to write, or `nil` for

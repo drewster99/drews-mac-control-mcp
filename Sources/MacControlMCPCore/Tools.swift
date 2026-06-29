@@ -166,3 +166,136 @@ public struct ListSimulatorsTool: Tool {
         return JSONText.from(rows)
     }
 }
+
+/// Opens a file, folder, URL, or application via `/usr/bin/open` — the grant-free equivalent of
+/// double-clicking in Finder or pasting a link into a browser. It can open essentially anything,
+/// and it is injection-proof by construction: the target is passed as a literal element of the
+/// argument array to `Process` (never through a shell, so there is no string to escape), and the
+/// argument *form* (`-u` for a URL, `-a`/`-b` for an app, `--` before a file operand) prevents a
+/// target that begins with `-` from being mistaken for an `open` option.
+public struct OpenTool: Tool {
+    public let name = "open"
+
+    /// True when `identifier` is the bundle id of an installed app. Injected so the argument-
+    /// building logic is unit-testable without LaunchServices.
+    private let isInstalledBundleID: (String) -> Bool
+
+    public init(isInstalledBundleID: @escaping (String) -> Bool = {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) != nil
+    }) {
+        self.isInstalledBundleID = isInstalledBundleID
+    }
+
+    public var descriptor: [String: Any] {
+        [
+            "name": name,
+            "description": "Open a file, folder, URL, or application with the macOS `open` command. `target` is a file/folder path, a URL (https, mailto, custom scheme, …), an app name, a bundle identifier, or a path to a .app. Optionally open `target` with a specific `application`. No grant.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "target": ["type": "string", "description": "What to open: a file/folder path, a URL, an app name, a bundle identifier, or a .app path."],
+                    "application": ["type": "string", "description": "Optional. Open `target` using this application (name, bundle id, or .app path) instead of the default handler."],
+                    "background": ["type": "boolean", "description": "Open without bringing the app to the foreground (open -g). Default false."],
+                    "newInstance": ["type": "boolean", "description": "Open a new instance even if the app is already running (open -n). Default false."]
+                ],
+                "required": ["target"]
+            ]
+        ]
+    }
+
+    /// The `open` invocation chosen for a request, plus a short label naming the resolution it
+    /// landed on (for the result payload and for tests).
+    struct Invocation {
+        let form: String
+        let arguments: [String]
+    }
+
+    public func call(_ arguments: [String: Any]) -> String {
+        guard let target = arguments["target"] as? String,
+              !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return JSONText.from(["ok": false, "error": "missing_target"])
+        }
+        let application = (arguments["application"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let background = (arguments["background"] as? Bool) ?? false
+        let newInstance = (arguments["newInstance"] as? Bool) ?? false
+
+        let invocation = self.invocation(target: target, application: application,
+                                         background: background, newInstance: newInstance)
+        let result = Shell.runFull("/usr/bin/open", invocation.arguments)
+        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.status == 0 {
+            var payload: [String: Any] = ["ok": true, "target": target, "form": invocation.form]
+            if let application { payload["application"] = application }
+            if !output.isEmpty { payload["output"] = output }
+            return JSONText.from(payload)
+        }
+        return JSONText.from([
+            "ok": false, "target": target, "form": invocation.form,
+            "status": Int(result.status),
+            "error": output.isEmpty ? "open_failed" : output
+        ])
+    }
+
+    /// Builds the `open` argument array for a request. Pure (apart from the injected bundle-id
+    /// lookup) so the option-injection guarantees can be exercised directly in tests.
+    func invocation(target: String, application: String?, background: Bool, newInstance: Bool) -> Invocation {
+        var arguments: [String] = []
+        if background { arguments.append("-g") }
+        if newInstance { arguments.append("-n") }
+
+        if let application {
+            // Open the target *with* a named/bundled/path app; the target follows `--` so it is
+            // always treated as an operand (file or URL), never an option.
+            arguments += appReferenceArguments(application)
+            arguments += ["--", operandForm(target)]
+            return Invocation(form: "with-application", arguments: arguments)
+        }
+        // URL before path: an `http://…` target contains slashes but must open as a URL, not a file.
+        if looksLikeURL(target) {
+            arguments += ["-u", target]   // `-u` opens it as a URL even if it also matches a filepath.
+            return Invocation(form: "url", arguments: arguments)
+        }
+        if isPath(target) {
+            arguments += ["--", expandingTilde(target)]
+            return Invocation(form: "path", arguments: arguments)
+        }
+        let appArguments = appReferenceArguments(target)
+        return Invocation(form: appArguments.first == "-b" ? "bundle-id" : "application",
+                          arguments: arguments + appArguments)
+    }
+
+    /// `-a <name|path>` or `-b <bundleId>` for an app reference. A path or `~`-rooted string is an
+    /// app on disk (`-a` accepts a path); a string that resolves to an installed bundle id uses
+    /// `-b`; anything else is treated as an app name (`-a`). The value rides as the option-argument
+    /// to `-a`/`-b`, so a leading `-` can't be reinterpreted as an option.
+    private func appReferenceArguments(_ identifier: String) -> [String] {
+        if isPath(identifier) { return ["-a", expandingTilde(identifier)] }
+        if isInstalledBundleID(identifier) { return ["-b", identifier] }
+        return ["-a", identifier]
+    }
+
+    private func operandForm(_ target: String) -> String {
+        isPath(target) ? expandingTilde(target) : target
+    }
+
+    private func isPath(_ string: String) -> Bool {
+        string.contains("/") || string.hasPrefix("~")
+    }
+
+    /// Expands a leading `~` only. `NSString.expandingTildeInPath` also collapses `//` to `/`,
+    /// which would corrupt a URL (`https://…` → `https:/…`); guarding on the `~` prefix leaves every
+    /// other string byte-for-byte intact.
+    private func expandingTilde(_ path: String) -> String {
+        path.hasPrefix("~") ? (path as NSString).expandingTildeInPath : path
+    }
+
+    /// True when `string` begins with a URL scheme (`scheme:` where scheme is a letter followed by
+    /// letters/digits/`+`/`.`/`-`). Paths are classified first, so a path containing a colon never
+    /// reaches here.
+    private func looksLikeURL(_ string: String) -> Bool {
+        guard let colon = string.firstIndex(of: ":") else { return false }
+        let scheme = string[string.startIndex..<colon]
+        guard let first = scheme.first, first.isLetter else { return false }
+        return scheme.allSatisfy { $0.isLetter || $0.isNumber || $0 == "+" || $0 == "." || $0 == "-" }
+    }
+}
