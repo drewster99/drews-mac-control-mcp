@@ -24,19 +24,19 @@ final class MCPServerTests: XCTestCase {
         let result = try XCTUnwrap(object["result"] as? [String: Any])
         let tools = try XCTUnwrap(result["tools"] as? [[String: Any]])
         let names = tools.compactMap { $0["name"] as? String }
-        XCTAssertTrue(names.contains("list_apps"))
+        XCTAssertTrue(names.contains("list_running_apps"))
         XCTAssertTrue(names.contains("list_simulators"))
     }
 
     func testListAppsReturnsTextContent() throws {
         let server = MCPServer()
-        let line = #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_apps","arguments":{}}}"#
+        let line = #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_running_apps","arguments":{}}}"#
         let object = try resultObject(server.handleLine(line))
         let result = try XCTUnwrap(object["result"] as? [String: Any])
         let content = try XCTUnwrap(result["content"] as? [[String: Any]])
         XCTAssertEqual(content.first?["type"] as? String, "text")
         let text = try XCTUnwrap(content.first?["text"] as? String)
-        // list_apps returns a JSON array (this test process is itself a running app).
+        // list_running_apps returns a JSON array (this test process is itself a running app).
         XCTAssertTrue(text.hasPrefix("["))
     }
 

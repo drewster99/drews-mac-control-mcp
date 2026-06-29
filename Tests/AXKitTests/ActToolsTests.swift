@@ -67,7 +67,7 @@ final class ActToolsTests: XCTestCase {
     func testWindowAndOpenMenuSafePaths() {
         let session = ElementRegistry()
         XCTAssertEqual(WindowTool(session: session).name, "window")
-        XCTAssertEqual(OpenMenuTool(session: session).name, "open_menu")
+        XCTAssertEqual(OpenMenuTool(session: session).name, "menu_pick")
         // gating
         XCTAssertTrue(WindowTool(session: session, isTrusted: notTrusted).call(["ref": "e1", "action": "raise"]).contains("accessibility_not_granted"))
         XCTAssertTrue(OpenMenuTool(session: session, isTrusted: notTrusted).call(["pid": 1, "path": ["File"]]).contains("accessibility_not_granted"))
