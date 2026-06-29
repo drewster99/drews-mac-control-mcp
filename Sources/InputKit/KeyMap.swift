@@ -28,8 +28,9 @@ public enum KeyMap {
         "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
         // ANSI punctuation — so common chords like cmd+, (Preferences) and cmd+. (Cancel) parse.
         "]": 30, "'": 39, ";": 41, "\\": 42, ",": 43, "/": 44, ".": 47, "`": 50, "[": 33,
-        // Word aliases for the keys "+"/"-" can't be spelled directly (the "+" separator) or read
-        // clearly: `plus`/`equal` are the `=` key (shift makes it "+"); `minus` is the `-` key.
+        // Word aliases that the "+" separator or readability makes hard to spell directly. All map
+        // to the physical "=" / "-" keys; `plus` additionally implies Shift (see parse) so it emits
+        // the "+" character its name promises, while `equal`/`equals`/`minus` are the bare keys.
         "plus": 24, "equal": 24, "equals": 24, "minus": 27,
         "return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51, "backspace": 51,
         "escape": 53, "esc": 53, "left": 123, "right": 124, "down": 125, "up": 126,
@@ -62,6 +63,9 @@ public enum KeyMap {
             guard let flag = modifiers[modifier] else { return nil }
             flags.insert(flag)
         }
+        // "plus" names the "+" character, which is Shift+"=" on ANSI — imply Shift so "cmd++" zooms
+        // rather than emitting a bare "=". `equal`/`minus` stay unshifted (use shift+= for + manually).
+        if keyName == "plus" { flags.insert(.maskShift) }
         return KeyChord(keyCode: keyCode, flags: flags)
     }
 }

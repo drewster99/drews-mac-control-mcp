@@ -33,14 +33,15 @@ final class KeyMapTests: XCTestCase {
     }
 
     func testPlusKeyViaTrailingPlus() {
-        // "cmd++" targets the literal plus key (the "=" keycode) — the trailing "+" must not be
-        // dropped by the separator split.
-        XCTAssertEqual(KeyMap.parse("cmd++"), KeyChord(keyCode: 24, flags: .maskCommand))
-        XCTAssertEqual(KeyMap.parse("+"), KeyChord(keyCode: 24, flags: []))
+        // "cmd++" targets the "+" character (Shift+"="), so the chord carries Shift — and the
+        // trailing "+" must not be dropped by the separator split.
+        XCTAssertEqual(KeyMap.parse("cmd++"), KeyChord(keyCode: 24, flags: [.maskCommand, .maskShift]))
+        XCTAssertEqual(KeyMap.parse("+"), KeyChord(keyCode: 24, flags: .maskShift))
     }
 
     func testPlusAndMinusAliases() {
-        XCTAssertEqual(KeyMap.parse("cmd+plus"), KeyChord(keyCode: 24, flags: .maskCommand))
+        // `plus` implies Shift (the "+" character); `equal`/`minus` are the bare keys.
+        XCTAssertEqual(KeyMap.parse("cmd+plus"), KeyChord(keyCode: 24, flags: [.maskCommand, .maskShift]))
         XCTAssertEqual(KeyMap.parse("equal"), KeyChord(keyCode: 24, flags: []))
         XCTAssertEqual(KeyMap.parse("cmd+minus"), KeyChord(keyCode: 27, flags: .maskCommand))
     }
