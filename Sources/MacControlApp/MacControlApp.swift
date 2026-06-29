@@ -84,13 +84,17 @@ final class AppModel: ObservableObject {
     }
 
     var configJSON: String {
-        """
-        {
-          "mcpServers": {
-            "mac-control": { "command": "\(relayPath)" }
-          }
+        // Build via JSONSerialization so a bundle path containing a quote or backslash can't produce
+        // invalid JSON (string interpolation would). On the (unexpected) encode failure, fall back to
+        // structurally-valid JSON rather than something un-copyable.
+        let object: [String: Any] = ["mcpServers": ["mac-control": ["command": relayPath]]]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+            if let json = String(data: data, encoding: .utf8) { return json }
+        } catch {
+            // fall through to the valid-JSON fallback below
         }
-        """
+        return "{\n  \"mcpServers\": {}\n}"
     }
 
     func refresh() {
