@@ -157,6 +157,7 @@ public struct AXElement: @unchecked Sendable {
         var size = CGSize.zero
         let position = unsafeDowncast(positionValue, to: AXValue.self)
         let dimensions = unsafeDowncast(sizeValue, to: AXValue.self)
+        guard AXValueGetType(position) == .cgPoint, AXValueGetType(dimensions) == .cgSize else { return nil }
         guard AXValueGetValue(position, .cgPoint, &origin),
               AXValueGetValue(dimensions, .cgSize, &size) else { return nil }
         return CGRect(origin: origin, size: size)
@@ -215,6 +216,7 @@ public struct AXElement: @unchecked Sendable {
             var size = CGSize.zero
             let position = unsafeDowncast(positionValue, to: AXValue.self)
             let dimensions = unsafeDowncast(sizeValue, to: AXValue.self)
+            guard AXValueGetType(position) == .cgPoint, AXValueGetType(dimensions) == .cgSize else { return nil }
             guard AXValueGetValue(position, .cgPoint, &origin),
                   AXValueGetValue(dimensions, .cgSize, &size) else { return nil }
             return CGRect(origin: origin, size: size)
@@ -418,8 +420,10 @@ public extension AXElement {
     /// screen coordinates — the right place to synthesize a click for `activate`.
     var activationPoint: CGPoint? {
         guard let value = copyAttribute("AXActivationPoint"), CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = unsafeDowncast(value, to: AXValue.self)
+        guard AXValueGetType(axValue) == .cgPoint else { return nil }
         var point = CGPoint.zero
-        return AXValueGetValue(unsafeDowncast(value, to: AXValue.self), .cgPoint, &point) ? point : nil
+        return AXValueGetValue(axValue, .cgPoint, &point) ? point : nil
     }
 
     /// Numeric value setter (slider/scrollbar) — writes a `CFNumber`, guarded by settability.
