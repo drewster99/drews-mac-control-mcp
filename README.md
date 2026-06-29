@@ -99,26 +99,47 @@ Why this matters: you grant Accessibility **once, to the host**, and every MCP c
 
 ## Build & install
 
+### One command
+
 ```bash
-# 1. Generate the Xcode project from project.yml
-xcodegen generate
-
-# 2. Build the Release scheme in Xcode, then sign + notarize:
-./notarize-app.sh          # produces a signed, notarized dist/MacControlMCP.app
-
-# 3. Install the app (it registers the host LaunchAgent on first launch)
-cp -R dist/MacControlMCP.app /Applications/
-open /Applications/MacControlMCP.app   # grant Accessibility (and Screen Recording for screenshots)
+./install.sh
 ```
 
-For a quick local build of just the binaries (no app bundle / notarization):
+That's the whole thing. `install.sh` generates the Xcode project, builds the Release app, code-signs it with your Developer ID, installs it to `/Applications`, launches it (which registers the host LaunchAgent and triggers the macOS permission prompts), and registers the relay with any MCP client (`claude`, `codex`) it finds on your `PATH`. When it finishes, grant **Accessibility** (and **Screen Recording** for screenshots) if you weren't already prompted, and you're ready.
+
+**Prerequisites:** macOS 14+, Xcode 16+, [XcodeGen](https://github.com/yonsei/XcodeGen) (`brew install xcodegen`), and a **Developer ID Application** signing identity in your keychain — the host's XPC Mach service is team-scoped, so ad-hoc signing won't work.
+
+Useful flags:
 
 ```bash
-swift build            # debug
+./install.sh --notarize              # also notarize + staple (for distribution; needs a notarytool profile)
+./install.sh --identity "Developer ID Application: …"   # pick a specific signing identity
+./install.sh --clients claude        # only register Claude Code (or: codex / none / claude,codex)
+./install.sh --prefix ~/Applications # install somewhere other than /Applications
+./install.sh --no-launch             # build + install but don't open the app
+./install.sh --help                  # all options
+```
+
+### Manual build
+
+The script orchestrates the same steps you can run by hand:
+
+```bash
+xcodegen generate          # generate MacControlMCP.xcodeproj from project.yml
+# build the Release scheme in Xcode, then sign (+ notarize) the result:
+./notarize-app.sh          # produces a signed, notarized dist/MacControlMCP.app
+cp -R dist/MacControlMCP.app /Applications/
+open /Applications/MacControlMCP.app
+```
+
+For a quick check of just the library/binary targets (no app bundle, won't hold the Accessibility grant):
+
+```bash
+swift build            # debug build of all targets
 swift test             # run the unit tests
 ```
 
-> Signing/notarization in `notarize-app.sh` uses a Developer ID + a `notarytool` keychain profile — edit those for your own identity.
+> Signing/notarization defaults to a Nuclear Cyborg Developer ID + a `notarytool` keychain profile. Override the identity with `--identity` / `CODESIGN_IDENTITY` and the profile with `--profile` / `NOTARY_PROFILE`. Forks also need to change the bundle ids and the team prefix in `packaging/host.launchagent.plist`.
 
 ### Register with an MCP client
 
