@@ -526,8 +526,12 @@ public struct ClickRefTool: Tool {
             } else {
                 perform()
             }
+            // `success` here means the click was POSTED — synthetic input returns no acknowledgment,
+            // so it can't confirm the click landed (it may be consumed by activation or miss an
+            // off-screen target). The caller should verify the effect in the returned hierarchy.
             return actedResponse(registry, ref: ref, deadline: Date().addingTimeInterval(4),
-                                 base: ["success": true, "ref": ref, "x": Int(point.x), "y": Int(point.y)],
+                                 base: ["success": true, "ref": ref, "x": Int(point.x), "y": Int(point.y),
+                                        "note": "Click posted at the activation point; synthetic clicks aren't acknowledged — verify the effect in the returned hierarchy."],
                                  scope: refreshScope(arguments))
         }
     }
@@ -552,10 +556,16 @@ private func isTextInput(_ element: AXElement) -> Bool {
 private func axInsertText(_ element: AXElement, _ text: String) -> Bool {
     guard element.isSettable(kAXSelectedTextAttribute as String) else { return false }
     guard let range = element.selectedTextRange, range.location >= 0, range.length >= 0 else { return false }
-    if let count = element.numberOfCharacters, range.location + range.length > count { return false }  // garbage range
+    // The range comes from another process; guard the additions so a near-Int.max value can't trap
+    // and abort the privileged host.
+    let (end, endOverflow) = range.location.addingReportingOverflow(range.length)
+    if endOverflow { return false }                                            // garbage range
+    if let count = element.numberOfCharacters, end > count { return false }     // garbage range
     guard element.setSelectedText(text) else { return false }
-    // Leave the caret after the inserted text, like typing does.
-    element.setSelectedRange(CFRange(location: range.location + (text as NSString).length, length: 0))
+    // Leave the caret after the inserted text, like typing does (skip if the position would overflow;
+    // the insert already succeeded, so we still report success).
+    let (caret, caretOverflow) = range.location.addingReportingOverflow((text as NSString).length)
+    if !caretOverflow { element.setSelectedRange(CFRange(location: caret, length: 0)) }
     return true
 }
 
