@@ -123,8 +123,16 @@ private func launchAndAwait(identity: String, deadline: Date, timing: inout [Str
     var targetBundleId: String?
     if isPath {
         guard FileManager.default.fileExists(atPath: expanded) else { timing["error"] = "path_missing"; return nil }
+        // Only launch actual `.app` bundles. `open <path>` opens *anything* — a document or a
+        // folder — so a path identity that isn't an app would be opened as a side effect of a
+        // failed resolve. Requiring a readable bundle id also gives us a reliable target to match
+        // the launched process against below.
+        let appURL = URL(fileURLWithPath: expanded)
+        guard appURL.pathExtension.lowercased() == "app", let bundleId = Bundle(url: appURL)?.bundleIdentifier else {
+            timing["error"] = "not_an_app"; return nil
+        }
         process.arguments = [expanded]
-        targetBundleId = Bundle(url: URL(fileURLWithPath: expanded))?.bundleIdentifier
+        targetBundleId = bundleId
     } else if NSWorkspace.shared.urlForApplication(withBundleIdentifier: identity) != nil {
         process.arguments = ["-b", identity]                 // bundle id
         targetBundleId = identity
@@ -507,7 +515,9 @@ public struct ClickRefTool: Tool {
                 app.activate()
                 Thread.sleep(forTimeInterval: 0.2)
             }
-            let count = (arguments["count"] as? Int) ?? 1
+            // Clamp to the documented 1...3 range (like click_point) so a bad argument can't
+            // post millions of real clicks and wedge the host.
+            let count = min(3, max(1, (arguments["count"] as? Int) ?? 1))
             let perform: () -> Void = { click(Double(point.x), Double(point.y), count) }
             if let pid {
                 _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: perform)
