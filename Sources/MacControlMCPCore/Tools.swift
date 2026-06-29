@@ -74,8 +74,13 @@ enum Shell {
         // hands the bytes back across the queue boundary; `readDone` provides the happens-before.
         let box = DataBox()
         let readDone = DispatchSemaphore(value: 0)
+        let readHandle = pipe.fileHandleForReading
         DispatchQueue.global().async {
-            box.data = pipe.fileHandleForReading.readDataToEndOfFile()
+            // `readToEnd()` (throwing) rather than the deprecated `readDataToEndOfFile()`, which
+            // raises an *uncatchable* ObjC exception on I/O error — including when we force-close
+            // the handle below to unblock a stuck drain. A read failure degrades to empty bytes.
+            do { box.data = try readHandle.readToEnd() ?? Data() }
+            catch { box.data = Data() }
             readDone.signal()
         }
 
@@ -86,7 +91,16 @@ enum Shell {
                 exited.wait()
             }
         }
-        readDone.wait()   // child is gone → stdout write-end closed → the read returned EOF
+        // Bound the drain. The read returns only once EVERY write-end of the pipe closes, so a
+        // child that handed its stdout fd to a surviving grandchild (CoreSimulator does this) keeps
+        // it open even after the child is killed — without this timeout the wait would block
+        // forever and, in the host, hold the request lock forever. On timeout, force-close the read
+        // end to unblock the drain thread and return no bytes: reading box.data here would race the
+        // thread's later write (its happens-before is the signal we never received).
+        if readDone.wait(timeout: .now() + 5) == .timedOut {
+            do { try readHandle.close() } catch { /* best-effort unblock; nothing actionable */ }
+            return (process.terminationStatus, Data())
+        }
         return (process.terminationStatus, box.data)
     }
 }

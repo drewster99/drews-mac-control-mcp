@@ -185,9 +185,14 @@ enum CaptureSupport {
 
         let box = DataBox()
         let readDone = DispatchSemaphore(value: 0)
-        if capture {
+        let readHandle: FileHandle? = capture ? pipe.fileHandleForReading : nil
+        if let readHandle {
             DispatchQueue.global().async {
-                box.data = pipe.fileHandleForReading.readDataToEndOfFile()
+                // `readToEnd()` (throwing) rather than the deprecated `readDataToEndOfFile()`, which
+                // raises an uncatchable ObjC exception on I/O error — including when we force-close
+                // the handle below to unblock a stuck drain. A read failure degrades to empty bytes.
+                do { box.data = try readHandle.readToEnd() ?? Data() }
+                catch { box.data = Data() }
                 readDone.signal()
             }
         } else {
@@ -201,7 +206,13 @@ enum CaptureSupport {
                 exited.wait()
             }
         }
-        readDone.wait()
+        // Bound the drain: a child that handed its stdout fd to a surviving grandchild keeps the
+        // pipe's write-end open even after we kill it, so an unbounded wait could block forever. On
+        // timeout, force-close the read end to unblock the drain thread and return no bytes.
+        if readDone.wait(timeout: .now() + 5) == .timedOut {
+            do { try readHandle?.close() } catch { /* best-effort unblock; nothing actionable */ }
+            return (process.terminationStatus, Data())
+        }
         return (process.terminationStatus, box.data)
     }
 
