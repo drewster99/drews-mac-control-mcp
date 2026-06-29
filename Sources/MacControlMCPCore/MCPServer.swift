@@ -44,7 +44,7 @@ public final class MCPServer {
             return JSONRPC.responseData(id: request.id, result: [
                 "protocolVersion": version,
                 "capabilities": ["tools": [String: Any]()],
-                "serverInfo": ["name": "mac-control-mcp", "version": "0.0.1"]
+                "serverInfo": ["name": "mac-control-mcp", "version": AppVersion.marketingVersion]
             ])
 
         case "notifications/initialized", "notifications/cancelled":

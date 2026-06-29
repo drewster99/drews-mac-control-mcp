@@ -16,6 +16,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(result["protocolVersion"] as? String, "2025-06-18")
         let serverInfo = try XCTUnwrap(result["serverInfo"] as? [String: Any])
         XCTAssertEqual(serverInfo["name"] as? String, "mac-control-mcp")
+        XCTAssertEqual(serverInfo["version"] as? String, AppVersion.marketingVersion)
     }
 
     func testToolsListExposesGrantFreeTools() throws {

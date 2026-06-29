@@ -11,6 +11,10 @@ settings:
     CODE_SIGNING_REQUIRED: "NO"
     CODE_SIGN_IDENTITY: ""
     CODE_SIGNING_ALLOWED: "NO"
+    # Native-bundle version. Keep in lockstep with AppVersion.swift (the compiled-in source of
+    # truth every target reports); the "Verify version" pre-build phase fails the build on drift.
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
 
 targets:
   MacControlMCPCore:
@@ -69,6 +73,8 @@ targets:
       properties:
         CFBundleIdentifier: com.nuclearcyborg.maccontrol.host
         CFBundleName: MacControlHost
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
     settings:
@@ -108,6 +114,8 @@ targets:
       path: Generated/MacControlMCP-Info.plist
       properties:
         CFBundleName: MacControlMCP
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSMinimumSystemVersion: "14.0"
     settings:
       base:
@@ -124,6 +132,24 @@ targets:
         copy:
           destination: wrapper
           subpath: Contents/Helpers
+      - target: HostKit
+      - target: AXKit
+      - target: CaptureKit
+      - target: InputKit
+      - target: MacControlMCPCore
+    preBuildScripts:
+      - name: Verify version
+        basedOnDependencyAnalysis: false
+        script: |
+          # Fail the build if the bundle version (project.yml) and AppVersion.swift (what every
+          # component reports at runtime / over MCP) disagree — so there is one number to bump.
+          APPVER="${SRCROOT}/Sources/MacControlMCPCore/AppVersion.swift"
+          SWIFT_MARKETING=$(grep -oE 'marketingVersion = "[^"]+"' "$APPVER" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          SWIFT_BUILD=$(grep -oE 'buildNumber = "[^"]+"' "$APPVER" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$SWIFT_MARKETING" != "$MARKETING_VERSION" ] || [ "$SWIFT_BUILD" != "$CURRENT_PROJECT_VERSION" ]; then
+            echo "error: version drift — AppVersion.swift is $SWIFT_MARKETING ($SWIFT_BUILD) but project.yml MARKETING_VERSION/CURRENT_PROJECT_VERSION is $MARKETING_VERSION ($CURRENT_PROJECT_VERSION). Set both to the same value."
+            exit 1
+          fi
     postCompileScripts:
       - name: Copy LaunchAgent plist
         outputFiles:

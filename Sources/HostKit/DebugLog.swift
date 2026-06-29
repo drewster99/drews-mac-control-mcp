@@ -17,6 +17,7 @@
 //
 
 import Foundation
+import MacControlMCPCore
 
 public enum DebugLog {
     private static let queue = DispatchQueue(label: "com.nuclearcyborg.maccontrol.debuglog")
@@ -51,27 +52,15 @@ public enum DebugLog {
     }()
 
     /// A one-line build identity for the *current* process: marketing version, build number, and
-    /// the running executable's modification time. The binary mtime is the reliable discriminator —
-    /// it changes on every recompile/re-sign — so a `launch` line tells you exactly which build came
-    /// up (e.g. confirming a restarted host is the new one, not a stale on-demand instance).
+    /// the running executable's modification time. The version + build come from `AppVersion` (the
+    /// compiled-in source of truth), so the CLI relay/stdio targets — which have no usable
+    /// Info.plist — report real numbers instead of `?`. The binary mtime is the reliable
+    /// discriminator: it changes on every recompile/re-sign, so a `launch` line tells you exactly
+    /// which build came up (e.g. confirming a restarted host is the new one, not a stale on-demand
+    /// instance).
     public static func buildIdentity() -> String {
-        let info = Bundle.main.infoDictionary
-        let version = (info?["CFBundleShortVersionString"] as? String) ?? "?"
-        let build = (info?["CFBundleVersion"] as? String) ?? "?"
-        var binaryBuilt = "unknown"
-        if let path = Bundle.main.executablePath {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            do {
-                let attributes = try FileManager.default.attributesOfItem(atPath: path)
-                if let modified = attributes[.modificationDate] as? Date {
-                    binaryBuilt = formatter.string(from: modified)
-                }
-            } catch {
-                // Executable mtime unavailable — leave "unknown".
-            }
-        }
-        return "v\(version) build \(build) binary \(binaryBuilt)"
+        let info = BuildInfo.current
+        return "v\(info.marketingVersion) build \(info.buildNumber) binary \(info.binaryBuiltISO8601 ?? "unknown")"
     }
 
     /// A lifecycle event: `launch`, `connect`, `disconnect`, … `message` is an optional detail line.

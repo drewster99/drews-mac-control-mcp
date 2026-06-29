@@ -175,6 +175,19 @@ It records launch / connect / disconnect plus every request and response in full
 
 ---
 
+## Versioning
+
+There is one version to bump, declared in two files that the build keeps in lockstep:
+
+- `Sources/MacControlMCPCore/AppVersion.swift` — the compiled-in source of truth every component reports (the GUI's "Version" line, the MCP `initialize` `serverInfo.version`, and the launch-log build identity).
+- `project.yml` — `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION`, which feed the native bundles' `CFBundleShortVersionString` / `CFBundleVersion`.
+
+Set both to the same value, then re-run `xcodegen generate`. A "Verify version" pre-build phase fails the build if the two disagree, so they can't silently drift.
+
+The app's setup window shows its own version and, by querying the *running* host over XPC, the live agent's version — flagging a mismatch (e.g. a stale host left registered by an older install). The agent-version check needs the signed build to satisfy the host's caller requirement; an unsigned dev build will show the agent as "not reachable".
+
+---
+
 ## Known limitations
 
 - **Accessibility is per-Space.** AX enumerates windows on the current Mission Control Space; an app whose windows are on another Space (or with the display asleep) can report zero windows even though they exist.

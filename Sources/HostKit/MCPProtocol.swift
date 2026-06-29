@@ -27,4 +27,9 @@ public protocol MCPHostProtocol {
     /// The host's own TCC grant status as JSON `{accessibility, screenRecording}` — used by
     /// the GUI to show the *host's* grants (not the GUI's). Triggering the prompt is separate.
     func permissions(withReply reply: @escaping (String) -> Void)
+
+    /// The *running* host's `BuildInfo` as JSON (see `BuildInfo.jsonString()`) — used by the GUI
+    /// to compare the live agent's version against its own and flag drift (e.g. a stale on-demand
+    /// host launchd booted from an older install).
+    func buildInfo(withReply reply: @escaping (String) -> Void)
 }

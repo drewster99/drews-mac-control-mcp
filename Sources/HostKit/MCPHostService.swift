@@ -70,4 +70,8 @@ public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendabl
         }
         reply(json)
     }
+
+    public func buildInfo(withReply reply: @escaping (String) -> Void) {
+        reply(BuildInfo.current.jsonString())
+    }
 }

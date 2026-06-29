@@ -9,6 +9,8 @@
 //
 
 import AppKit
+import HostKit
+import MacControlMCPCore
 import ServiceManagement
 import SwiftUI
 
@@ -63,10 +65,32 @@ enum HostLifecycle {
     }
 }
 
+/// The result of asking the *live* host (the "agent") for its version and comparing it to this
+/// app's (the "client"). The comparison is over the running host reached via XPC — not the host
+/// bundled inside this app — so it catches a stale on-demand host launchd booted from an older
+/// install, which is the drift that actually bites.
+enum AgentVersion {
+    case unknown
+    case checking
+    /// Live host runs the same version as this app (and, where determinable, the same binary).
+    case matched(BuildInfo)
+    /// Live host runs a different version/build than this app.
+    case versionMismatch(client: BuildInfo, agent: BuildInfo)
+    /// Same version as this app, but a *different build of the host binary* is running than the one
+    /// this app ships — i.e. a stale host from another install. Re-registering points launchd here.
+    case staleBuild(agent: BuildInfo)
+    /// No host answered (not registered/enabled, or it failed to launch).
+    case unreachable(String)
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var agentStatus = "—"
     @Published var lastMessage = ""
+    @Published var agentVersion: AgentVersion = .unknown
+
+    /// This app's own version — the "client" side of the drift check.
+    let clientVersion = BuildInfo.current
 
     /// SMAppService only registers a LaunchAgent for a SIGNED app in a stable location. The
     /// unsigned Xcode/DerivedData build fails to register (silently, before this fix) — so warn
@@ -99,6 +123,82 @@ final class AppModel: ObservableObject {
 
     func refresh() {
         agentStatus = statusName(agent.status)
+        checkAgentVersion()
+    }
+
+    /// Open a short-lived XPC connection to the live host, ask its `BuildInfo`, and classify the
+    /// result against this app. Connecting boots the host on demand (launchd), so this reflects the
+    /// binary that would actually serve MCP calls. The connection is torn down as soon as we answer.
+    func checkAgentVersion() {
+        agentVersion = .checking
+        let connection = NSXPCConnection(machServiceName: mcpMachServiceName, options: [])
+        connection.remoteObjectInterface = NSXPCInterface(with: MCPHostProtocol.self)
+        connection.setCodeSigningRequirement(mcpHostRequirement)
+        connection.resume()
+
+        let proxy = connection.remoteObjectProxyWithErrorHandler { [weak self] error in
+            Task { @MainActor in
+                self?.settleAgentVersion(.unreachable(error.localizedDescription), connection: connection)
+            }
+        } as? MCPHostProtocol
+
+        guard let proxy else {
+            settleAgentVersion(.unreachable("could not create host proxy"), connection: connection)
+            return
+        }
+
+        proxy.buildInfo { [weak self] json in
+            Task { @MainActor in
+                guard let self else { connection.invalidate(); return }
+                guard let agent = BuildInfo.decoded(fromJSON: json) else {
+                    self.settleAgentVersion(.unreachable("malformed agent version"), connection: connection)
+                    return
+                }
+                self.settleAgentVersion(self.classify(agent: agent), connection: connection)
+            }
+        }
+    }
+
+    /// First-write-wins: the reply block and the error handler can both fire (a late reply after an
+    /// invalidation, say), so once we have a non-`checking` answer we keep it and ignore the rest.
+    private func settleAgentVersion(_ result: AgentVersion, connection: NSXPCConnection) {
+        connection.invalidate()
+        if case .checking = agentVersion {
+            agentVersion = result
+        } else if case .unknown = agentVersion {
+            agentVersion = result
+        }
+    }
+
+    private func classify(agent: BuildInfo) -> AgentVersion {
+        if !clientVersion.hasSameVersion(as: agent) {
+            return .versionMismatch(client: clientVersion, agent: agent)
+        }
+        // Same version: confirm the running host is the binary this app ships, not a stale copy
+        // from another install. Equal mtimes mean it's literally the same file (the registered
+        // LaunchAgent points at our nested host); a mismatch means a different build is live.
+        if let embedded = embeddedHostBinaryDate(),
+           let live = agent.binaryBuiltISO8601,
+           embedded != live {
+            return .staleBuild(agent: agent)
+        }
+        return .matched(agent)
+    }
+
+    /// ISO-8601 mtime of the host binary this app bundles, or `nil` if it can't be read (e.g. a
+    /// dev build run outside a packaged bundle). Same format as `BuildInfo.binaryBuiltISO8601`.
+    private func embeddedHostBinaryDate() -> String? {
+        let executable = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/MacControlHost.app/Contents/MacOS/MacControlHost")
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: executable.path)
+            guard let modified = attributes[.modificationDate] as? Date else { return nil }
+            return formatter.string(from: modified)
+        } catch {
+            return nil
+        }
     }
 
     func register() {
@@ -159,10 +259,42 @@ final class AppModel: ObservableObject {
 struct ContentView: View {
     @StateObject private var model = AppModel()
 
+    private var agentVersionText: String {
+        switch model.agentVersion {
+        case .unknown:
+            return "Agent: —"
+        case .checking:
+            return "Agent: checking…"
+        case let .matched(agent):
+            return "Agent: v\(agent.displayString) ✓ matches this app"
+        case let .versionMismatch(client, agent):
+            return "Agent: v\(agent.displayString) ⚠︎ differs from this app (v\(client.displayString)) — re-register to update"
+        case .staleBuild:
+            return "Agent: same version but a different (stale) build is running — re-register to update"
+        case let .unreachable(reason):
+            return "Agent: not reachable (\(reason)) — register the host below"
+        }
+    }
+
+    private var agentVersionColor: Color {
+        switch model.agentVersion {
+        case .matched: return .secondary
+        case .versionMismatch, .staleBuild: return .orange
+        case .unreachable: return .secondary
+        case .unknown, .checking: return .secondary
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("MacControlMCP")
-                .font(.largeTitle).bold()
+            HStack(alignment: .firstTextBaseline) {
+                Text("MacControlMCP")
+                    .font(.largeTitle).bold()
+                Spacer()
+                Text("Version \(model.clientVersion.displayString)")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
             Text("An MCP server for driving macOS apps and the iOS Simulator.")
                 .foregroundStyle(.secondary)
 
@@ -173,6 +305,7 @@ struct ContentView: View {
                             .font(.callout).foregroundStyle(.orange)
                     }
                     Text("Status: \(model.agentStatus)")
+                    Text(agentVersionText).foregroundStyle(agentVersionColor)
                     if !model.lastMessage.isEmpty {
                         Text(model.lastMessage).font(.callout).foregroundStyle(.red)
                     }
