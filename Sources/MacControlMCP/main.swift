@@ -22,13 +22,20 @@ import HostKit
 _ = NSWorkspace.shared
 
 Thread.detachNewThread {
+    // Ignore SIGPIPE so a client that closes stdout makes the write below throw a catchable error
+    // (ending the loop) rather than killing the process with a signal.
+    signal(SIGPIPE, SIG_IGN)
     let server = makeFullServer()
     let stdout = FileHandle.standardOutput
     while let line = readLine(strippingNewline: true) {
         if line.isEmpty { continue }
         guard let response = server.handleLine(line) else { continue }
-        stdout.write(response)
-        stdout.write(Data("\n".utf8))
+        do {
+            try stdout.write(contentsOf: response)
+            try stdout.write(contentsOf: Data("\n".utf8))
+        } catch {
+            break   // client closed stdout — nothing left to write to
+        }
     }
     exit(0)
 }

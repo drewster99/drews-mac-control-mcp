@@ -117,6 +117,10 @@ func bootstrapHost() {
 /// trap (crash) on every callback, plus a main-thread deadlock against the semaphore wait below.
 /// A nonisolated context keeps those closures non-isolated, so XPC can call them off-main safely.
 func runRelay() {
+    // Ignore SIGPIPE: if the MCP client closes its read end while we're mid-write, writing to the
+    // pipe would otherwise deliver SIGPIPE and kill the relay before the throwing write below can
+    // surface a catchable error. With it ignored, the write throws and we exit the loop cleanly.
+    signal(SIGPIPE, SIG_IGN)
     DebugLog.event("launch", "relay \(DebugLog.buildIdentity()) argv=\(CommandLine.arguments.joined(separator: " "))")
     let stdout = FileHandle.standardOutput
     var connection = makeConnection()
@@ -150,7 +154,10 @@ func runRelay() {
             let (response, failed) = box.outcome()
             if !failed {
                 if let response {
-                    stdout.write(Data((response + "\n").utf8))
+                    // A failed stdout write means the client closed its end — there's no one left
+                    // to reply to, so stop the loop instead of crashing or spinning.
+                    do { try stdout.write(contentsOf: Data((response + "\n").utf8)) }
+                    catch { DebugLog.event("disconnect", "stdout write failed: \(error)"); return }
                 }
                 DebugLog.response(response)
                 responded = true
@@ -189,7 +196,8 @@ func runRelay() {
             } catch {
                 fallback = #"{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"host unavailable"}}"#
             }
-            stdout.write(Data((fallback + "\n").utf8))
+            do { try stdout.write(contentsOf: Data((fallback + "\n").utf8)) }
+            catch { DebugLog.event("disconnect", "stdout write failed: \(error)"); return }
             DebugLog.response(fallback)
         }
     }
