@@ -32,13 +32,17 @@ public enum AXSnapshot {
         maxDepth: Int = 3,
         refFor: (AXElement) -> String
     ) -> ElementNode {
+        // Guard against malformed AX trees (cycles / an element re-listed under multiple parents),
+        // matching ControlWalker: without it a cyclic subtree re-walks under every parent, inflating
+        // IPC and producing duplicate refs in the snapshot/diff.
+        var visited: Set<AXElement> = [root]
         func visit(_ element: AXElement, depth: Int) -> ElementNode {
             let ref = refFor(element)
             // One bulk IPC read for role/subrole/identifier/title/value/frame/children; `actions`
             // and `settable` use different AX APIs so they stay separate.
             let attributes = element.snapshotAttributes()
             let children: [ElementNode] = depth < maxDepth
-                ? attributes.children.map { visit($0, depth: depth + 1) }
+                ? attributes.children.filter { visited.insert($0).inserted }.map { visit($0, depth: depth + 1) }
                 : []
             return ElementNode(
                 ref: ref,
@@ -61,12 +65,13 @@ public enum AXSnapshot {
     /// poll to detect change without allocating refs. Stable within a process run.
     public static func structuralSignature(of root: AXElement, maxDepth: Int) -> Int {
         var hasher = Hasher()
+        var visited: Set<AXElement> = [root]
         func visit(_ element: AXElement, depth: Int) {
             hasher.combine(element.role ?? "")
             let children = element.children
             hasher.combine(children.count)
             if depth < maxDepth {
-                for child in children { visit(child, depth: depth + 1) }
+                for child in children where visited.insert(child).inserted { visit(child, depth: depth + 1) }
             }
         }
         visit(root, depth: 0)
@@ -79,13 +84,14 @@ public enum AXSnapshot {
     /// changing value (clock/progress) can't prevent settling.
     public static func changeSignature(of root: AXElement, maxDepth: Int) -> Int {
         var hasher = Hasher()
+        var visited: Set<AXElement> = [root]
         func visit(_ element: AXElement, depth: Int) {
             hasher.combine(element.role ?? "")
             hasher.combine(element.value ?? "")
             let children = element.children
             hasher.combine(children.count)
             if depth < maxDepth {
-                for child in children { visit(child, depth: depth + 1) }
+                for child in children where visited.insert(child).inserted { visit(child, depth: depth + 1) }
             }
         }
         visit(root, depth: 0)
