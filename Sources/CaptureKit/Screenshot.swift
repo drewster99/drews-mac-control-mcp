@@ -57,6 +57,7 @@ public struct ScreenshotTool: Tool {
     // MARK: - Screen (ScreenCaptureKit)
 
     private func captureScreen(maxDimension: Int?) -> String {
+        CaptureSupport.pruneOldScreenshots()
         do {
             let image = try CaptureSupport.captureMainDisplay(maxDimension: maxDimension)
             let path = CaptureSupport.screenshotPath(prefix: "screen")
@@ -70,6 +71,7 @@ public struct ScreenshotTool: Tool {
     // MARK: - Simulator (simctl)
 
     private func captureSimulator(requestedUDID: String?) -> String {
+        CaptureSupport.pruneOldScreenshots()
         let udid: String
         if let requestedUDID, !requestedUDID.isEmpty {
             udid = requestedUDID
@@ -98,7 +100,7 @@ enum CaptureSupport {
     static func captureMainDisplay(maxDimension: Int?) throws -> CGImage {
         let box = ResultBox()
         let semaphore = DispatchSemaphore(value: 0)
-        Task {
+        let task = Task {
             do {
                 let content = try await SCShareableContent.current
                 guard let display = content.displays.first else { throw CaptureError.noDisplay }
@@ -120,8 +122,9 @@ enum CaptureSupport {
             semaphore.signal()
         }
         // Bounded wait — a hung capture path must not block the host (which serializes
-        // requests) indefinitely.
+        // requests) indefinitely. Cancel the abandoned task so it can't keep doing work.
         if semaphore.wait(timeout: .now() + 10) == .timedOut {
+            task.cancel()
             throw CaptureError.captureFailed
         }
         if let image = box.image { return image }
@@ -163,28 +166,77 @@ enum CaptureSupport {
         catch { return nil }
     }
 
-    static func runProcessStatus(_ launchPath: String, _ arguments: [String]) -> Int32 {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: launchPath)
-        process.arguments = arguments
-        // Status-only: discard output to null devices so a full pipe can't deadlock the child.
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return -1 }
-        process.waitUntilExit()
-        return process.terminationStatus
-    }
+    private final class DataBox: @unchecked Sendable { var data = Data() }
 
-    static func shellOutput(_ launchPath: String, _ arguments: [String]) -> String {
+    /// Run a child (`simctl`) with a hard deadline so a wedged CoreSimulator can't block the host.
+    /// Output is drained off-thread; on timeout the child is terminated then SIGKILLed.
+    private static func runProcess(_ launchPath: String, _ arguments: [String],
+                                   capture: Bool, timeout: TimeInterval = 30) -> (status: Int32, data: Data) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
         let pipe = Pipe()
-        process.standardOutput = pipe
+        process.standardOutput = capture ? pipe : FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice   // discard — undrained stderr pipe can deadlock
-        do { try process.run() } catch { return "" }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
+
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return (-1, Data()) }
+
+        let box = DataBox()
+        let readDone = DispatchSemaphore(value: 0)
+        if capture {
+            DispatchQueue.global().async {
+                box.data = pipe.fileHandleForReading.readDataToEndOfFile()
+                readDone.signal()
+            }
+        } else {
+            readDone.signal()
+        }
+
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            if exited.wait(timeout: .now() + 2) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                exited.wait()
+            }
+        }
+        readDone.wait()
+        return (process.terminationStatus, box.data)
+    }
+
+    static func runProcessStatus(_ launchPath: String, _ arguments: [String]) -> Int32 {
+        runProcess(launchPath, arguments, capture: false).status
+    }
+
+    static func shellOutput(_ launchPath: String, _ arguments: [String]) -> String {
+        String(decoding: runProcess(launchPath, arguments, capture: true).data, as: UTF8.self)
+    }
+
+    /// Best-effort cleanup of stale screenshot PNGs this server wrote into the temp dir, so
+    /// captures (which can contain sensitive screen content) don't accumulate there. Called at the
+    /// start of each capture; failures are ignored.
+    static func pruneOldScreenshots(maxAge: TimeInterval = 3600) {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        let fileManager = FileManager.default
+        let items: [URL]
+        do {
+            items = try fileManager.contentsOfDirectory(at: dir,
+                                                        includingPropertiesForKeys: [.contentModificationDateKey])
+        } catch { return }
+        let cutoff = Date().addingTimeInterval(-maxAge)
+        for url in items {
+            let name = url.lastPathComponent
+            guard url.pathExtension == "png",
+                  name.hasPrefix("screen_") || name.hasPrefix("simulator_") else { continue }
+            do {
+                let values = try url.resourceValues(forKeys: [.contentModificationDateKey])
+                if let modified = values.contentModificationDate, modified < cutoff {
+                    try fileManager.removeItem(at: url)
+                }
+            } catch {
+                // Best-effort; skip anything we can't stat or remove.
+            }
+        }
     }
 }

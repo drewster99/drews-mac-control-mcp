@@ -46,8 +46,10 @@ public enum SyntheticInput {
 
     public static func scroll(dx: Int, dy: Int) {
         let source = CGEventSource(stateID: .hidSystemState)
+        // Clamp rather than narrow: an out-of-Int32-range delta would otherwise trap and abort
+        // the host. A saturated scroll delta is harmless.
         if let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2,
-                               wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0) {
+                               wheel1: Int32(clamping: dy), wheel2: Int32(clamping: dx), wheel3: 0) {
             event.post(tap: .cghidEventTap)
         }
     }
@@ -108,6 +110,9 @@ public enum SyntheticInput {
     public static func paste(_ text: String) {
         let pasteboard = NSPasteboard.general
         // Snapshot ALL items + types so rich clipboard content is restored, not just strings.
+        // NOTE: `data(forType:)` materializes lazy data providers (those are preserved), but
+        // promise-backed entries (e.g. file promises) have no eager bytes and cannot be
+        // round-tripped once we clearContents — they are dropped from the restored clipboard.
         let saved: [NSPasteboardItem] = (pasteboard.pasteboardItems ?? []).map { item in
             let copy = NSPasteboardItem()
             for type in item.types {

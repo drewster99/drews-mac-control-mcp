@@ -188,7 +188,16 @@ public enum ControlWalker {
             index += 1
             let (childElements, hidden) = childrenToWalk(node, isRoot: node === rootBuild, windowFilter: windowFilter)
             node.hidden = hidden
-            for childElement in childElements where visited.insert(childElement).inserted {
+            for (offset, childElement) in childElements.enumerated() {
+                // Re-check the budget between a node's child reads — `draft` is the heavy per-node
+                // AX cost, so a wide node dequeued just before the deadline could otherwise overrun
+                // it by its whole fan-out. Advertise the children we didn't reach as hidden.
+                if Date() >= deadline {
+                    let remaining = childElements.count - offset
+                    if remaining > 0 { node.hidden = .known(remaining) }
+                    break
+                }
+                guard visited.insert(childElement).inserted else { continue }
                 let child = draft(childElement, registry: registry, pid: pid)
                 node.children.append(child)
                 queue.append(child)

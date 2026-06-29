@@ -4,8 +4,8 @@
 //
 //  The §6 hybrid settle, live: snapshot → act → poll a depth-limited structural signature
 //  until it stabilizes (observer-independent, so it works for Electron/web/simulator) →
-//  re-snapshot and diff. Reuses the unit-tested Quiescence + Diff. The action closure is
-//  caller-supplied; for read-only "settle on nothing" it's a no-op.
+//  re-snapshot and diff. Reuses QuiescenceConfig + Diff. The action closure is caller-supplied;
+//  for read-only "settle on nothing" it's a no-op.
 //
 
 import ApplicationServices
@@ -38,6 +38,11 @@ public final class SettleEngine {
         app.setMessagingTimeout(5)
 
         let before = session.snapshot(pid: pid, maxDepth: maxDepth)
+
+        // Sample the Phase-1 baseline BEFORE acting. If we sampled it after, an instantaneous or
+        // synchronous effect would already be reflected in the baseline, so no later poll would
+        // differ and we'd burn the entire firstChangeMs window before declaring quiet.
+        let changeSignature = AXSnapshot.changeSignature(of: app, maxDepth: maxDepth)
         action()
 
         let start = nowMs()
@@ -46,7 +51,6 @@ public final class SettleEngine {
         // Phase 1 — wait up to firstChangeMs for the action's effect to BEGIN. Detect with a
         // value-inclusive signature so value-only effects (typing, a field update) register
         // immediately instead of waiting out the whole window.
-        let changeSignature = AXSnapshot.changeSignature(of: app, maxDepth: maxDepth)
         var changed = false
         while nowMs() - start < config.firstChangeMs {
             Thread.sleep(forTimeInterval: pollSeconds)

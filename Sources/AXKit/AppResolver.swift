@@ -9,6 +9,7 @@
 
 import AppKit
 import ApplicationServices
+import CoreGraphics
 import Foundation
 
 public enum AppResolver {
@@ -29,6 +30,20 @@ public enum AppResolver {
         let app = AXElement.application(pid: pid)
         app.setMessagingTimeout(2)
         return app.windows.compactMap { $0.title }.filter { !$0.isEmpty }
+    }
+
+    /// PIDs that currently own an on-screen window, from the local CoreGraphics window list (a
+    /// single sub-millisecond call). Used to prefilter the slow tier-4 AX scan so we never
+    /// message background daemons/agents that have no window and may not answer AX at all.
+    private static func onScreenWindowOwnerPIDs() -> Set<pid_t> {
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        var pids = Set<pid_t>()
+        for window in info {
+            if let owner = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value {
+                pids.insert(owner)
+            }
+        }
+        return pids
     }
 
     /// Whether an app owns a window whose title exactly (case-sensitively) matches `title`.
@@ -79,10 +94,14 @@ public enum AppResolver {
         if preferred.count == 1 { return resolved(preferred[0]) }
         if preferred.count > 1 { return .ambiguous(preferred.map(candidate)) }
 
-        // 4. window-title fallback — case-insensitive substring (>1 → ambiguous). Slow (per-app AX).
+        // 4. window-title fallback — case-insensitive substring (>1 → ambiguous). Restrict the
+        // per-app AX scan to apps that actually own an on-screen window (cheap CGWindowList
+        // prefilter), so unresponsive background processes can't each cost the full 2s timeout.
         guard includeWindowTitle else { return .noMatch }
         let needle = identity.lowercased()
+        let onScreenPIDs = onScreenWindowOwnerPIDs()
         let matched = apps.filter { app in
+            onScreenPIDs.contains(app.processIdentifier) &&
             windowTitles(pid: app.processIdentifier).contains { $0.lowercased().contains(needle) }
         }
         if matched.count == 1 { return resolved(matched[0]) }

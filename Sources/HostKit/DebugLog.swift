@@ -9,7 +9,11 @@
 //  single entry. Logging never throws into the caller — IO failures are swallowed, since a
 //  broken log must not break the relay or host.
 //
-//  Always on. `MACCONTROL_LOG=0` disables it; `MACCONTROL_LOG_PATH=/abs/file` redirects it.
+//  Lifecycle events (launch/connect/disconnect/timeout) are always on; `MACCONTROL_LOG=0`
+//  disables logging entirely and `MACCONTROL_LOG_PATH=/abs/file` redirects it. The verbatim
+//  JSON-RPC request/response BODIES can carry typed text, pasted secrets, clipboard contents,
+//  and scraped AX values, so they are suppressed unless `MACCONTROL_LOG_BODIES=1` is set. The
+//  log file is created 0600 (owner-only).
 //
 
 import Foundation
@@ -21,6 +25,11 @@ public enum DebugLog {
     private static let capBytes: UInt64 = 64 * 1024 * 1024
 
     private static let enabled: Bool = ProcessInfo.processInfo.environment["MACCONTROL_LOG"] != "0"
+
+    /// Verbatim request/response payloads are opt-in (they may contain secrets); default off.
+    private static let logBodies: Bool = ProcessInfo.processInfo.environment["MACCONTROL_LOG_BODIES"] == "1"
+
+    private static let suppressedBody = "<payload suppressed; set MACCONTROL_LOG_BODIES=1 to log it>"
 
     private static let tag: String =
         "\(ProcessInfo.processInfo.processName):\(ProcessInfo.processInfo.processIdentifier)"
@@ -70,14 +79,14 @@ public enum DebugLog {
         write(kind: category.uppercased(), body: message)
     }
 
-    /// A full inbound JSON-RPC request line, verbatim.
+    /// A full inbound JSON-RPC request line, verbatim — only when `MACCONTROL_LOG_BODIES=1`.
     public static func request(_ line: String) {
-        write(kind: "REQUEST", body: line)
+        write(kind: "REQUEST", body: logBodies ? line : suppressedBody)
     }
 
-    /// A full outbound JSON-RPC response, verbatim (`<nil>` when the host returned nothing).
+    /// A full outbound JSON-RPC response, verbatim — only when `MACCONTROL_LOG_BODIES=1`.
     public static func response(_ line: String?) {
-        write(kind: "RESPONSE", body: line ?? "<nil>")
+        write(kind: "RESPONSE", body: logBodies ? (line ?? "<nil>") : suppressedBody)
     }
 
     private static func write(kind: String, body: String) {
@@ -89,21 +98,36 @@ public enum DebugLog {
         }
     }
 
-    /// Create-if-needed, rotate-if-large, then append under an exclusive advisory lock.
+    // A stable sidecar lock file (never rotated, unlike the log itself), opened once per process.
+    // The cross-process flock must guard rotation AND append together; locking the log fd can't,
+    // because rotation renames the very file that descriptor points at. Only touched inside
+    // `queue.sync`, so the lazy assignment never races within a process.
+    nonisolated(unsafe) private static var lockFD: Int32 = -1
+
+    private static func acquireLockFD() -> Int32 {
+        if lockFD >= 0 { return lockFD }
+        let lockPath = fileURL.appendingPathExtension("lock").path
+        lockFD = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        return lockFD
+    }
+
+    /// Hold the cross-process lock across rotate + create + append so the two processes can't race
+    /// each other's rotation (which would silently drop the rotated generation).
     private static func append(_ data: Data) {
         let fileManager = FileManager.default
         do {
             try fileManager.createDirectory(at: fileURL.deletingLastPathComponent(),
                                             withIntermediateDirectories: true)
+            let descriptor = acquireLockFD()
+            if descriptor >= 0 { flock(descriptor, LOCK_EX) }
+            defer { if descriptor >= 0 { flock(descriptor, LOCK_UN) } }
             rotateIfNeeded(fileManager)
             if !fileManager.fileExists(atPath: fileURL.path) {
-                fileManager.createFile(atPath: fileURL.path, contents: nil)
+                fileManager.createFile(atPath: fileURL.path, contents: nil,
+                                       attributes: [.posixPermissions: 0o600])
             }
             let handle = try FileHandle(forWritingTo: fileURL)
             defer { do { try handle.close() } catch { /* nothing actionable */ } }
-            let descriptor = handle.fileDescriptor
-            flock(descriptor, LOCK_EX)
-            defer { flock(descriptor, LOCK_UN) }
             try handle.seekToEnd()
             try handle.write(contentsOf: data)
         } catch {

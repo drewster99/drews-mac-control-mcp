@@ -642,9 +642,15 @@ public struct TypeTool: Tool {
                 type(text, paste)
             }
             var usedVia = paste ? "paste" : "keys"
-            if canVerify, element.value == before {        // keys inserted nothing → paste instead
-                type(text, true)
-                Thread.sleep(forTimeInterval: 0.12)
+            // Only treat keys as a no-op when we actually READ a baseline value. If the element
+            // exposes no readable AXValue, `before` is nil and `nil == nil` would falsely fire the
+            // paste — double-typing the text. Require a real baseline, and settle the paste too.
+            if canVerify, let baseline = before, element.value == baseline {
+                if let pid = element.pid {
+                    _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { type(text, true) })
+                } else {
+                    type(text, true)
+                }
                 usedVia = "paste"
             }
             var base: [String: Any] = ["success": true, "ref": ref, "chars": text.count,

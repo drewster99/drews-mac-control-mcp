@@ -26,6 +26,8 @@ public enum KeyMap {
         "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "=": 24, "9": 25, "7": 26,
         "-": 27, "8": 28, "0": 29, "o": 31, "u": 32, "i": 34, "p": 35,
         "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
+        // ANSI punctuation — so common chords like cmd+, (Preferences) and cmd+. (Cancel) parse.
+        "]": 30, "'": 39, ";": 41, "\\": 42, ",": 43, "/": 44, ".": 47, "`": 50, "[": 33,
         "return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51, "backspace": 51,
         "escape": 53, "esc": 53, "left": 123, "right": 124, "down": 125, "up": 126,
         "home": 115, "end": 119, "pageup": 116, "pagedown": 121, "forwarddelete": 117,

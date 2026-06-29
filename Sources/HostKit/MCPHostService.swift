@@ -54,7 +54,20 @@ public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendabl
         reply(response)
     }
 
+    private struct PermissionsStatus: Encodable {
+        let accessibility: Bool
+        let screenRecording: Bool
+    }
+
     public func permissions(withReply reply: @escaping (String) -> Void) {
-        reply("{\"accessibility\":\(AXIsProcessTrusted()),\"screenRecording\":\(CGPreflightScreenCaptureAccess())}")
+        let status = PermissionsStatus(accessibility: AXIsProcessTrusted(),
+                                       screenRecording: CGPreflightScreenCaptureAccess())
+        let json: String
+        do {
+            json = String(decoding: try JSONEncoder().encode(status), as: UTF8.self)
+        } catch {
+            json = #"{"accessibility":false,"screenRecording":false}"#
+        }
+        reply(json)
     }
 }

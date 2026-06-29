@@ -5,7 +5,8 @@
 //  The AX → ElementNode bridge: walks a live AXElement subtree (depth-capped) into the
 //  Sendable snapshot model that MacControlMCPCore's outline/diff/locator consume, and
 //  returns the ref→AXElement handle map the host keeps for later reads/actions (§4).
-//  Call inside AXRunner.run — every property read here is a cross-process AX call.
+//  Every property read here is a cross-process AX call, so per-node fields are read in one bulk
+//  `snapshotAttributes()` round-trip rather than one IPC per attribute.
 //
 
 import ApplicationServices
@@ -33,17 +34,20 @@ public enum AXSnapshot {
     ) -> ElementNode {
         func visit(_ element: AXElement, depth: Int) -> ElementNode {
             let ref = refFor(element)
+            // One bulk IPC read for role/subrole/identifier/title/value/frame/children; `actions`
+            // and `settable` use different AX APIs so they stay separate.
+            let attributes = element.snapshotAttributes()
             let children: [ElementNode] = depth < maxDepth
-                ? element.children.map { visit($0, depth: depth + 1) }
+                ? attributes.children.map { visit($0, depth: depth + 1) }
                 : []
             return ElementNode(
                 ref: ref,
-                role: element.role ?? "AXUnknown",
-                subrole: element.subrole,
-                identifier: element.identifier,
-                title: element.title,
-                value: element.value,
-                frame: element.frame,
+                role: attributes.role ?? "AXUnknown",
+                subrole: attributes.subrole,
+                identifier: attributes.identifier,
+                title: attributes.title,
+                value: attributes.value,
+                frame: attributes.frame,
                 actions: element.actions,
                 settable: element.isValueSettable,
                 children: children

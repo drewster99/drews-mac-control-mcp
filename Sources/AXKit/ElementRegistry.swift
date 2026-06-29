@@ -30,6 +30,13 @@ public final class ElementRegistry {
     private var controlTrees: [pid_t: ControlNode] = [:]
     private var controlParents: [String: String] = [:]
 
+    // Pruning throttle. The isAlive sweep is a per-handle cross-process AX call, so we both
+    // rate-limit it (`lastPruneAt`) and raise the trigger threshold when a sweep reclaims little
+    // (a mostly-live table), to avoid re-paying the full scan on every snapshot.
+    private let pruneFloor = 4000
+    private var pruneThreshold = 4000
+    private var lastPruneAt = Date.distantPast
+
     public init() {}
 
     public struct Match: Sendable {
@@ -65,7 +72,13 @@ public final class ElementRegistry {
     /// dead elements + their identity-map entries, and snapshots for exited pids. The
     /// (expensive) isAlive sweep is only paid once the table is actually large.
     private func pruneDeadHandlesIfLarge() {
-        guard storage.count > 4000 else { return }
+        // Reset a raised threshold once the table has shrunk back to the floor on its own,
+        // otherwise the hysteresis below would ratchet it permanently upward.
+        if storage.count <= pruneFloor { pruneThreshold = pruneFloor }
+        guard storage.count > pruneThreshold,
+              Date().timeIntervalSince(lastPruneAt) > 30 else { return }
+        lastPruneAt = Date()
+        let before = storage.count
         // Iterate a SNAPSHOT (filter makes a new dictionary) so we never mutate `storage`
         // while iterating it.
         for (ref, stored) in storage.filter({ !$0.value.element.isAlive }) {
@@ -73,6 +86,9 @@ public final class ElementRegistry {
             controlParents[ref] = nil
             storage[ref] = nil
         }
+        // If the sweep reclaimed less than 10%, the table is mostly live — back off so the next
+        // snapshot doesn't immediately re-pay the full cross-process scan.
+        if storage.count > before - (before / 10) { pruneThreshold = storage.count + 1000 }
         lastSnapshots = lastSnapshots.filter { kill($0.key, 0) == 0 }
         controlTrees = controlTrees.filter { kill($0.key, 0) == 0 }
     }
@@ -139,8 +155,16 @@ public final class ElementRegistry {
 
     // MARK: - control_app tree persistence
 
-    /// Store the freshly-walked tree for a pid and merge its parent links.
+    /// Store the freshly-walked tree for a pid and merge its parent links, dropping links for
+    /// refs that the previous tree had but the new one doesn't (so the map can't accumulate
+    /// stale entries across re-walks).
     public func storeControlTree(_ tree: ControlNode, pid: pid_t) {
+        let newRefs = Set(ControlTree.parentLinks(of: tree).map { $0.0 })
+        if let old = controlTrees[pid] {
+            for (child, _) in ControlTree.parentLinks(of: old) where !newRefs.contains(child) {
+                controlParents[child] = nil
+            }
+        }
         controlTrees[pid] = tree
         for (child, parent) in ControlTree.parentLinks(of: tree) { controlParents[child] = parent }
     }
@@ -154,6 +178,13 @@ public final class ElementRegistry {
     /// Splice an updated subtree for `ref` back into its app's stored tree.
     public func updateControlTree(ref: String, subtree: ControlNode) {
         guard let pid = storage[ref]?.pid, let tree = controlTrees[pid] else { return }
+        // Drop links for refs that left the replaced subtree before merging the new ones.
+        if let oldSubtree = ControlTree.find(ref, in: tree) {
+            let newRefs = Set(ControlTree.parentLinks(of: subtree).map { $0.0 })
+            for (child, _) in ControlTree.parentLinks(of: oldSubtree) where !newRefs.contains(child) {
+                controlParents[child] = nil
+            }
+        }
         controlTrees[pid] = ControlTree.replacingSubtree(ref, in: tree, with: subtree)
         for (child, parent) in ControlTree.parentLinks(of: subtree) { controlParents[child] = parent }
     }

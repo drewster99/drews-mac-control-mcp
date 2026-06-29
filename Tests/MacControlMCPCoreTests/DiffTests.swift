@@ -40,11 +40,14 @@ final class DiffTests: XCTestCase {
         XCTAssertEqual(diff.changed.first?.now, "title:\"Done\"")
     }
 
-    func testValueChangeTakesPrecedenceOverTitle() {
+    func testValueAndTitleChangesBothReported() {
+        // Independent facets: a ref that changes BOTH value and title reports both (the old
+        // value-xor-title behavior dropped the title change).
         let before = ElementNode(ref: "e1", role: "AXSlider", title: "Vol", value: "3")
         let after = ElementNode(ref: "e1", role: "AXSlider", title: "Volume", value: "7")
         let diff = Diff.compute(old: before, new: after)
-        XCTAssertEqual(diff.changed.count, 1)
-        XCTAssertEqual(diff.changed.first?.now, "value:\"7\"")
+        XCTAssertEqual(diff.changed.count, 2)
+        XCTAssertTrue(diff.changed.contains(ChangedField(ref: "e1", was: "value:\"3\"", now: "value:\"7\"")))
+        XCTAssertTrue(diff.changed.contains(ChangedField(ref: "e1", was: "title:\"Vol\"", now: "title:\"Volume\"")))
     }
 }

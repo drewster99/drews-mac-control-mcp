@@ -7,6 +7,7 @@
 //  vocabulary the model already holds. Pure logic over ElementNode trees — no AX grant.
 //
 
+import CoreGraphics
 import Foundation
 
 public struct ChangedField: Equatable, Sendable {
@@ -25,7 +26,8 @@ public struct ElementDiff: Equatable, Sendable {
     public var added: [String]
     /// Refs that disappeared.
     public var removed: [String]
-    /// Surviving refs whose value or title changed.
+    /// Surviving refs whose value, title, settability, action set, or frame changed — one entry
+    /// per changed facet (a ref can appear more than once).
     public var changed: [ChangedField]
 
     public var isEmpty: Bool { added.isEmpty && removed.isEmpty && changed.isEmpty }
@@ -63,21 +65,37 @@ public enum Diff {
         var changed: [ChangedField] = []
         for ref in oldRefs.intersection(newRefs).sorted() {
             guard let before = oldMap[ref], let after = newMap[ref] else { continue }
+            // Report each facet INDEPENDENTLY — a surviving ref can change value, title, settability,
+            // its action set, and geometry at once, and the settle consumer needs to see all of them
+            // (the old value-xor-title logic dropped every change after the first).
             if (before.value ?? "") != (after.value ?? "") {
-                changed.append(ChangedField(
-                    ref: ref,
-                    was: "value:\"\(before.value ?? "")\"",
-                    now: "value:\"\(after.value ?? "")\""
-                ))
-            } else if (before.title ?? "") != (after.title ?? "") {
-                changed.append(ChangedField(
-                    ref: ref,
-                    was: "title:\"\(before.title ?? "")\"",
-                    now: "title:\"\(after.title ?? "")\""
-                ))
+                changed.append(ChangedField(ref: ref,
+                    was: "value:\"\(before.value ?? "")\"", now: "value:\"\(after.value ?? "")\""))
+            }
+            if (before.title ?? "") != (after.title ?? "") {
+                changed.append(ChangedField(ref: ref,
+                    was: "title:\"\(before.title ?? "")\"", now: "title:\"\(after.title ?? "")\""))
+            }
+            if before.settable != after.settable {
+                changed.append(ChangedField(ref: ref,
+                    was: "settable:\(before.settable)", now: "settable:\(after.settable)"))
+            }
+            if before.actions != after.actions {
+                changed.append(ChangedField(ref: ref,
+                    was: "actions:(\(before.actions.joined(separator: ",")))",
+                    now: "actions:(\(after.actions.joined(separator: ",")))"))
+            }
+            if before.frame != after.frame {
+                changed.append(ChangedField(ref: ref,
+                    was: "frame:\(frameDescription(before.frame))", now: "frame:\(frameDescription(after.frame))"))
             }
         }
         return ElementDiff(added: added, removed: removed, changed: changed)
+    }
+
+    private static func frameDescription(_ rect: CGRect?) -> String {
+        guard let rect else { return "nil" }
+        return "[\(Int(rect.width))×\(Int(rect.height))]@(\(Int(rect.minX)),\(Int(rect.minY)))"
     }
 
     private static func flatten(_ node: ElementNode, into map: inout [String: ElementNode]) {

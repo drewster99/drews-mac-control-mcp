@@ -2,9 +2,9 @@
 //  AXElement.swift
 //  AXKit
 //
-//  Lean value wrapper around AXUIElement for the server's read path. Sync readers run
-//  off the main thread via AXRunner — each is a cross-process XPC call. (Adapted from the
-//  proven patterns in the app's Core/AXElement.swift, minus the inspector-only formatting.)
+//  Lean value wrapper around AXUIElement for the server's read path. Each reader is a synchronous
+//  cross-process XPC call, run on the host's serialized request thread. (Adapted from the proven
+//  patterns in the app's Core/AXElement.swift, minus the inspector-only formatting.)
 //
 
 import ApplicationServices
@@ -160,6 +160,73 @@ public struct AXElement: @unchecked Sendable {
         guard AXValueGetValue(position, .cgPoint, &origin),
               AXValueGetValue(dimensions, .cgSize, &size) else { return nil }
         return CGRect(origin: origin, size: size)
+    }
+
+    /// Snapshot fields read in ONE bulk IPC call rather than ~8 separate cross-process round-trips.
+    public struct SnapshotAttributes {
+        public var role: String?
+        public var subrole: String?
+        public var identifier: String?
+        public var title: String?
+        public var value: String?
+        public var frame: CGRect?
+        public var children: [AXElement]
+    }
+
+    /// Read role/subrole/identifier/title/value/frame/children in a single
+    /// `AXUIElementCopyMultipleAttributeValues` call. Decodes each field with the SAME logic as the
+    /// per-attribute accessors (error/null placeholders → nil), and falls back to those accessors
+    /// entirely if the bulk call fails — so the result is equivalent, just far fewer IPC round-trips.
+    public func snapshotAttributes() -> SnapshotAttributes {
+        let names: [String] = [
+            kAXRoleAttribute as String, kAXSubroleAttribute as String, "AXIdentifier",
+            kAXTitleAttribute as String, kAXValueAttribute as String,
+            kAXPositionAttribute as String, kAXSizeAttribute as String, kAXChildrenAttribute as String
+        ]
+        var out: CFArray?
+        let err = AXUIElementCopyMultipleAttributeValues(raw, names as CFArray, AXCopyMultipleAttributeOptions(), &out)
+        guard err == .success, let values = out as? [AnyObject], values.count == names.count else {
+            // Bulk read unsupported/failed — fall back to per-attribute reads (unchanged semantics).
+            return SnapshotAttributes(role: role, subrole: subrole, identifier: identifier,
+                                      title: title, value: value, frame: frame, children: children)
+        }
+
+        // A failed attribute comes back as an AXValue of type .axError (or kCFNull); treat as absent.
+        func present(_ index: Int) -> AnyObject? {
+            let candidate = values[index]
+            if CFGetTypeID(candidate) == AXValueGetTypeID(),
+               AXValueGetType(unsafeDowncast(candidate, to: AXValue.self)) == .axError { return nil }
+            if CFGetTypeID(candidate) == CFNullGetTypeID() { return nil }
+            return candidate
+        }
+        func string(_ index: Int) -> String? { present(index) as? String }
+
+        var decodedValue: String? {
+            guard let raw = present(4) else { return nil }
+            if let string = raw as? String { return string }
+            if let number = raw as? NSNumber { return number.stringValue }
+            return nil
+        }
+        var decodedFrame: CGRect? {
+            guard let positionValue = present(5), let sizeValue = present(6),
+                  CFGetTypeID(positionValue) == AXValueGetTypeID(),
+                  CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return nil }
+            var origin = CGPoint.zero
+            var size = CGSize.zero
+            let position = unsafeDowncast(positionValue, to: AXValue.self)
+            let dimensions = unsafeDowncast(sizeValue, to: AXValue.self)
+            guard AXValueGetValue(position, .cgPoint, &origin),
+                  AXValueGetValue(dimensions, .cgSize, &size) else { return nil }
+            return CGRect(origin: origin, size: size)
+        }
+        var decodedChildren: [AXElement] {
+            guard let raw = present(7), let array = raw as? [AXUIElement] else { return [] }
+            return array.map(AXElement.init)
+        }
+
+        return SnapshotAttributes(role: string(0), subrole: string(1), identifier: string(2),
+                                  title: string(3), value: decodedValue, frame: decodedFrame,
+                                  children: decodedChildren)
     }
 
     /// The element this (system-wide or app) element reports as focused.

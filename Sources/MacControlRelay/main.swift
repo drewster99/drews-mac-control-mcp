@@ -21,11 +21,57 @@ func makeConnection() -> NSXPCConnection {
 }
 
 // Tools with side effects — never re-fire these on reconnect (we have no idempotency token).
+// `control_app` is intentionally absent: its only side effect is an auto-launch gated behind
+// "no running match", so a retry after a transient XPC failure resolves the now-running app
+// rather than launching it again — keeping transparent reconnect for the common resolve path.
 let mutatingTools: Set<String> = [
     "click", "click_point", "scroll", "key", "type", "drag", "hover",
     "set_value", "focus_keyboard", "reveal", "window", "menu_pick", "sim",
     "action", "change_text", "change_value", "launch_app", "kill"
 ]
+
+// Upper bound on a single XPC handle() call. A host that accepted the request but wedged inside
+// AX/ScreenCaptureKit/simctl never invokes the reply block and never trips the connection error
+// handler, so without this the relay would block forever and wedge the client's stdio channel.
+// Generous enough to clear the longest legitimate op (auto-launch ~15s, capture ~10s).
+let xpcCallTimeout: TimeInterval = 60
+
+/// First-write-wins box for an XPC call's outcome, guarded by a lock. Both the reply block and
+/// the connection error handler run on XPC's background queue; on timeout the relay settles it
+/// from the loop thread. Whoever settles first wins, so a late reply after a timeout is ignored
+/// and can't race the value the relay already acted on.
+final class ReplyBox {
+    private let lock = NSLock()
+    private var settled = false
+    private var response: String?
+    private var failed = false
+
+    /// Returns true only for the first caller to settle the box.
+    @discardableResult
+    func settle(response: String?, failed: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if settled { return false }
+        settled = true
+        self.response = response
+        self.failed = failed
+        return true
+    }
+
+    func outcome() -> (response: String?, failed: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (response, failed)
+    }
+}
+
+/// Extract the JSON-RPC request id from a line (string/number/null preserved), or NSNull if the
+/// line can't be parsed — so a relay-generated error can be correlated to the originating request.
+func requestID(_ line: String) -> Any {
+    guard let data = line.data(using: .utf8) else { return NSNull() }
+    let object: Any
+    do { object = try JSONSerialization.jsonObject(with: data) } catch { return NSNull() }
+    guard let dict = object as? [String: Any], let id = dict["id"] else { return NSNull() }
+    return id
+}
 
 func isMutating(_ line: String) -> Bool {
     guard let data = line.data(using: .utf8) else { return false }
@@ -83,24 +129,25 @@ func runRelay() {
         var responded = false
         for attempt in 0..<3 {
             let semaphore = DispatchSemaphore(value: 0)
-            var response: String?
-            var failed = false
+            let box = ReplyBox()
 
             let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
-                failed = true
-                semaphore.signal()
+                if box.settle(response: nil, failed: true) { semaphore.signal() }
             } as? MCPHostProtocol
 
             if let proxy {
                 proxy.handle(line: line) { reply in
-                    response = reply
-                    semaphore.signal()
+                    if box.settle(response: reply, failed: false) { semaphore.signal() }
                 }
-                semaphore.wait()
+                if semaphore.wait(timeout: .now() + xpcCallTimeout) == .timedOut {
+                    box.settle(response: nil, failed: true)
+                    DebugLog.event("timeout", "xpc handle exceeded \(Int(xpcCallTimeout))s")
+                }
             } else {
-                failed = true
+                box.settle(response: nil, failed: true)
             }
 
+            let (response, failed) = box.outcome()
             if !failed {
                 if let response {
                     stdout.write(Data((response + "\n").utf8))
@@ -130,7 +177,18 @@ func runRelay() {
         }
 
         if !responded {
-            let fallback = #"{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"host unavailable"}}"#
+            let payload: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": requestID(line),
+                "error": ["code": -32000, "message": "host unavailable"]
+            ]
+            let fallback: String
+            do {
+                let data = try JSONSerialization.data(withJSONObject: payload)
+                fallback = String(decoding: data, as: UTF8.self)
+            } catch {
+                fallback = #"{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"host unavailable"}}"#
+            }
             stdout.write(Data((fallback + "\n").utf8))
             DebugLog.response(fallback)
         }

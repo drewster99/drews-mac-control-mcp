@@ -54,11 +54,14 @@ private func okJSON(_ extra: [String: Any]) -> String {
 private func settledResult(_ settle: ActAndSettle?, _ arguments: [String: Any],
                            base: [String: Any], post: () -> Void) -> String {
     guard (arguments["observe"] as? String) == "settle",
-          let settle, let pidValue = arguments["pid"] as? Int else {
+          let settle, let pidValue = arguments["pid"] as? Int,
+          let pid = pid_t(exactly: pidValue), pid > 0 else {
+        // No settle requested, or an out-of-range pid (which would trap on Int32 narrowing):
+        // degrade to post-and-return rather than aborting the host.
         post()
         return okJSON(base)
     }
-    let outcome = settle(pid_t(pidValue)) { post() }
+    let outcome = settle(pid) { post() }
     var dict: [String: Any] = ["ok": true]
     for (key, value) in base { dict[key] = value }
     dict["quiesced"] = outcome.quiesced
@@ -108,7 +111,9 @@ public struct ClickTool: Tool {
             return #"{"error":"missing_coordinates"}"#
         }
         let rightButton = (arguments["button"] as? String) == "right"
-        let count = (arguments["count"] as? Int) ?? 1
+        // Clamp to the documented 1...3 range so a bad argument can't flood the host with
+        // millions of synthetic mouse events.
+        let count = min(3, max(1, (arguments["count"] as? Int) ?? 1))
         return settledResult(settle, arguments, base: ["x": x.intValue, "y": y.intValue], post: {
             SyntheticInput.click(x: x.doubleValue, y: y.doubleValue, rightButton: rightButton, clickCount: count)
         })

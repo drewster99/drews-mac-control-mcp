@@ -51,6 +51,14 @@ private func frameValue(_ frame: CGRect?) -> Any {
     return ["x": Int(frame.origin.x), "y": Int(frame.origin.y), "w": Int(frame.width), "h": Int(frame.height)]
 }
 
+/// Validate an untrusted JSON integer as a usable pid. `pid_t` is `Int32`, so the plain
+/// `pid_t(value)` conversion traps on anything outside Int32 range — one malformed tool
+/// argument would abort the privileged host. Returns nil (→ structured `invalid_pid`) instead.
+private func validPid(_ value: Int) -> pid_t? {
+    guard let pid = pid_t(exactly: value), pid > 0 else { return nil }
+    return pid
+}
+
 private func matchJSON(_ match: ElementRegistry.Match) -> String {
     jsonString([
         "ref": match.ref,
@@ -146,8 +154,9 @@ public struct FindElementsTool: Tool {
         guard let pidValue = arguments["pid"] as? Int else {
             return #"{"error":"missing_pid"}"#
         }
+        guard let pid = validPid(pidValue) else { return #"{"error":"invalid_pid"}"# }
         let matches = session.find(
-            pid: pid_t(pidValue),
+            pid: pid,
             role: arguments["role"] as? String,
             titleContains: (arguments["titleContains"] as? String)?.lowercased(),
             identifier: arguments["identifier"] as? String,
@@ -445,21 +454,27 @@ public struct WaitForTool: Tool {
         guard let pidValue = arguments["pid"] as? Int, let mode = arguments["mode"] as? String else {
             return #"{"error":"missing_pid_or_mode"}"#
         }
+        guard let pid = validPid(pidValue) else { return #"{"error":"invalid_pid"}"# }
         let role = arguments["role"] as? String
         let titleContains = (arguments["titleContains"] as? String)?.lowercased()
         let condition: WaitEngine.Condition
         switch mode {
         case "idle":
             condition = .idle(idleMs: (arguments["idleMs"] as? Int) ?? 400)
-        case "appears":
-            condition = .appears(role: role, titleContains: titleContains)
-        case "disappears":
-            condition = .disappears(role: role, titleContains: titleContains)
+        case "appears", "disappears":
+            // With no predicate, the app root matches at depth 0 — `appears` is satisfied
+            // instantly and `disappears` never is. Require at least one discriminator.
+            guard role != nil || titleContains != nil else {
+                return #"{"error":"appears_disappears_require_role_or_title"}"#
+            }
+            condition = mode == "appears"
+                ? .appears(role: role, titleContains: titleContains)
+                : .disappears(role: role, titleContains: titleContains)
         default:
             return #"{"error":"unknown_mode"}"#
         }
         let timeout = (arguments["timeoutMs"] as? Int) ?? 5000
-        let outcome = WaitEngine(session: session).wait(pid: pid_t(pidValue), condition: condition, timeoutMs: timeout)
+        let outcome = WaitEngine(session: session).wait(pid: pid, condition: condition, timeoutMs: timeout)
         var result: [String: Any] = [
             "satisfied": outcome.satisfied,
             "waitedMs": outcome.waitedMs
@@ -566,7 +581,7 @@ public struct OpenMenuTool: Tool {
         guard let pidValue = arguments["pid"] as? Int, let path = arguments["path"] as? [String], !path.isEmpty else {
             return #"{"error":"missing_pid_or_path"}"#
         }
-        let pid = pid_t(pidValue)
+        guard let pid = validPid(pidValue) else { return #"{"error":"invalid_pid"}"# }
         guard arguments["observe"] as? String == "settle" else {
             let result = session.openMenu(pid: pid, path: path)
             return jsonString(["ok": result.ok, "message": result.message])
@@ -615,8 +630,9 @@ public struct GetChangesTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return permissionError }
         guard let pidValue = arguments["pid"] as? Int else { return #"{"error":"missing_pid"}"# }
+        guard let pid = validPid(pidValue) else { return #"{"error":"invalid_pid"}"# }
         let depth = (arguments["depth"] as? Int) ?? 4
-        let diff = session.getChanges(pid: pid_t(pidValue), maxDepth: depth)
+        let diff = session.getChanges(pid: pid, maxDepth: depth)
         return jsonString([
             "added": diff.added,
             "removed": diff.removed,
@@ -661,6 +677,11 @@ public struct KillTool: Tool {
         }
         let pid: pid_t
         if identity.allSatisfy({ $0.isWholeNumber }), let parsed = Int32(identity) {
+            // Reject pid <= 0: kill(0, …) signals the host's own process group, so the
+            // graceful escalation below would terminate this very server (self-DoS).
+            guard parsed > 0 else {
+                return jsonString(["success": false, "error": "invalid_pid", "identity": identity])
+            }
             pid = parsed
         } else {
             switch AppResolver.resolve(identity: identity) {
