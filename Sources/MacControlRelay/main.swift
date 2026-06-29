@@ -34,6 +34,8 @@ let mutatingTools: Set<String> = [
 // AX/ScreenCaptureKit/simctl never invokes the reply block and never trips the connection error
 // handler, so without this the relay would block forever and wedge the client's stdio channel.
 // Generous enough to clear the longest legitimate op (auto-launch ~15s, capture ~10s).
+// Tool timeouts are clamped under this budget in MacControlMCPCore.ToolTimeout (relayBudgetSeconds
+// must match this value) so a caller-supplied timeout can't routinely exceed it.
 let xpcCallTimeout: TimeInterval = 60
 
 /// First-write-wins box for an XPC call's outcome, guarded by a lock. Both the reply block and
@@ -71,6 +73,17 @@ func requestID(_ line: String) -> Any {
     do { object = try JSONSerialization.jsonObject(with: data) } catch { return NSNull() }
     guard let dict = object as? [String: Any], let id = dict["id"] else { return NSNull() }
     return id
+}
+
+/// True when the line parses as a JSON-RPC notification (has a method, lacks an `id`). Such a
+/// message must never receive a reply — including the host-unavailable fallback below. An `id:null`
+/// request is still a request (it has the key), so it correctly does NOT count as a notification.
+func isNotification(_ line: String) -> Bool {
+    guard let data = line.data(using: .utf8) else { return false }
+    let object: Any
+    do { object = try JSONSerialization.jsonObject(with: data) } catch { return false }
+    guard let dict = object as? [String: Any] else { return false }
+    return dict["method"] is String && dict["id"] == nil
 }
 
 func isMutating(_ line: String) -> Bool {
@@ -183,7 +196,7 @@ func runRelay() {
             if mutating { break }
         }
 
-        if !responded {
+        if !responded && !isNotification(line) {
             let payload: [String: Any] = [
                 "jsonrpc": "2.0",
                 "id": requestID(line),
