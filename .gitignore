@@ -1,0 +1,18 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Build / packaging artifacts
+dist/
+
+# XcodeGen output (project.yml is the source of truth — run `xcodegen generate`)
+Generated/
+*.xcodeproj/
+
+# macOS
+.DS_Store
+
+# Python (integration test helpers)
+__pycache__/
+*.pyc
