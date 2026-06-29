@@ -473,7 +473,7 @@ public struct WaitForTool: Tool {
         default:
             return #"{"error":"unknown_mode"}"#
         }
-        let timeout = (arguments["timeoutMs"] as? Int) ?? 5000
+        let timeout = ToolTimeout.ms(arguments["timeoutMs"] as? Int, default: 5000)
         let outcome = WaitEngine(session: session).wait(pid: pid, condition: condition, timeoutMs: timeout)
         var result: [String: Any] = [
             "satisfied": outcome.satisfied,

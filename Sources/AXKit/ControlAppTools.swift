@@ -221,7 +221,9 @@ public struct ControlAppTool: Tool {
             return controlJSON(["success": false, "error": "missing_identity"])
         }
         let windowArg = (arguments["window"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        let timeout = doubleArg(arguments, "timeout") ?? 10
+        // Reserve the fixed 15s launch step so resolve-then-launch-then-walk stays under the relay
+        // budget (control_app is non-mutating and gets re-run by the relay on a 60s timeout).
+        let timeout = ToolTimeout.seconds(doubleArg(arguments, "timeout"), default: 10, reserveSeconds: 15)
 
         func walkAndRespond(pid: pid_t, bundleId: String, name: String, launched: Bool, timing: [String: Any]?) -> String {
             let walkStart = Date()
@@ -707,7 +709,7 @@ public struct ExpandTool: Tool {
         guard let ref = arguments["ref"] as? String else {
             return controlJSON(["success": false, "error": "missing_ref"])
         }
-        let deadline = Date().addingTimeInterval(doubleArg(arguments, "timeout") ?? 5)
+        let deadline = Date().addingTimeInterval(ToolTimeout.seconds(doubleArg(arguments, "timeout"), default: 5))
         // Incremental when we have a stored node and the element is alive; else fall back to a
         // full refresh (e.g. a ref from find_elements, or a node that died → parent-climb).
         if let stored = registry.controlNode(for: ref),
@@ -752,7 +754,7 @@ public struct RefreshTool: Tool {
         guard let ref = arguments["ref"] as? String else {
             return controlJSON(["success": false, "error": "missing_ref"])
         }
-        return subtreeResponse(registry, ref: ref, deadline: Date().addingTimeInterval(doubleArg(arguments, "timeout") ?? 7))
+        return subtreeResponse(registry, ref: ref, deadline: Date().addingTimeInterval(ToolTimeout.seconds(doubleArg(arguments, "timeout"), default: 7)))
     }
 }
 
@@ -806,7 +808,9 @@ public struct LaunchAppTool: Tool {
                                 "howToFix": "Provide app: a .app path or a bundle id."])
         }
         let activate = (arguments["activate"] as? Bool) ?? true
-        let timeout = doubleArg(arguments, "timeout") ?? 15
+        // launch_app consumes `timeout` twice (openApplication wait + readiness poll) and then a
+        // fixed 10s walk, so reserve heavily to keep 2×timeout + walk under the relay budget.
+        let timeout = ToolTimeout.seconds(doubleArg(arguments, "timeout"), default: 15, reserveSeconds: 32)
 
         // A bundle id never contains a slash; a .app path always does. (`~` is expanded.)
         let isPath = appArg.contains("/") || appArg.hasPrefix("~")
