@@ -28,6 +28,9 @@ public enum KeyMap {
         "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
         // ANSI punctuation — so common chords like cmd+, (Preferences) and cmd+. (Cancel) parse.
         "]": 30, "'": 39, ";": 41, "\\": 42, ",": 43, "/": 44, ".": 47, "`": 50, "[": 33,
+        // Word aliases for the keys "+"/"-" can't be spelled directly (the "+" separator) or read
+        // clearly: `plus`/`equal` are the `=` key (shift makes it "+"); `minus` is the `-` key.
+        "plus": 24, "equal": 24, "equals": 24, "minus": 27,
         "return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51, "backspace": 51,
         "escape": 53, "esc": 53, "left": 123, "right": 124, "down": 125, "up": 126,
         "home": 115, "end": 119, "pageup": 116, "pagedown": 121, "forwarddelete": 117,
@@ -46,10 +49,12 @@ public enum KeyMap {
     /// "cmd+shift+s" → chord. The last token is the key; earlier tokens are modifiers.
     /// Returns nil for an unknown key or modifier (never a silent wrong chord).
     public static func parse(_ spec: String) -> KeyChord? {
-        let tokens = spec.lowercased()
-            .split(separator: "+")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        let lowered = spec.lowercased()
+        var rawTokens = lowered.split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
+        // A spec ending in "+" (e.g. "cmd++") targets the literal plus key, which the "+" split
+        // would otherwise drop — re-add it as the `plus` alias.
+        if lowered.hasSuffix("+") { rawTokens.append("plus") }
+        let tokens = rawTokens.filter { !$0.isEmpty }
         guard let keyName = tokens.last, let keyCode = keyCodes[keyName] else { return nil }
 
         var flags: CGEventFlags = []
