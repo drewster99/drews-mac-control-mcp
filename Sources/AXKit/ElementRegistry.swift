@@ -91,7 +91,11 @@ public final class ElementRegistry {
             // A short per-probe messaging timeout so one hung element can't consume the whole
             // budget — a wall-clock check between probes can't preempt a single in-flight AX call.
             stored.element.setMessagingTimeout(1)
-            if !stored.element.isAlive { dead.append((ref, stored.element)) }
+            if stored.element.isAlive {
+                stored.element.setMessagingTimeout(0)   // restore default — don't leave a live handle at 1s
+            } else {
+                dead.append((ref, stored.element))
+            }
         }
         for (ref, element) in dead {
             elementToRef[element] = nil

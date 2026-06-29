@@ -42,7 +42,7 @@ public enum AXSnapshot {
             // and `settable` use different AX APIs so they stay separate.
             let attributes = element.snapshotAttributes()
             let children: [ElementNode] = depth < maxDepth
-                ? attributes.children.filter { visited.insert($0).inserted }.map { visit($0, depth: depth + 1) }
+                ? attributes.children.compactMap { visited.insert($0).inserted ? visit($0, depth: depth + 1) : nil }
                 : []
             return ElementNode(
                 ref: ref,
