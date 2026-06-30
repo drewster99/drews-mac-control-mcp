@@ -382,6 +382,66 @@ func resolveApp(_ query: String) -> NSRunningApplication? {
         ?? regularApps.first { $0.bundleIdentifier == query }
 }
 
+// MARK: - Identity test: is a notification's element the SAME instance we hold?
+
+func samePointer(_ a: AXUIElement, _ b: AXUIElement) -> Bool {
+    Unmanaged.passUnretained(a).toOpaque() == Unmanaged.passUnretained(b).toOpaque()
+}
+
+final class IdentityProbe {
+    static let shared = IdentityProbe()
+    var stored: [AXElement: AXUIElement] = [:]   // the exact instance we subscribed, keyed by CFEqual identity
+    var total = 0
+    var pointerIdentical = 0   // notification element === our stored instance
+    var cfEqualOnly = 0        // CFEqual to a stored element, but a DIFFERENT instance
+    var untracked = 0          // not a node we subscribed to (new/created)
+
+    func record(_ notified: AXUIElement) {
+        total += 1
+        if let storedInstance = stored[AXElement(notified)] {
+            if samePointer(storedInstance, notified) { pointerIdentical += 1 } else { cfEqualOnly += 1 }
+        } else {
+            untracked += 1
+        }
+    }
+}
+
+let identityCallback: AXObserverCallback = { _, element, _, _ in IdentityProbe.shared.record(element) }
+
+func identityTest(appQuery: String, seconds: Double) {
+    guard let app = resolveApp(appQuery) else {
+        FileHandle.standardError.write(Data("No regular app matches \"\(appQuery)\".\n".utf8))
+        exit(1)
+    }
+    let pid = app.processIdentifier
+    var observerOptional: AXObserver?
+    guard AXObserverCreate(pid, identityCallback, &observerOptional) == .success, let observer = observerOptional else {
+        print("  AXObserverCreate failed"); exit(1)
+    }
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
+
+    let walk = walkTree(pid: pid, maxNodes: 50_000, deadline: Date().addingTimeInterval(10),
+                        breadthFirst: true, visibleRowsOnly: true)
+    for element in walk.refByElement.keys {
+        IdentityProbe.shared.stored[element] = element.raw     // remember the exact instance
+        for notification in perElementNotifications {
+            _ = AXObserverAddNotification(observer, element.raw, notification as CFString, nil)
+        }
+    }
+    print("== identity \(app.localizedName ?? "?") (\(pid)) — \(IdentityProbe.shared.stored.count) elements subscribed ==")
+    print("  interact for \(Int(seconds))s …\n")
+
+    CFRunLoopRunInMode(.defaultMode, seconds, false)
+
+    let probe = IdentityProbe.shared
+    print(String(format: """
+      notifications: %d
+        pointer-identical (===, same instance) : %d
+        CFEqual-only (same element, DIFFERENT instance): %d
+        untracked (new element we hadn't subscribed): %d
+    """, probe.total, probe.pointerIdentical, probe.cfEqualOnly, probe.untracked))
+}
+
 // MARK: - Per-element subscription monitor with delta reload (one app)
 
 /// Per-element notifications we attach to EVERY node (the change-relevant ones; window/app-level
@@ -590,6 +650,10 @@ if arguments.first == "watch" {
     let query = arguments.count > 1 ? arguments[1] : "Calculator"
     let iterations = arguments.count > 2 ? (Int(arguments[2]) ?? 10) : 10
     selftest(appQuery: query, iterations: iterations)
+} else if arguments.first == "identity" {
+    let query = arguments.count > 1 ? arguments[1] : "front"
+    let seconds = arguments.count > 2 ? (Double(arguments[2]) ?? 20) : 20
+    identityTest(appQuery: query, seconds: seconds)
 } else if arguments.first == "submon" {
     let query = arguments.count > 1 ? arguments[1] : "front"
     let seconds = arguments.count > 2 ? (Double(arguments[2]) ?? 30) : 30
