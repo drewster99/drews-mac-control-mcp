@@ -50,6 +50,10 @@ enum Group: String, CaseIterable {
     }
 }
 
+// Roles that expose AXVisibleRows (tables/outlines/lists/grids/browsers). The visible-rows rule
+// gates on these so we don't pay an AXVisibleRows IPC on every ordinary node.
+let collectionRoles: Set<String> = ["AXTable", "AXOutline", "AXList", "AXGrid", "AXBrowser"]
+
 // MARK: - Full-tree walk (refs + grouping, no hidden items)
 
 struct WalkResult {
@@ -65,7 +69,7 @@ struct WalkResult {
 /// are safety caps only — when either trips, `capped` is set so the measurement is honest rather
 /// than hanging. Same per-node work and the same ref minting in both orders, so timing is comparable.
 func walkTree(pid: pid_t, maxNodes: Int, deadline: Date, breadthFirst: Bool,
-              visibleTableRowsOnly: Bool = false) -> WalkResult {
+              visibleRowsOnly: Bool = false) -> WalkResult {
     var result = WalkResult()
     let app = AXElement.application(pid: pid)
     app.setMessagingTimeout(2)
@@ -93,10 +97,11 @@ func walkTree(pid: pid_t, maxNodes: Int, deadline: Date, breadthFirst: Bool,
         result.allRoles[role, default: 0] += 1
         if group == .other { result.otherRoles[role, default: 0] += 1 }
 
-        // Rule: for any AXTable, enumerate only visible (∪ selected) rows — unless the table doesn't
-        // implement AXVisibleRows, in which case fall back to its full children so we lose nothing.
+        // Rule: anywhere AXVisibleRows exists (table/outline/list/grid/browser), enumerate only
+        // visible (∪ selected) rows — unless that element doesn't implement AXVisibleRows, in which
+        // case fall back to its full children so we lose nothing.
         let children: [AXElement]
-        if visibleTableRowsOnly, role == "AXTable",
+        if visibleRowsOnly, collectionRoles.contains(role),
            let visibleRaw = element.copyAttribute("AXVisibleRows") as? [AXUIElement] {
             let visible = visibleRaw.map(AXElement.init)
             let selected = (element.copyAttribute("AXSelectedRows") as? [AXUIElement])?.map(AXElement.init) ?? []
@@ -379,9 +384,9 @@ func resolveApp(_ query: String) -> NSRunningApplication? {
 
 // MARK: - Enumerate every app, one pass per traversal order
 
-func enumeratePass(breadthFirst: Bool, maxNodes: Int, deadlineSeconds: Double, visibleTableRowsOnly: Bool = false) {
+func enumeratePass(breadthFirst: Bool, maxNodes: Int, deadlineSeconds: Double, visibleRowsOnly: Bool = false) {
     let apps = regularApps.sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
-    let label = (breadthFirst ? "BREADTH-first" : "DEPTH-first") + (visibleTableRowsOnly ? " — VISIBLE table rows only" : " — full")
+    let label = (breadthFirst ? "BREADTH-first" : "DEPTH-first") + (visibleRowsOnly ? " — VISIBLE collection rows only" : " — full")
     print("== \(label) — \(apps.count) apps ==")
     var totalNodes = 0
     var totalMs = 0.0
@@ -392,7 +397,7 @@ func enumeratePass(breadthFirst: Bool, maxNodes: Int, deadlineSeconds: Double, v
         let ms = milliseconds {
             walk = walkTree(pid: pid, maxNodes: maxNodes,
                             deadline: Date().addingTimeInterval(deadlineSeconds), breadthFirst: breadthFirst,
-                            visibleTableRowsOnly: visibleTableRowsOnly)
+                            visibleRowsOnly: visibleRowsOnly)
         }
         totalNodes += walk.nodeCount
         totalMs += ms
@@ -415,7 +420,6 @@ func collectionsMode(appQuery: String, maxNodes: Int, deadlineSeconds: Double) {
         exit(1)
     }
     let pid = app.processIdentifier
-    let collectionRoles: Set<String> = ["AXTable", "AXOutline", "AXList", "AXGrid", "AXBrowser"]
     let root = AXElement.application(pid: pid)
     root.setMessagingTimeout(2)
     let deadline = Date().addingTimeInterval(deadlineSeconds)
@@ -500,8 +504,8 @@ if arguments.first == "watch" {
     // Breadth-first, baseline (full) vs the new rule (visible AXTable rows only) — same caps.
     let fullMaxNodes = 300_000
     let perAppDeadline = 30.0
-    enumeratePass(breadthFirst: true, maxNodes: fullMaxNodes, deadlineSeconds: perAppDeadline, visibleTableRowsOnly: false)
-    enumeratePass(breadthFirst: true, maxNodes: fullMaxNodes, deadlineSeconds: perAppDeadline, visibleTableRowsOnly: true)
+    enumeratePass(breadthFirst: true, maxNodes: fullMaxNodes, deadlineSeconds: perAppDeadline, visibleRowsOnly: false)
+    enumeratePass(breadthFirst: true, maxNodes: fullMaxNodes, deadlineSeconds: perAppDeadline, visibleRowsOnly: true)
 } else {
     measureAll(maxNodes: maxNodes)
 }
