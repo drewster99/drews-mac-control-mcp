@@ -56,6 +56,7 @@ struct WalkResult {
     var nodeCount = 0
     var groups: [Group: Int] = [:]
     var otherRoles: [String: Int] = [:]
+    var allRoles: [String: Int] = [:]
     var refByElement: [AXElement: String] = [:]
     var capped = false
 }
@@ -88,6 +89,7 @@ func walkTree(pid: pid_t, maxNodes: Int, deadline: Date, breadthFirst: Bool) -> 
         result.refByElement[element] = ref
         let group = Group.of(role)
         result.groups[group, default: 0] += 1
+        result.allRoles[role, default: 0] += 1
         if group == .other { result.otherRoles[role, default: 0] += 1 }
         for child in attrs.children where visited.insert(child).inserted { frontier.append(child) }
     }
@@ -384,6 +386,26 @@ func enumeratePass(breadthFirst: Bool, maxNodes: Int, deadlineSeconds: Double) {
     print(String(format: "  ── total: %d nodes, %.0f ms ──\n", totalNodes, totalMs))
 }
 
+// MARK: - Role histogram for one app (what's eating the nodes?)
+
+func rolesMode(appQuery: String, maxNodes: Int, deadlineSeconds: Double) {
+    guard let app = resolveApp(appQuery) else {
+        FileHandle.standardError.write(Data("No regular app matches \"\(appQuery)\".\n".utf8))
+        exit(1)
+    }
+    let pid = app.processIdentifier
+    var walk = WalkResult()
+    let ms = milliseconds {
+        walk = walkTree(pid: pid, maxNodes: maxNodes,
+                        deadline: Date().addingTimeInterval(deadlineSeconds), breadthFirst: true)
+    }
+    print(String(format: "== %@ (%d) — %d nodes in %.0f ms%@ ==",
+                 (app.localizedName ?? "?") as NSString, pid, walk.nodeCount, ms, walk.capped ? " [CAPPED]" : ""))
+    for (role, count) in walk.allRoles.sorted(by: { $0.value > $1.value }) {
+        print(String(format: "  %6d  %@", count, role as NSString))
+    }
+}
+
 // MARK: - Entry
 
 requireAccessibility()
@@ -399,6 +421,8 @@ if arguments.first == "watch" {
     let query = arguments.count > 1 ? arguments[1] : "Calculator"
     let iterations = arguments.count > 2 ? (Int(arguments[2]) ?? 10) : 10
     selftest(appQuery: query, iterations: iterations)
+} else if arguments.first == "roles" {
+    rolesMode(appQuery: arguments.count > 1 ? arguments[1] : "front", maxNodes: 300_000, deadlineSeconds: 30)
 } else if arguments.first == "enumerate" {
     // All apps depth-first, then all apps breadth-first (same caps), to compare traversal order.
     let fullMaxNodes = 300_000
