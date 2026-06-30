@@ -1,0 +1,188 @@
+//
+//  AppSummary.swift
+//  MacControlMCPCore
+//
+//  The curated, name-first projection behind the `App` tool (the "easy lane"). Pure logic over the
+//  control_app `ControlNode` tree (which already bounds collections to visible∪selected rows), so it
+//  is unit-testable with no Accessibility grant. Produces a compact grouped summary — app header,
+//  windows, non-standard menus, and the active window's controls grouped by kind with values —
+//  rather than the full ref-bearing hierarchy.
+//
+
+import Foundation
+
+public struct AppSummary: Equatable, Sendable {
+    public struct Menu: Equatable, Sendable {
+        public let title: String
+        public let items: [String]
+    }
+    public struct Group: Equatable, Sendable {
+        public let name: String          // "Buttons", "Text fields", "Other", "Text"
+        public let entries: [String]     // rendered, name-first
+        public let unnamed: Int          // actionable-but-unlabeled, surfaced as elision
+        public let more: Int             // truncated past the cap
+    }
+    public struct Window: Equatable, Sendable {
+        public let title: String
+        public let groups: [Group]
+    }
+
+    public let name: String
+    public let pid: Int
+    public let bundleId: String
+    public let windows: [String]
+    public let otherWindowCount: Int
+    public let menus: [Menu]
+    public let activeWindow: Window?
+}
+
+public enum AppProjection {
+    static let perGroupCap = 40
+
+    static let buttonRoles: Set<String> = ["button", "menuButton", "popUpButton", "radioButton",
+                                           "checkBox", "disclosureTriangle", "tab", "toolbarButton"]
+    static let textFieldRoles: Set<String> = ["textField", "textArea", "searchField", "comboBox", "secureTextField"]
+    static let staticTextRoles: Set<String> = ["staticText", "text", "heading"]
+
+    /// Standard menu items we hide so "Menus" shows only app-specific commands. Matched by prefix so
+    /// variable suffixes ("Quit Notes", "About Safari", "Hide Others") are covered.
+    static let standardMenuPrefixes: [String] = [
+        "About ", "Settings", "Preferences", "Services", "Hide ", "Show All", "Quit ",
+        "Undo", "Redo", "Cut", "Copy", "Paste", "Delete", "Select All", "Start Dictation",
+        "Emoji & Symbols", "Minimize", "Zoom", "Move Window", "Bring All to Front",
+        "Enter Full Screen", "Exit Full Screen", "Tile Window", "Center Window"
+    ]
+
+    public static func project(tree: ControlNode, name: String, pid: Int, bundleId: String,
+                               activeWindowTitle: String? = nil) -> AppSummary {
+        let windowNodes = tree.children.filter { $0.type == "window" }
+        let windowTitles = windowNodes.map { $0.label ?? "(untitled)" }
+
+        let active = activeWindowNode(windowNodes, preferred: activeWindowTitle)
+        let activeWindow = active.map {
+            AppSummary.Window(title: $0.label ?? "(untitled)", groups: groups(in: $0))
+        }
+        let shownWindows = active.flatMap { $0.label }.map { [$0] } ?? Array(windowTitles.prefix(1))
+        let remaining = max(0, windowTitles.count - shownWindows.count)
+
+        return AppSummary(name: name, pid: pid, bundleId: bundleId,
+                          windows: windowTitles, otherWindowCount: remaining,
+                          menus: menus(in: tree), activeWindow: activeWindow)
+    }
+
+    static func activeWindowNode(_ windows: [ControlNode], preferred: String?) -> ControlNode? {
+        // A preferred title (explicit `window`, or the window-title that resolved the identity)
+        // wins — exact match first, then substring (window-title resolution is substring-based).
+        if let preferred {
+            if let exact = windows.first(where: { $0.label == preferred }) { return exact }
+            if let contains = windows.first(where: { $0.label?.contains(preferred) == true }) { return contains }
+        }
+        return windows.first(where: { $0.states.contains("main") })
+            ?? windows.first(where: { $0.states.contains("focused") })
+            ?? windows.first
+    }
+
+    static func menus(in tree: ControlNode) -> [AppSummary.Menu] {
+        guard let menuBar = firstDescendant(tree, type: "menuBar") else { return [] }
+        var result: [AppSummary.Menu] = []
+        for top in menuBar.children {
+            guard let title = top.label, !title.isEmpty else { continue }
+            // First-level items live under the menuBarItem's child menu.
+            let items = (top.children.first(where: { $0.type == "menu" })?.children ?? top.children)
+                .compactMap { $0.label }
+                .filter { !$0.isEmpty && !isStandardMenuItem($0) }
+            if !items.isEmpty { result.append(AppSummary.Menu(title: title, items: items)) }
+        }
+        return result
+    }
+
+    static func isStandardMenuItem(_ title: String) -> Bool {
+        standardMenuPrefixes.contains { title.hasPrefix($0) }
+    }
+
+    static func groups(in window: ControlNode) -> [AppSummary.Group] {
+        var buttons: [ControlNode] = [], fields: [ControlNode] = [], other: [ControlNode] = [], text: [ControlNode] = []
+        collect(window) { node in
+            if buttonRoles.contains(node.type) { buttons.append(node) }
+            else if textFieldRoles.contains(node.type) { fields.append(node) }
+            else if staticTextRoles.contains(node.type) { if node.label?.isEmpty == false { text.append(node) } }
+            else if !node.actions.isEmpty || node.textValue != nil { other.append(node) }
+        }
+        var out: [AppSummary.Group] = []
+        out.append(group("Buttons", buttons) { $0.label })
+        out.append(group("Text fields", fields) { node in
+            guard let label = node.label, !label.isEmpty else { return nil }
+            if let value = node.textValue, !value.isEmpty { return "\(label) =\(quote(value))" }
+            return label
+        })
+        out.append(group("Other", other) { node in
+            guard let label = node.label, !label.isEmpty else { return nil }
+            return "\(label) (\(node.type))"
+        })
+        out.append(group("Text", text) { node in node.label.map(quote) })
+        return out.filter { !$0.entries.isEmpty || $0.unnamed > 0 }
+    }
+
+    /// Build a rendered group from nodes, with a per-group cap and an unnamed/elision count.
+    static func group(_ name: String, _ nodes: [ControlNode], render: (ControlNode) -> String?) -> AppSummary.Group {
+        var entries: [String] = []
+        var unnamed = 0
+        for node in nodes {
+            if let rendered = render(node) { entries.append(rendered) } else { unnamed += 1 }
+        }
+        let more = max(0, entries.count - perGroupCap)
+        return AppSummary.Group(name: name, entries: Array(entries.prefix(perGroupCap)), unnamed: unnamed, more: more)
+    }
+
+    static func collect(_ node: ControlNode, into visit: (ControlNode) -> Void) {
+        for child in node.children {
+            visit(child)
+            collect(child, into: visit)
+        }
+    }
+
+    static func firstDescendant(_ node: ControlNode, type: String) -> ControlNode? {
+        for child in node.children {
+            if child.type == type { return child }
+            if let found = firstDescendant(child, type: type) { return found }
+        }
+        return nil
+    }
+
+    /// One-line, quote-escaped value for display (newlines/quotes escaped, truncated).
+    static func quote(_ value: String) -> String {
+        let oneLine = value.replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(oneLine.count > 80 ? String(oneLine.prefix(80)) + "…" : oneLine)\""
+    }
+}
+
+public enum AppRenderer {
+    public static func render(_ summary: AppSummary) -> String {
+        var lines: [String] = []
+        lines.append("App: \(summary.name)  pid \(summary.pid)  \(summary.bundleId)")
+
+        var windowLine = "Windows: " + summary.windows.joined(separator: ", ")
+        if summary.windows.isEmpty { windowLine = "Windows: (none)" }
+        lines.append(windowLine)
+
+        if !summary.menus.isEmpty {
+            lines.append("Menus (non-standard):")
+            for menu in summary.menus {
+                lines.append("  \(menu.title): " + menu.items.joined(separator: ", "))
+            }
+        }
+
+        if let window = summary.activeWindow {
+            lines.append("Active window: \(window.title)")
+            for group in window.groups {
+                var line = "  \(group.name): " + group.entries.joined(separator: ", ")
+                if group.unnamed > 0 { line += " [+\(group.unnamed) unnamed]" }
+                if group.more > 0 { line += " [+\(group.more) more]" }
+                lines.append(line)
+            }
+        } else {
+            lines.append("Active window: (none)")
+        }
+        return lines.joined(separator: "\n")
+    }
+}

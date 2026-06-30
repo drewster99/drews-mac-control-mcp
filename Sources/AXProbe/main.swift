@@ -650,6 +650,18 @@ if arguments.first == "watch" {
     let query = arguments.count > 1 ? arguments[1] : "Calculator"
     let iterations = arguments.count > 2 ? (Int(arguments[2]) ?? 10) : 10
     selftest(appQuery: query, iterations: iterations)
+} else if arguments.first == "app" {
+    // Run the real AppTool with activate:false (read-only — does NOT bring the app forward).
+    let identity = arguments.count > 1 ? arguments.dropFirst().joined(separator: " ") : "Finder"
+    let json = AppTool(registry: ElementRegistry()).call(["identity": identity, "activate": false])
+    if let data = json.data(using: .utf8) {
+        do {
+            if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let summary = object["summary"] as? String {
+                print(summary)
+            } else { print(json) }
+        } catch { print(json) }
+    }
 } else if arguments.first == "identity" {
     let query = arguments.count > 1 ? arguments[1] : "front"
     let seconds = arguments.count > 2 ? (Double(arguments[2]) ?? 20) : 20

@@ -1029,6 +1029,80 @@ public struct PressByNameTool: Tool {
     }
 }
 
+/// The curated "easy lane" perception tool: a compact, name-first summary of an app (header,
+/// windows, non-standard menus, and the active window's controls grouped by kind with values),
+/// projected from the same walk control_app uses (so collections are already bounded to visible
+/// rows). `activate:false` reads without stealing focus.
+public struct AppTool: Tool {
+    private let registry: ElementRegistry
+    private let isTrusted: @Sendable () -> Bool
+
+    public init(registry: ElementRegistry, isTrusted: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() }) {
+        self.registry = registry
+        self.isTrusted = isTrusted
+    }
+
+    public let name = "app"
+
+    public var descriptor: [String: Any] {
+        [
+            "name": name,
+            "description": "Curated, name-first snapshot of an app: header (name/pid/bundle id), window titles, non-standard menus + items, and the ACTIVE window's controls grouped by kind — Buttons / Text fields (with values) / Other / Text — with [+N unnamed]/[+N more] elision so nothing is silently hidden. The compact alternative to control_app's full tree; collections are already bounded to visible rows. Resolves `identity` (app name, bundle id, pid, or window title) and brings the app to the front unless `activate:false`. Requires Accessibility.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "identity": ["type": "string", "description": "App name, bundle id, pid, or window-title substring."],
+                    "window": ["type": "string", "description": "Optional window title to treat as the active window (else main/focused/first)."],
+                    "activate": ["type": "boolean", "description": "Bring the app to the front + focus (default true). Set false to read without stealing focus."],
+                    "timeout": ["type": "number", "description": "Seconds to read the tree (default 10)."]
+                ],
+                "required": ["identity"]
+            ]
+        ]
+    }
+
+    public func call(_ arguments: [String: Any]) -> String {
+        guard isTrusted() else { return controlPermissionError }
+        guard let identity = (arguments["identity"] as? String), !identity.isEmpty else {
+            return controlJSON(["success": false, "error": "missing_identity"])
+        }
+        let windowArgument = (arguments["window"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let activate = (arguments["activate"] as? Bool) ?? true
+        let timeout = ToolTimeout.seconds(doubleArg(arguments, "timeout"), default: 10, reserveSeconds: 2)
+
+        // Resolve fast first (pid/bundle/name). Only if that misses, retry with the slow
+        // window-title tier — and when THAT matches, use the identity as the active-window hint so
+        // we summarize the window the caller named, not just the main/focused one.
+        var matchedByWindowTitle = false
+        var resolution = AppResolver.resolve(identity: identity, includeWindowTitle: false)
+        if case .noMatch = resolution {
+            resolution = AppResolver.resolve(identity: identity, includeWindowTitle: true)
+            if case .app = resolution { matchedByWindowTitle = true }
+        }
+
+        switch resolution {
+        case .noMatch:
+            return controlJSON(["success": false, "error": "no_match", "identity": identity,
+                                "howToFix": "Launch it first with launch_app, or pass a running app's name/bundle id/pid."])
+        case .ambiguous(let candidates):
+            return controlJSON(["success": false, "error": "ambiguous",
+                                "candidates": candidates.map { ["pid": Int($0.pid), "name": $0.name, "bundleId": $0.bundleId] }])
+        case .app(let pid, let bundleId, let name):
+            if activate { NSRunningApplication(processIdentifier: pid)?.activate() }
+            let app = AXElement.application(pid: pid)
+            app.setMessagingTimeout(5)
+            let tree = ControlWalker.build(root: app, registry: registry, pid: pid,
+                                           deadline: Date().addingTimeInterval(timeout), windowFilter: nil)
+            registry.storeControlTree(tree, pid: pid)   // prime refs so a follow-up action(ref) resolves
+            let activeHint = windowArgument ?? (matchedByWindowTitle ? identity : nil)
+            let summary = AppProjection.project(tree: tree, name: name, pid: Int(pid), bundleId: bundleId,
+                                                activeWindowTitle: activeHint)
+            return controlJSON(["success": true, "pid": Int(pid), "name": name, "bundleId": bundleId,
+                                "summary": AppRenderer.render(summary)])
+        }
+    }
+}
+
 public enum ControlAppTools {
     public static func all(
         registry: ElementRegistry,
@@ -1037,6 +1111,7 @@ public enum ControlAppTools {
         type: @escaping ControlType = { _, _ in }
     ) -> [Tool] {
         [
+            AppTool(registry: registry, isTrusted: isTrusted),
             ControlAppTool(registry: registry, isTrusted: isTrusted),
             LaunchAppTool(registry: registry, isTrusted: isTrusted),
             ControlActionTool(registry: registry, isTrusted: isTrusted),
