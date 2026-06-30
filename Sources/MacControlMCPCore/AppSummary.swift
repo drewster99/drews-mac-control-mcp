@@ -12,10 +12,6 @@
 import Foundation
 
 public struct AppSummary: Equatable, Sendable {
-    public struct Menu: Equatable, Sendable {
-        public let title: String
-        public let items: [String]
-    }
     public struct Group: Equatable, Sendable {
         public let name: String          // "Buttons", "Text fields", "Other", "Text"
         public let entries: [String]     // rendered, name-first
@@ -32,42 +28,38 @@ public struct AppSummary: Equatable, Sendable {
     public let bundleId: String
     public let windows: [String]
     public let otherWindowCount: Int
-    public let menus: [Menu]
+    public let menus: [String]          // top-level menu titles only; items load when a menu is opened
     public let activeWindow: Window?
 }
 
 public enum AppProjection {
     static let perGroupCap = 40
 
+    /// Top-level window-like containers. A window's humanized `type` reflects its SUBROLE, so a
+    /// Safari window with subrole AXDialog renders as `dialog`, not `window` — match all of them.
+    static let windowTypes: Set<String> = ["window", "dialog", "sheet", "drawer", "popover",
+                                           "floatingWindow", "systemDialog", "systemFloatingWindow"]
+
     static let buttonRoles: Set<String> = ["button", "menuButton", "popUpButton", "radioButton",
                                            "checkBox", "disclosureTriangle", "tab", "toolbarButton"]
     static let textFieldRoles: Set<String> = ["textField", "textArea", "searchField", "comboBox", "secureTextField"]
     static let staticTextRoles: Set<String> = ["staticText", "text", "heading"]
 
-    /// Standard menu items we hide so "Menus" shows only app-specific commands. Matched by prefix so
-    /// variable suffixes ("Quit Notes", "About Safari", "Hide Others") are covered.
-    static let standardMenuPrefixes: [String] = [
-        "About ", "Settings", "Preferences", "Services", "Hide ", "Show All", "Quit ",
-        "Undo", "Redo", "Cut", "Copy", "Paste", "Delete", "Select All", "Start Dictation",
-        "Emoji & Symbols", "Minimize", "Zoom", "Move Window", "Bring All to Front",
-        "Enter Full Screen", "Exit Full Screen", "Tile Window", "Center Window"
-    ]
-
     public static func project(tree: ControlNode, name: String, pid: Int, bundleId: String,
                                activeWindowTitle: String? = nil) -> AppSummary {
-        let windowNodes = tree.children.filter { $0.type == "window" }
+        let windowNodes = tree.children.filter { windowTypes.contains($0.type) }
         let windowTitles = windowNodes.map { $0.label ?? "(untitled)" }
 
         let active = activeWindowNode(windowNodes, preferred: activeWindowTitle)
         let activeWindow = active.map {
-            AppSummary.Window(title: $0.label ?? "(untitled)", groups: groups(in: $0))
+            AppSummary.Window(title: oneLine($0.label ?? "(untitled)"), groups: groups(in: $0))
         }
         let shownWindows = active.flatMap { $0.label }.map { [$0] } ?? Array(windowTitles.prefix(1))
         let remaining = max(0, windowTitles.count - shownWindows.count)
 
         return AppSummary(name: name, pid: pid, bundleId: bundleId,
-                          windows: windowTitles, otherWindowCount: remaining,
-                          menus: menus(in: tree), activeWindow: activeWindow)
+                          windows: windowTitles.map { oneLine($0) }, otherWindowCount: remaining,
+                          menus: menuTitles(in: tree), activeWindow: activeWindow)
     }
 
     static func activeWindowNode(_ windows: [ControlNode], preferred: String?) -> ControlNode? {
@@ -82,22 +74,12 @@ public enum AppProjection {
             ?? windows.first
     }
 
-    static func menus(in tree: ControlNode) -> [AppSummary.Menu] {
+    /// Top-level menu titles only (Apple, File, Edit, …). A menu's items are huge and partly
+    /// dynamic (History, Bookmarks, Recent), and submenus load lazily, so we surface just the
+    /// titles; a menu's items are read when it's opened.
+    static func menuTitles(in tree: ControlNode) -> [String] {
         guard let menuBar = firstDescendant(tree, type: "menuBar") else { return [] }
-        var result: [AppSummary.Menu] = []
-        for top in menuBar.children {
-            guard let title = top.label, !title.isEmpty else { continue }
-            // First-level items live under the menuBarItem's child menu.
-            let items = (top.children.first(where: { $0.type == "menu" })?.children ?? top.children)
-                .compactMap { $0.label }
-                .filter { !$0.isEmpty && !isStandardMenuItem($0) }
-            if !items.isEmpty { result.append(AppSummary.Menu(title: title, items: items)) }
-        }
-        return result
-    }
-
-    static func isStandardMenuItem(_ title: String) -> Bool {
-        standardMenuPrefixes.contains { title.hasPrefix($0) }
+        return menuBar.children.compactMap { $0.label }.filter { !$0.isEmpty }.map { oneLine($0) }
     }
 
     static func groups(in window: ControlNode) -> [AppSummary.Group] {
@@ -109,15 +91,15 @@ public enum AppProjection {
             else if !node.actions.isEmpty || node.textValue != nil { other.append(node) }
         }
         var out: [AppSummary.Group] = []
-        out.append(group("Buttons", buttons) { $0.label })
+        out.append(group("Buttons", buttons) { $0.label.map { oneLine($0) } })
         out.append(group("Text fields", fields) { node in
             guard let label = node.label, !label.isEmpty else { return nil }
-            if let value = node.textValue, !value.isEmpty { return "\(label) =\(quote(value))" }
-            return label
+            if let value = node.textValue, !value.isEmpty { return "\(oneLine(label)) =\(quote(value))" }
+            return oneLine(label)
         })
         out.append(group("Other", other) { node in
             guard let label = node.label, !label.isEmpty else { return nil }
-            return "\(label) (\(node.type))"
+            return "\(oneLine(label)) (\(node.type))"
         })
         out.append(group("Text", text) { node in node.label.map(quote) })
         return out.filter { !$0.entries.isEmpty || $0.unnamed > 0 }
@@ -149,10 +131,19 @@ public enum AppProjection {
         return nil
     }
 
-    /// One-line, quote-escaped value for display (newlines/quotes escaped, truncated).
+    /// Collapse any text to a single display line: newlines/tabs escaped (so a multi-line menu item
+    /// or label can't break the outline), then truncated.
+    static func oneLine(_ value: String, limit: Int = 80) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\n")
+            .replacingOccurrences(of: "\t", with: " ")
+        return escaped.count > limit ? String(escaped.prefix(limit)) + "…" : escaped
+    }
+
+    /// One-line, quote-wrapped value for display (newlines escaped via `oneLine`, quotes escaped).
     static func quote(_ value: String) -> String {
-        let oneLine = value.replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\"", with: "\\\"")
-        return "\"\(oneLine.count > 80 ? String(oneLine.prefix(80)) + "…" : oneLine)\""
+        "\"\(oneLine(value).replacingOccurrences(of: "\"", with: "\\\""))\""
     }
 }
 
@@ -166,10 +157,7 @@ public enum AppRenderer {
         lines.append(windowLine)
 
         if !summary.menus.isEmpty {
-            lines.append("Menus (non-standard):")
-            for menu in summary.menus {
-                lines.append("  \(menu.title): " + menu.items.joined(separator: ", "))
-            }
+            lines.append("Menus: " + summary.menus.joined(separator: ", "))
         }
 
         if let window = summary.activeWindow {

@@ -34,7 +34,7 @@ final class AppSummaryTests: XCTestCase {
         XCTAssertEqual(summary.name, "Notes")
         XCTAssertEqual(summary.pid, 123)
         XCTAssertEqual(summary.windows, ["Vacation plan", "New Note"])
-        XCTAssertEqual(summary.menus, [AppSummary.Menu(title: "File", items: ["New Note"])])   // Quit + all-of-Edit filtered
+        XCTAssertEqual(summary.menus, ["File", "Edit"])   // titles only
         XCTAssertEqual(summary.activeWindow?.title, "Vacation plan")
 
         let groups = Dictionary(uniqueKeysWithValues: (summary.activeWindow?.groups ?? []).map { ($0.name, $0) })
@@ -50,7 +50,7 @@ final class AppSummaryTests: XCTestCase {
         let text = AppRenderer.render(summary)
         XCTAssertTrue(text.contains("App: Notes  pid 123  com.apple.Notes"))
         XCTAssertTrue(text.contains("Windows: Vacation plan, New Note"))
-        XCTAssertTrue(text.contains("File: New Note"))
+        XCTAssertTrue(text.contains("Menus: File, Edit"))
         XCTAssertTrue(text.contains("Active window: Vacation plan"))
         XCTAssertTrue(text.contains("Buttons: Save, Cancel [+1 unnamed]"))
         XCTAssertTrue(text.contains("Text fields: Title =\"My note\""))
@@ -69,11 +69,31 @@ final class AppSummaryTests: XCTestCase {
         XCTAssertEqual(summary.activeWindow?.title, "New Note")
     }
 
-    func testStandardMenuFilter() {
-        XCTAssertTrue(AppProjection.isStandardMenuItem("Quit Notes"))
-        XCTAssertTrue(AppProjection.isStandardMenuItem("About Safari"))
-        XCTAssertTrue(AppProjection.isStandardMenuItem("Paste"))
-        XCTAssertFalse(AppProjection.isStandardMenuItem("New Note"))
-        XCTAssertFalse(AppProjection.isStandardMenuItem("Export as PDF…"))
+    func testDialogSubroleCountsAsWindow() {
+        // Safari's window is an AXWindow with subrole AXDialog → humanized type "dialog".
+        let tree = ControlNode(ref: "e1", type: "application", label: "Safari", children: [
+            ControlNode(ref: "e2", type: "menuBar"),
+            ControlNode(ref: "e3", type: "dialog", label: "macOS26/Agent", states: ["main"], children: [
+                ControlNode(ref: "e4", type: "button", label: "Reload")
+            ])
+        ])
+        let summary = AppProjection.project(tree: tree, name: "Safari", pid: 1, bundleId: "com.apple.Safari")
+        XCTAssertEqual(summary.windows, ["macOS26/Agent"])
+        XCTAssertEqual(summary.activeWindow?.title, "macOS26/Agent")
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: (summary.activeWindow?.groups ?? []).map { ($0.name, $0) })["Buttons"]?.entries, ["Reload"])
+    }
+
+    func testNewlinesAreEscapedEverywhere() {
+        let tree = ControlNode(ref: "e1", type: "application", label: "X", children: [
+            ControlNode(ref: "e2", type: "window", label: "Win\nTwo", states: ["main"], children: [
+                ControlNode(ref: "e3", type: "button", label: "Press\nMe"),
+                ControlNode(ref: "e4", type: "textField", label: "Body", textValue: "line1\nline2")
+            ])
+        ])
+        let text = AppRenderer.render(AppProjection.project(tree: tree, name: "X", pid: 1, bundleId: "x"))
+        XCTAssertTrue(text.contains("Press\\nMe"))                  // escaped
+        XCTAssertFalse(text.contains("Press\nMe"))                 // no RAW newline inside a label
+        XCTAssertTrue(text.contains("Body =\"line1\\nline2\""))
+        XCTAssertTrue(text.contains("Active window: Win\\nTwo"))
     }
 }
