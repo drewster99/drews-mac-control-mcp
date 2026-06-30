@@ -64,7 +64,8 @@ struct WalkResult {
 /// Iterative full-subtree walk, depth-first (stack) or breadth-first (queue). `maxNodes`/`deadline`
 /// are safety caps only — when either trips, `capped` is set so the measurement is honest rather
 /// than hanging. Same per-node work and the same ref minting in both orders, so timing is comparable.
-func walkTree(pid: pid_t, maxNodes: Int, deadline: Date, breadthFirst: Bool) -> WalkResult {
+func walkTree(pid: pid_t, maxNodes: Int, deadline: Date, breadthFirst: Bool,
+              visibleTableRowsOnly: Bool = false) -> WalkResult {
     var result = WalkResult()
     let app = AXElement.application(pid: pid)
     app.setMessagingTimeout(2)
@@ -91,7 +92,20 @@ func walkTree(pid: pid_t, maxNodes: Int, deadline: Date, breadthFirst: Bool) -> 
         result.groups[group, default: 0] += 1
         result.allRoles[role, default: 0] += 1
         if group == .other { result.otherRoles[role, default: 0] += 1 }
-        for child in attrs.children where visited.insert(child).inserted { frontier.append(child) }
+
+        // Rule: for any AXTable, enumerate only visible (∪ selected) rows — unless the table doesn't
+        // implement AXVisibleRows, in which case fall back to its full children so we lose nothing.
+        let children: [AXElement]
+        if visibleTableRowsOnly, role == "AXTable",
+           let visibleRaw = element.copyAttribute("AXVisibleRows") as? [AXUIElement] {
+            let visible = visibleRaw.map(AXElement.init)
+            let selected = (element.copyAttribute("AXSelectedRows") as? [AXUIElement])?.map(AXElement.init) ?? []
+            var seen = Set<AXElement>()
+            children = (visible + selected).filter { seen.insert($0).inserted }
+        } else {
+            children = attrs.children
+        }
+        for child in children where visited.insert(child).inserted { frontier.append(child) }
     }
     return result
 }
@@ -365,9 +379,10 @@ func resolveApp(_ query: String) -> NSRunningApplication? {
 
 // MARK: - Enumerate every app, one pass per traversal order
 
-func enumeratePass(breadthFirst: Bool, maxNodes: Int, deadlineSeconds: Double) {
+func enumeratePass(breadthFirst: Bool, maxNodes: Int, deadlineSeconds: Double, visibleTableRowsOnly: Bool = false) {
     let apps = regularApps.sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
-    print("== \(breadthFirst ? "BREADTH-first" : "DEPTH-first") — full enumeration of \(apps.count) apps ==")
+    let label = (breadthFirst ? "BREADTH-first" : "DEPTH-first") + (visibleTableRowsOnly ? " — VISIBLE table rows only" : " — full")
+    print("== \(label) — \(apps.count) apps ==")
     var totalNodes = 0
     var totalMs = 0.0
     for app in apps {
@@ -376,7 +391,8 @@ func enumeratePass(breadthFirst: Bool, maxNodes: Int, deadlineSeconds: Double) {
         var walk = WalkResult()
         let ms = milliseconds {
             walk = walkTree(pid: pid, maxNodes: maxNodes,
-                            deadline: Date().addingTimeInterval(deadlineSeconds), breadthFirst: breadthFirst)
+                            deadline: Date().addingTimeInterval(deadlineSeconds), breadthFirst: breadthFirst,
+                            visibleTableRowsOnly: visibleTableRowsOnly)
         }
         totalNodes += walk.nodeCount
         totalMs += ms
@@ -480,6 +496,12 @@ if arguments.first == "watch" {
     let perAppDeadline = 30.0
     enumeratePass(breadthFirst: false, maxNodes: fullMaxNodes, deadlineSeconds: perAppDeadline)
     enumeratePass(breadthFirst: true, maxNodes: fullMaxNodes, deadlineSeconds: perAppDeadline)
+} else if arguments.first == "ruled" {
+    // Breadth-first, baseline (full) vs the new rule (visible AXTable rows only) — same caps.
+    let fullMaxNodes = 300_000
+    let perAppDeadline = 30.0
+    enumeratePass(breadthFirst: true, maxNodes: fullMaxNodes, deadlineSeconds: perAppDeadline, visibleTableRowsOnly: false)
+    enumeratePass(breadthFirst: true, maxNodes: fullMaxNodes, deadlineSeconds: perAppDeadline, visibleTableRowsOnly: true)
 } else {
     measureAll(maxNodes: maxNodes)
 }
