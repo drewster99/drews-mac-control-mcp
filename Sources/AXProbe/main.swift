@@ -382,6 +382,106 @@ func resolveApp(_ query: String) -> NSRunningApplication? {
         ?? regularApps.first { $0.bundleIdentifier == query }
 }
 
+// MARK: - Per-element subscription monitor with delta reload (one app)
+
+/// Per-element notifications we attach to EVERY node (the change-relevant ones; window/app-level
+/// ones are pointless on a leaf and just fail harmlessly).
+let perElementNotifications: [String] = [
+    kAXValueChangedNotification, kAXTitleChangedNotification, kAXUIElementDestroyedNotification,
+    kAXLayoutChangedNotification, kAXSelectedChildrenChangedNotification, kAXRowCountChangedNotification,
+    kAXSelectedTextChangedNotification
+]
+
+/// Counters the C callback touches (run-loop thread only, so no locking).
+final class SubMon {
+    static let shared = SubMon()
+    var updatesWindow = 0
+    var updatesTotal = 0
+    var dirty = false
+    func bump() { updatesWindow += 1; updatesTotal += 1; dirty = true }
+}
+
+let subMonCallback: AXObserverCallback = { _, _, _, _ in SubMon.shared.bump() }
+
+func submon(appQuery: String, seconds: Double) {
+    guard let app = resolveApp(appQuery) else {
+        FileHandle.standardError.write(Data("No regular app matches \"\(appQuery)\".\n".utf8))
+        exit(1)
+    }
+    let pid = app.processIdentifier
+    var observerOptional: AXObserver?
+    guard AXObserverCreate(pid, subMonCallback, &observerOptional) == .success, let observer = observerOptional else {
+        print("  AXObserverCreate failed"); exit(1)
+    }
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
+
+    var subscribed = Set<AXElement>()          // CFEqual-keyed — identity by UI element, not pointer
+    var doubleSubscribeAttempts = 0            // hard guard: must stay 0
+    var reloadsTotal = 0, reloadsWindow = 0
+    var reloadMsTotal = 0.0
+    var lastAdded = 0, lastRemoved = 0
+
+    func currentElements() -> Set<AXElement> {
+        let walk = walkTree(pid: pid, maxNodes: 50_000,
+                            deadline: Date().addingTimeInterval(10), breadthFirst: true, visibleRowsOnly: true)
+        return Set(walk.refByElement.keys)
+    }
+    func subscribe(_ element: AXElement) {
+        guard !subscribed.contains(element) else { doubleSubscribeAttempts += 1; return }   // never twice
+        for notification in perElementNotifications {
+            _ = AXObserverAddNotification(observer, element.raw, notification as CFString, nil)
+        }
+        subscribed.insert(element)
+    }
+    func unsubscribe(_ element: AXElement) {
+        for notification in perElementNotifications {
+            _ = AXObserverRemoveNotification(observer, element.raw, notification as CFString)
+        }
+        subscribed.remove(element)
+    }
+    func reload() {
+        let fresh = currentElements()
+        let removed = subscribed.subtracting(fresh)   // discard departed (unsubscribe)
+        let added = fresh.subtracting(subscribed)      // subscribe only the genuinely new
+        for element in removed { unsubscribe(element) }
+        for element in added { subscribe(element) }
+        lastRemoved = removed.count; lastAdded = added.count
+    }
+
+    print("== submon \(app.localizedName ?? "?") (\(pid)) ==")
+    var initial = Set<AXElement>()
+    let walkMs = milliseconds { initial = currentElements() }
+    let subscribeMs = milliseconds { for element in initial { subscribe(element) } }
+    print(String(format: "  walk: %d elements in %.0f ms", initial.count, walkMs))
+    print(String(format: "  subscribe: %d elements × %d notifications (%d observer-adds) in %.0f ms",
+                 subscribed.count, perElementNotifications.count, subscribed.count * perElementNotifications.count, subscribeMs))
+    print("  monitoring \(Int(seconds))s — one line per 5s:\n")
+
+    let start = Date()
+    let printer = Timer(timeInterval: 5, repeats: true) { _ in
+        print(String(format: "  [t=%3ds] updates=%-6d reloads=%-3d subscribed=%-6d last(+%d -%d) doubleSubAttempts=%d",
+                     Int(Date().timeIntervalSince(start)), SubMon.shared.updatesWindow, reloadsWindow,
+                     subscribed.count, lastAdded, lastRemoved, doubleSubscribeAttempts))
+        SubMon.shared.updatesWindow = 0; reloadsWindow = 0
+    }
+    // Coalesce reloads: a re-walk takes hundreds of ms, so reload at most ~twice a second on change.
+    let reloader = Timer(timeInterval: 0.5, repeats: true) { _ in
+        guard SubMon.shared.dirty else { return }
+        SubMon.shared.dirty = false
+        let ms = milliseconds { reload() }
+        reloadsTotal += 1; reloadsWindow += 1; reloadMsTotal += ms
+    }
+    RunLoop.current.add(printer, forMode: .default)
+    RunLoop.current.add(reloader, forMode: .default)
+    CFRunLoopRunInMode(.defaultMode, seconds, false)
+    printer.invalidate(); reloader.invalidate()
+
+    for element in subscribed { unsubscribe(element) }
+    print(String(format: "\n  totals: %d updates, %d reloads (avg %.0f ms), doubleSubscribeAttempts=%d",
+                 SubMon.shared.updatesTotal, reloadsTotal,
+                 reloadsTotal > 0 ? reloadMsTotal / Double(reloadsTotal) : 0, doubleSubscribeAttempts))
+}
+
 // MARK: - Enumerate every app, one pass per traversal order
 
 func enumeratePass(breadthFirst: Bool, maxNodes: Int, deadlineSeconds: Double, visibleRowsOnly: Bool = false) {
@@ -490,6 +590,10 @@ if arguments.first == "watch" {
     let query = arguments.count > 1 ? arguments[1] : "Calculator"
     let iterations = arguments.count > 2 ? (Int(arguments[2]) ?? 10) : 10
     selftest(appQuery: query, iterations: iterations)
+} else if arguments.first == "submon" {
+    let query = arguments.count > 1 ? arguments[1] : "front"
+    let seconds = arguments.count > 2 ? (Double(arguments[2]) ?? 30) : 30
+    submon(appQuery: query, seconds: seconds)
 } else if arguments.first == "collections" {
     collectionsMode(appQuery: arguments.count > 1 ? arguments[1] : "front", maxNodes: 20_000, deadlineSeconds: 20)
 } else if arguments.first == "roles" {
