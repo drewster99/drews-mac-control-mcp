@@ -23,13 +23,19 @@ See [CONTROL_APP_DESIGN.md](./CONTROL_APP_DESIGN.md) and [MCP_DESIGN.md](./MCP_D
   resolves to pid A, `get_changes(pid A)`, a `Perform` on A) resets A's **500 s** idle timer; a
   periodic sweep unsubscribes everything for A and drops its cached tree/refs when no related call
   arrives within 500 s. Multiple apps cached at once. Open design points:
-  (a) **targeted subtree reload** — a change notification names the element, so re-walk only that
-  subtree, not the whole app (the AXProbe submon did a full ~84–259 ms re-walk per change; fine for
-  a spike, too coarse for a long-lived cache);
-  (b) **staleness policy** — subscriptions keep the cache fresh, but apps that under-report changes
-  drift, so either revalidate-on-access when the subscription has been quiet, or accept + offer an
-  explicit refresh;
-  (c) **evict on app termination** (pid death / observer invalidation; pid changes on relaunch);
+  (a) **event-driven in-place updates, no re-walk** — value/title/destroyed notifications patch the
+  named element in place (re-read one attribute, or drop its subtree); only genuinely-NEW structure
+  (`AXCreated`, a new window/sheet, or a container's layout/row-count/children-changed) requires
+  reading that new subtree ONCE to enumerate+subscribe its descendants. Never re-walk unchanged
+  parts or the whole app (the AXProbe submon's full ~84–259 ms re-walk-per-change was crude test
+  scaffolding). Gotcha: scrolling a collection changes `AXVisibleRows` but often posts no clean
+  notification, so collections may need a `visibleRows` re-read on access (or watch the scrollbar);
+  (b) **staleness policy — DECIDED: trust subscriptions.** No revalidate-on-access; the cache is
+  only as fresh as the app reports. If an action hits a since-changed/stale ref it fails and the
+  caller re-queries (`App`/`refresh`). Accept the rare drift from apps that under-report.
+  (c) **evict on app termination — DECIDED: yes.** Drop the session + unsubscribe on `NSWorkspace`
+  terminate / observer invalidation (in addition to the 500 s TTL); a relaunch is a new pid → fresh
+  session.
   (d) **per-client vs process-global** — one active caller is fine per-client; dedupe identical
   subscriptions across clients later (ties to cross-client serialization, below).
   Feasibility validated by AXProbe: per-element subscribe ~0.05 ms/add, delivery ~2 ms, delta
