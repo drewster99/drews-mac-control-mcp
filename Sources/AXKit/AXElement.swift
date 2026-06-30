@@ -382,6 +382,10 @@ public extension AXElement {
     /// AXURL destination as an absolute string (links, web areas, some images).
     var url: String? { (copyAttribute("AXURL") as? NSURL)?.absoluteString }
 
+    /// Whether the element is enabled (`AXEnabled`). Defaults to `true` when the attribute is absent —
+    /// many elements that don't expose it are still interactive, so absence shouldn't read as disabled.
+    var isEnabled: Bool { (copyAttribute("AXEnabled") as? Bool) ?? true }
+
     /// Every boolean-typed attribute, name → value. The generic state source (§8); the
     /// renderer surfaces the true ones (with AXEnabled inverted to `disabled`).
     var booleanAttributes: [String: Bool] {

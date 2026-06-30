@@ -27,7 +27,7 @@ func makeConnection() -> NSXPCConnection {
 let mutatingTools: Set<String> = [
     "click", "click_point", "scroll", "key", "type", "drag", "hover",
     "set_value", "focus_keyboard", "reveal", "window", "menu_pick", "sim",
-    "action", "change_text", "change_value", "launch_app", "kill", "open"
+    "action", "change_text", "change_value", "launch_app", "kill", "open", "press"
 ]
 
 // Upper bound on a single XPC handle() call. A host that accepted the request but wedged inside

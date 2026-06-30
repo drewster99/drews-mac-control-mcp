@@ -133,3 +133,48 @@ final class FindSearchTests: XCTestCase {
         XCTAssertEqual(registry.search(pid: 0, limit: 0).diagnostics.scanned, 0)
     }
 }
+
+/// The press(name) ranking — pure, so it's exercised without a live AX tree.
+final class PressSelectionTests: XCTestCase {
+    private func c(_ label: String, _ ref: String = "e1") -> PressByNameTool.Candidate {
+        PressByNameTool.Candidate(ref: ref, label: label, role: "button")
+    }
+
+    func testExactSinglePresses() {
+        XCTAssertEqual(PressByNameTool.select([c("Sign in")], name: "Sign in"), .press(c("Sign in")))
+    }
+
+    func testCaseInsensitiveExactPresses() {
+        XCTAssertEqual(PressByNameTool.select([c("SIGN IN")], name: "sign in"), .press(c("SIGN IN")))
+    }
+
+    func testSubstringSinglePresses() {
+        XCTAssertEqual(PressByNameTool.select([c("Sign in now")], name: "Sign in"), .press(c("Sign in now")))
+    }
+
+    func testExactBeatsSubstring() {
+        let exact = c("Save", "e1")
+        let substring = c("Save As…", "e2")
+        XCTAssertEqual(PressByNameTool.select([substring, exact], name: "Save"), .press(exact))
+    }
+
+    func testTwoExactAreAmbiguous() {
+        let a = c("Save", "e1")
+        let b = c("Save", "e2")
+        XCTAssertEqual(PressByNameTool.select([a, b], name: "Save"), .ambiguous([a, b]))
+    }
+
+    func testEquallyRankedSubstringsAreAmbiguous() {
+        let a = c("Save As…", "e1")
+        let b = c("Save Draft", "e2")
+        XCTAssertEqual(PressByNameTool.select([a, b], name: "Save"), .ambiguous([a, b]))
+    }
+
+    func testNoLabelContainsNameIsNoMatch() {
+        XCTAssertEqual(PressByNameTool.select([c("Cancel")], name: "Save"), .noMatch)
+    }
+
+    func testEmptyCandidatesIsNoMatch() {
+        XCTAssertEqual(PressByNameTool.select([], name: "Save"), .noMatch)
+    }
+}

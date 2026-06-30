@@ -910,6 +910,125 @@ public struct LaunchAppTool: Tool {
     }
 }
 
+/// A high-level shortcut: press a control by its visible name instead of by ref. It finds the
+/// ENABLED, pressable element whose label matches `name` and presses it — so the call carries the
+/// human-readable target (unlike `action(ref,"press")`, whose opaque ref hides what's being pressed).
+public struct PressByNameTool: Tool {
+    private let registry: ElementRegistry
+    private let isTrusted: @Sendable () -> Bool
+
+    public init(registry: ElementRegistry, isTrusted: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() }) {
+        self.registry = registry
+        self.isTrusted = isTrusted
+    }
+
+    public let name = "press"
+
+    /// One candidate the press could land on. `ref` drives the actual press; `label`/`role` are for
+    /// disambiguation output.
+    struct Candidate: Equatable {
+        let ref: String
+        let label: String
+        let role: String
+    }
+
+    enum Selection: Equatable {
+        case press(Candidate)
+        case ambiguous([Candidate])
+        case noMatch
+    }
+
+    /// Rank enabled, pressable candidates against `name`: exact label (0) beats case-insensitive
+    /// exact (1) beats substring (2); a label that doesn't contain `name` is dropped. The best tier
+    /// wins; a single winner is pressed, several equally-good ones are returned to disambiguate.
+    /// Pure, so the ranking is unit-tested without a live AX tree.
+    static func select(_ candidates: [Candidate], name: String) -> Selection {
+        let lowerName = name.lowercased()
+        func tier(_ label: String) -> Int? {
+            if label == name { return 0 }
+            if label.lowercased() == lowerName { return 1 }
+            if label.lowercased().contains(lowerName) { return 2 }
+            return nil
+        }
+        let tiered = candidates.compactMap { candidate in tier(candidate.label).map { (candidate, $0) } }
+        guard let best = tiered.map({ $0.1 }).min() else { return .noMatch }
+        let winners = tiered.filter { $0.1 == best }.map { $0.0 }
+        return winners.count == 1 ? .press(winners[0]) : .ambiguous(winners)
+    }
+
+    public var descriptor: [String: Any] {
+        [
+            "name": name,
+            "description": "Press a control by its visible NAME (a high-level shortcut for find_elements + action(press)). Finds the ENABLED, pressable element whose label matches `name` and presses it, then settles the UI. Exact label wins, then case-insensitive, then substring; if several equally-good enabled matches remain it returns them as `candidates` to disambiguate instead of guessing. `pid` comes from control_app. Requires Accessibility.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "pid": ["type": "integer"],
+                    "name": ["type": "string", "description": "The visible label of the control to press, e.g. \"Sign in\"."],
+                    "role": ["type": "string", "description": "Optional role to constrain the search (humanized like `button`/`link` or raw `AXButton`)."],
+                    "timeout": ["type": "number", "description": "Seconds to spend searching for the control (default 5)."]
+                ],
+                "required": ["pid", "name"]
+            ]
+        ]
+    }
+
+    public func call(_ arguments: [String: Any]) -> String {
+        guard isTrusted() else { return controlPermissionError }
+        guard let pidValue = arguments["pid"] as? Int, let pid = pid_t(exactly: pidValue) else {
+            return controlJSON(["success": false, "error": "missing_or_invalid_pid"])
+        }
+        guard let name = (arguments["name"] as? String), !name.isEmpty else {
+            return controlJSON(["success": false, "error": "missing_name"])
+        }
+        let requested = (arguments["timeout"] as? Double) ?? Double(arguments["timeout"] as? Int ?? 0)
+        let budget = requested > 0 ? min(max(requested, 0.5), 30) : 5
+
+        // Search by LABEL (titleContains matches title∪description∪help — exactly what `select`
+        // ranks on), not the broad cross-field `query`: otherwise 50 elements matching `name` only
+        // via value/url/identifier could exhaust the limit before a real label match is reached,
+        // and they'd then be discarded — yielding a false no_enabled_match.
+        let matches = registry.search(pid: pid, roleFilter: arguments["role"] as? String, titleContains: name,
+                                      actionable: true, limit: 50, budget: budget).matches
+        // Keep only enabled elements that actually advertise a press, with a non-empty label to rank.
+        let candidates: [Candidate] = matches.compactMap { match in
+            guard match.actions.contains("press"), let label = match.title, !label.isEmpty,
+                  let element = registry.element(for: match.ref), element.isEnabled else { return nil }
+            return Candidate(ref: match.ref, label: label, role: match.role)
+        }
+
+        switch PressByNameTool.select(candidates, name: name) {
+        case .noMatch:
+            return controlJSON(["success": false, "error": "no_enabled_match", "name": name,
+                                "howToFix": "No enabled, pressable element's label matched. Inspect with find_elements(query:…), or press a ref directly via action(ref,\"press\")."])
+        case .ambiguous(let winners):
+            return controlJSON(["success": false, "error": "ambiguous", "name": name,
+                                "candidates": winners.map { ["ref": $0.ref, "label": $0.label, "role": $0.role] },
+                                "howToFix": "Several enabled matches share the best label rank — press one with action(ref,\"press\"), or pass a more exact name."])
+        case .press(let winner):
+            switch resolveRef(registry, winner.ref) {
+            case .error(let json):
+                return json
+            case .element(let element):
+                var ok = false
+                let perform: () -> Void = {
+                    if let raw = element.rawActionNames.first(where: { ActionVocab.matches(input: "press", rawName: $0) }) {
+                        ok = element.perform(raw)
+                    }
+                }
+                if let actorPid = element.pid {
+                    _ = SettleEngine(session: registry).actAndSettle(pid: actorPid, action: perform)
+                } else {
+                    perform()
+                }
+                return actedResponse(registry, ref: winner.ref, deadline: Date().addingTimeInterval(4),
+                                     base: ["success": ok, "ok": ok, "ref": winner.ref, "pressed": winner.label],
+                                     scope: "window")
+            }
+        }
+    }
+}
+
 public enum ControlAppTools {
     public static func all(
         registry: ElementRegistry,
@@ -921,6 +1040,7 @@ public enum ControlAppTools {
             ControlAppTool(registry: registry, isTrusted: isTrusted),
             LaunchAppTool(registry: registry, isTrusted: isTrusted),
             ControlActionTool(registry: registry, isTrusted: isTrusted),
+            PressByNameTool(registry: registry, isTrusted: isTrusted),
             ChangeTextTool(registry: registry, isTrusted: isTrusted),
             ChangeValueTool(registry: registry, isTrusted: isTrusted),
             ClickRefTool(registry: registry, isTrusted: isTrusted, click: click),
