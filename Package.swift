@@ -14,6 +14,8 @@ let package = Package(
         .executableTarget(name: "MacControlHost", dependencies: ["HostKit"]),
         .executableTarget(name: "MacControlRelay", dependencies: ["HostKit"]),
         .executableTarget(name: "MacControlRegistrar"),
+        .executableTarget(name: "AXProbe", dependencies: ["AXKit"],
+                          swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(name: "MacControlMCPCoreTests", dependencies: ["MacControlMCPCore"]),
         .testTarget(name: "AXKitTests", dependencies: ["AXKit", "MacControlMCPCore"]),
         .testTarget(name: "CaptureKitTests", dependencies: ["CaptureKit"]),
