@@ -14,6 +14,18 @@ See [CONTROL_APP_DESIGN.md](./CONTROL_APP_DESIGN.md) and [MCP_DESIGN.md](./MCP_D
   the only synchronization is the implicit post-action settle plus the AX-predicate `wait_for`;
   extend that family with text-change and launch-complete conditions.
 
+- **Serialize mutating actions across clients** — the host runs one `MCPHostService` per
+  connection with no cross-client serialization (each has its own per-instance lock), so two
+  simultaneously-active clients run truly in parallel and interleave synthetic input, focus
+  changes, and window/Space ops on the one shared desktop. Per-client *state* is fully isolated
+  (own `MCPServer` + `ElementRegistry` + ref namespace) and there is no data race — the contention
+  is purely physical (one keyboard/mouse/frontmost app). Add a **host-global lock or serial queue
+  around the mutating verbs only**, leaving perception (reads/screenshots) parallel. Design points:
+  global vs per-target-app granularity; fairness / a wait timeout so one client can't starve
+  another; and `batch` should hold the lock for its *whole* sequence so a multi-step action can't
+  be interleaved by another client (atomic-ish per client). Trade: less action parallelism for no
+  UI interleaving — acceptable since the desktop is physically serial anyway.
+
 ---
 
 ## control_app — brevity pass (opt-in, once full output is proven)
