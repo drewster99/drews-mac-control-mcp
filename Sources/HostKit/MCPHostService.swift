@@ -29,12 +29,24 @@ public func makeFullServer() -> MCPServer {
     // closures, so AXKit stays input-free.
     let click: ControlClick = { x, y, count in SyntheticInput.click(x: x, y: y, rightButton: false, clickCount: count) }
     let type: ControlType = { text, paste in paste ? SyntheticInput.paste(text) : SyntheticInput.typeUnicode(text) }
-    return MCPServer(
-        tools: MCPServer.defaultTools()
-            + AXTools.all(session: session, click: click, type: type)
-            + [ScreenshotTool(), OCRTool()]
-            + InputTools.all(settle: settle)
-    )
+    let baseTools = MCPServer.defaultTools()
+        + AXTools.all(session: session, click: click, type: type)
+        + [ScreenshotTool(), OCRTool()]
+        + InputTools.all(settle: settle)
+    // `batch` dispatches over the base tools (never itself), so a sequence like pressing several
+    // calculator keys runs in one XPC round-trip instead of one per key.
+    let dispatch: (String, [String: Any]) -> String = { name, arguments in
+        guard let tool = baseTools.first(where: { $0.name == name }) else {
+            let payload: [String: Any] = ["error": "unknown_tool", "tool": name]
+            do {
+                return String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+            } catch {
+                return #"{"error":"unknown_tool"}"#
+            }
+        }
+        return tool.call(arguments)
+    }
+    return MCPServer(tools: baseTools + [BatchTool(dispatch: dispatch)])
 }
 
 public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendable {
