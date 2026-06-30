@@ -41,11 +41,35 @@ public final class ElementRegistry {
 
     public struct Match: Sendable {
         public let ref: String
+        /// Humanized role (`link`, `button`, `window`) — the same vocabulary control_app renders,
+        /// so find results speak the language an agent reads back from the tree.
         public let role: String
+        /// The element's label: title ∪ description ∪ help (first non-empty).
         public let title: String?
         public let identifier: String?
         public let frame: CGRect?
         public let actions: [String]
+        public let value: String?
+        public let valueDescription: String?
+        public let url: String?
+
+        public init(ref: String, role: String, title: String?, identifier: String?, frame: CGRect?,
+                    actions: [String], value: String? = nil, valueDescription: String? = nil,
+                    url: String? = nil) {
+            self.ref = ref; self.role = role; self.title = title; self.identifier = identifier
+            self.frame = frame; self.actions = actions; self.value = value
+            self.valueDescription = valueDescription; self.url = url
+        }
+    }
+
+    public struct FindDiagnostics: Sendable {
+        public var scanned: Int
+        public var elapsedMs: Int
+        public var budgetExhausted: Bool
+        public var truncatedByLimit: Bool
+        /// Nodes enqueued but never visited because the budget ran out — the part of the tree the
+        /// search didn't reach (so an empty result isn't mistaken for "definitively absent").
+        public var unexploredFrontier: Int
     }
 
     public enum RefResolution {
@@ -110,26 +134,63 @@ public final class ElementRegistry {
     }
 
     private func match(_ ref: String, _ element: AXElement) -> Match {
-        Match(ref: ref, role: element.role ?? "AXUnknown", title: element.title,
-              identifier: element.identifier, frame: element.frame, actions: element.actions)
+        ElementRegistry.makeMatch(ref: ref, attrs: element.snapshotAttributes(),
+                                  actions: ElementRegistry.displayActions(element))
+    }
+
+    /// Build a `Match` from an already-read bulk snapshot — the SAME basis control_app renders from:
+    /// humanized role, label = title ∪ description ∪ help, and the visible value/url fields.
+    static func makeMatch(ref: String, attrs: AXElement.SnapshotAttributes, actions: [String]) -> Match {
+        let label = [attrs.title, attrs.axDescription, attrs.help].compactMap { $0 }.first { !$0.isEmpty }
+        return Match(ref: ref,
+                     role: RoleNames.humanize(role: attrs.role ?? "AXUnknown", subrole: attrs.subrole),
+                     title: label, identifier: attrs.identifier, frame: attrs.frame, actions: actions,
+                     value: attrs.value, valueDescription: attrs.valueDescription, url: attrs.url)
+    }
+
+    /// The element's performable actions as the SHORT display verbs the tree shows (`press`, `menu`)
+    /// rather than raw `AXPress` — so find results and control_app speak the same action vocabulary.
+    static func displayActions(_ element: AXElement) -> [String] {
+        var seen = Set<String>()
+        return element.rawActionNames
+            .map { ActionVocab.displayLabel(forRaw: $0) }
+            .filter { seen.insert($0).inserted }
     }
 
     /// Pure match predicate for find_elements (§8), extracted so it's deterministically
-    /// unit-testable without a live AX tree. `titleContains`/`valueContains` match
-    /// case-insensitively and are expected pre-lowercased by the caller; `identifierFilter`
-    /// matches `AXIdentifier` EXACTLY (modern apps — e.g. Calculator — label controls there,
-    /// not via AXTitle); `actionable` (when true) keeps only elements that advertise actions.
+    /// unit-testable without a live AX tree. All text needles (`query`/`titleContains`/
+    /// `valueContains`) are expected pre-lowercased by the caller; `identifierFilter` matches
+    /// `AXIdentifier` EXACTLY (modern apps — e.g. Calculator — label controls there, not via title);
+    /// `actionable` (when true) keeps only elements that advertise actions. `query` is the catch-all:
+    /// a substring hit on ANY visible text field. `roleFilter` accepts the humanized role
+    /// (`link`/`window`) the tree shows OR the raw `AXLink`, case-insensitively — so the vocabulary
+    /// an agent reads back from control_app is exactly what find accepts.
     static func elementMatches(
-        role: String?, title: String?, identifier: String?, value: String?, actions: [String],
+        role: String?, subrole: String? = nil, label: String?, identifier: String?,
+        value: String?, valueDescription: String? = nil, placeholder: String? = nil, url: String? = nil,
+        actions: [String], query: String? = nil,
         roleFilter: String?, titleContains: String?, identifierFilter: String?,
         valueContains: String?, actionable: Bool?
     ) -> Bool {
-        if let roleFilter, role != roleFilter { return false }
-        if let titleContains, !(title?.lowercased().contains(titleContains) ?? false) { return false }
+        if let roleFilter, !roleFilterMatches(roleFilter, role: role, subrole: subrole) { return false }
+        if let titleContains, !(label?.lowercased().contains(titleContains) ?? false) { return false }
         if let identifierFilter, identifier != identifierFilter { return false }
         if let valueContains, !(value?.lowercased().contains(valueContains) ?? false) { return false }
         if actionable == true, actions.isEmpty { return false }
+        if let query, !query.isEmpty {
+            let haystacks = [label, value, valueDescription, placeholder, url, identifier]
+            if !haystacks.contains(where: { $0?.lowercased().contains(query) ?? false }) { return false }
+        }
         return true
+    }
+
+    /// True when `filter` designates this element's role, accepting either the humanized form the
+    /// tree displays (`link`, `window`, `tab`) or the raw AX name (`AXLink`), case-insensitively.
+    static func roleFilterMatches(_ filter: String, role: String?, subrole: String?) -> Bool {
+        let wanted = filter.lowercased()
+        let raw = (role ?? "").lowercased()
+        let humanized = RoleNames.humanize(role: role ?? "", subrole: subrole).lowercased()
+        return wanted == raw || wanted == humanized || "ax" + wanted == raw
     }
 
     /// Snapshot an app subtree with identity-stable refs, then attach each ref's locator.
@@ -281,47 +342,85 @@ public final class ElementRegistry {
         }
     }
 
-    public func find(pid: pid_t, role: String?, titleContains: String?,
-                     identifier: String? = nil, valueContains: String? = nil, actionable: Bool? = nil,
-                     limit: Int, maxDepth: Int = 12, budget: TimeInterval = 2) -> [Match] {
+    /// Live, **breadth-first** search of an app's AX tree using the SAME per-node basis as
+    /// control_app — the extended bulk read (label/value/valueDescription/placeholder/url) and
+    /// humanized roles — bounded by a wall-clock `budget` and early-exiting once `limit` matches are
+    /// found. BFS (not the old depth-12 DFS) covers the tree's breadth so a shallow target isn't
+    /// missed because a huge sibling subtree was descended first; the larger default budget lets it
+    /// reach deep web/native content. Returns the matches plus why-it-stopped diagnostics.
+    public func search(pid: pid_t, query: String? = nil, roleFilter: String? = nil,
+                       titleContains: String? = nil, identifierFilter: String? = nil,
+                       valueContains: String? = nil, actionable: Bool? = nil,
+                       limit: Int, maxDepth: Int = 64, budget: TimeInterval = 2)
+        -> (matches: [Match], diagnostics: FindDiagnostics) {
+        let started = Date()
+        // `limit` is the documented maximum; a non-positive limit asks for nothing. Guard before the
+        // walk so we never append a match the cap should have excluded (the old DFS checked first).
+        guard limit > 0 else {
+            return ([], FindDiagnostics(scanned: 0, elapsedMs: 0, budgetExhausted: false,
+                                        truncatedByLimit: false, unexploredFrontier: 0))
+        }
         let app = AXElement.application(pid: pid)
         app.setMessagingTimeout(5)
-        // Bound the walk by wall clock: `limit` caps results but not nodes traversed, and a big tree
-        // (or wait_for polling this every ~150ms) would otherwise issue thousands of IPC calls with
-        // no ceiling. The `visited` set guards malformed/cyclic trees.
-        let deadline = Date().addingTimeInterval(budget)
+        let deadline = started.addingTimeInterval(budget)
+        let needle = query?.lowercased()
+        let titleNeedle = titleContains?.lowercased()
+        let valueNeedle = valueContains?.lowercased()
+
         var results: [Match] = []
         var visited: Set<AXElement> = [app]
+        var queue: [(element: AXElement, depth: Int)] = [(app, 0)]
+        var index = 0
+        var scanned = 0
+        var budgetExhausted = false
+        var truncated = false
 
-        func visit(_ element: AXElement, depth: Int) {
-            if results.count >= limit || Date() >= deadline { return }
-            // One bulk IPC read for role/identifier/title/value/frame/children rather than a
-            // separate cross-process call per attribute. `actions` isn't in the bulk set (it uses a
-            // different AX API), so fetch it only when the `actionable` filter needs it.
+        while index < queue.count {
+            if Date() >= deadline { budgetExhausted = true; break }
+            let (element, depth) = queue[index]
+            index += 1
+            scanned += 1
+            // One bulk IPC read per node (role/subrole/label-fields/value/frame/children). `actions`
+            // uses a different AX API, so it's read only for a node that already passed the cheap
+            // criteria (and only then gated by `actionable`).
             let attrs = element.snapshotAttributes()
-            let actionsForMatch = actionable != nil ? element.actions : []
-            if ElementRegistry.elementMatches(
-                role: attrs.role, title: attrs.title, identifier: attrs.identifier,
-                value: attrs.value, actions: actionsForMatch,
-                roleFilter: role, titleContains: titleContains, identifierFilter: identifier,
-                valueContains: valueContains, actionable: actionable) {
-                // Keep Match.actions populated (find_elements surfaces it), paying the actions read
-                // only for matched rows when we didn't already fetch them for the filter.
-                let actions = actionable != nil ? actionsForMatch : element.actions
-                results.append(Match(ref: ref(for: element, pid: pid), role: attrs.role ?? "AXUnknown",
-                                     title: attrs.title, identifier: attrs.identifier,
-                                     frame: attrs.frame, actions: actions))
+            let label = [attrs.title, attrs.axDescription, attrs.help].compactMap { $0 }.first { !$0.isEmpty }
+            let preActionPass = ElementRegistry.elementMatches(
+                role: attrs.role, subrole: attrs.subrole, label: label, identifier: attrs.identifier,
+                value: attrs.value, valueDescription: attrs.valueDescription, placeholder: attrs.placeholder,
+                url: attrs.url, actions: [], query: needle, roleFilter: roleFilter,
+                titleContains: titleNeedle, identifierFilter: identifierFilter,
+                valueContains: valueNeedle, actionable: nil)
+            if preActionPass {
+                let actions = ElementRegistry.displayActions(element)
+                if actionable != true || !actions.isEmpty {
+                    results.append(ElementRegistry.makeMatch(ref: ref(for: element, pid: pid),
+                                                             attrs: attrs, actions: actions))
+                    if results.count >= limit { truncated = true; break }
+                }
             }
             if depth < maxDepth {
                 for child in attrs.children where visited.insert(child).inserted {
-                    if results.count >= limit || Date() >= deadline { return }
-                    visit(child, depth: depth + 1)
+                    queue.append((child, depth + 1))
                 }
             }
         }
 
-        visit(app, depth: 0)
-        return results
+        let diagnostics = FindDiagnostics(
+            scanned: scanned, elapsedMs: Int(Date().timeIntervalSince(started) * 1000),
+            budgetExhausted: budgetExhausted, truncatedByLimit: truncated,
+            unexploredFrontier: max(0, queue.count - index))
+        return (results, diagnostics)
+    }
+
+    /// Thin wrapper preserving the original `find` shape (used by wait_for's appears/disappears
+    /// polling); the role-vocabulary and BFS-coverage fixes flow through to it for free.
+    public func find(pid: pid_t, role: String?, titleContains: String?,
+                     identifier: String? = nil, valueContains: String? = nil, actionable: Bool? = nil,
+                     limit: Int, maxDepth: Int = 64, budget: TimeInterval = 2) -> [Match] {
+        search(pid: pid, query: nil, roleFilter: role, titleContains: titleContains,
+               identifierFilter: identifier, valueContains: valueContains, actionable: actionable,
+               limit: limit, maxDepth: maxDepth, budget: budget).matches
     }
 
     public func focused() -> Match? {

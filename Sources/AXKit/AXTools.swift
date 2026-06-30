@@ -132,17 +132,17 @@ public struct FindElementsTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Search an app's tree by role, title/value substring, exact AXIdentifier, and/or actionable-only; returns matches with refs + identifier. Requires Accessibility.",
+            "description": "Search an app's UI tree (same basis as control_app) for matching elements. `query` substring-matches across ALL visible text — label (title/description/help), value, valueDescription, placeholder, url, identifier. Narrow with optional filters: `role` (the humanized role the tree shows, e.g. `link`/`button`/`window`, OR the raw `AXLink` — case-insensitive), `identifier` (exact AXIdentifier — modern apps like Calculator label controls here, not via title), `actionable` (only elements that can be acted on). Returns matches (ref/role/label/value/actions/frame) plus diagnostics; on no match the diagnostics carry a `hint`. Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
                     "pid": ["type": "integer"],
-                    "role": ["type": "string"],
-                    "titleContains": ["type": "string"],
-                    "identifier": ["type": "string", "description": "Exact AXIdentifier match — modern apps (e.g. Calculator) label controls here, not via title."],
-                    "value": ["type": "string", "description": "Substring match on the element's AXValue."],
+                    "query": ["type": "string", "description": "Catch-all substring (case-insensitive) matched across every visible text field of each element."],
+                    "role": ["type": "string", "description": "Humanized role as shown in the tree (`link`, `button`, `window`, `tab`) or the raw AX name (`AXLink`). Case-insensitive."],
+                    "identifier": ["type": "string", "description": "Exact AXIdentifier match."],
                     "actionable": ["type": "boolean", "description": "If true, keep only elements that advertise AX actions."],
-                    "limit": ["type": "integer", "description": "Default 20."]
+                    "limit": ["type": "integer", "description": "Max matches to return (default 20). The search early-exits once reached."],
+                    "timeout": ["type": "number", "description": "Seconds to spend searching (default 5). Raise it for big/deep pages."]
                 ],
                 "required": ["pid"]
             ]
@@ -155,26 +155,57 @@ public struct FindElementsTool: Tool {
             return #"{"error":"missing_pid"}"#
         }
         guard let pid = validPid(pidValue) else { return #"{"error":"invalid_pid"}"# }
-        let matches = session.find(
+        let limit = (arguments["limit"] as? Int) ?? 20
+        let requested = (arguments["timeout"] as? Double) ?? Double(arguments["timeout"] as? Int ?? 0)
+        let budget = requested > 0 ? min(max(requested, 0.5), 30) : 5
+
+        let outcome = session.search(
             pid: pid,
-            role: arguments["role"] as? String,
-            titleContains: (arguments["titleContains"] as? String)?.lowercased(),
-            identifier: arguments["identifier"] as? String,
-            valueContains: (arguments["value"] as? String)?.lowercased(),
+            query: arguments["query"] as? String,
+            roleFilter: arguments["role"] as? String,
+            // titleContains / value are accepted (legacy) but `query` is the documented surface.
+            titleContains: arguments["titleContains"] as? String,
+            identifierFilter: arguments["identifier"] as? String,
+            valueContains: arguments["value"] as? String,
             actionable: arguments["actionable"] as? Bool,
-            limit: (arguments["limit"] as? Int) ?? 20
+            limit: limit, budget: budget
         )
-        let rows = matches.map { match -> [String: Any] in
-            [
+        let rows = outcome.matches.map { match -> [String: Any] in
+            var row: [String: Any] = [
                 "ref": match.ref,
                 "role": match.role,
-                "title": match.title ?? "",
+                "label": match.title ?? "",
                 "identifier": match.identifier ?? "",
                 "actions": match.actions,
                 "frame": frameValue(match.frame)
             ]
+            if let value = match.value, !value.isEmpty { row["value"] = value }
+            if let valueDescription = match.valueDescription, !valueDescription.isEmpty { row["valueDescription"] = valueDescription }
+            if let url = match.url, !url.isEmpty { row["url"] = url }
+            return row
         }
-        return jsonString(rows)
+        let diagnostics = findDiagnostics(outcome.diagnostics, hadMatches: !rows.isEmpty)
+        return jsonString(["matches": rows, "count": rows.count, "diagnostics": diagnostics])
+    }
+
+    /// Surface why the search stopped — so an empty result isn't read as "definitively absent" — and
+    /// add an actionable `hint` when nothing matched (budget vs. vocabulary vs. virtualized rows).
+    private func findDiagnostics(_ diagnostics: ElementRegistry.FindDiagnostics, hadMatches: Bool) -> [String: Any] {
+        var out: [String: Any] = [
+            "scanned": diagnostics.scanned,
+            "elapsedMs": diagnostics.elapsedMs,
+            "budgetExhausted": diagnostics.budgetExhausted,
+            "truncatedByLimit": diagnostics.truncatedByLimit,
+            "unexploredFrontier": diagnostics.unexploredFrontier,
+            "source": "live"
+        ]
+        guard !hadMatches else { return out }
+        if diagnostics.budgetExhausted {
+            out["hint"] = "No matches yet — the search hit its time budget after \(diagnostics.scanned) nodes with \(diagnostics.unexploredFrontier) unexplored. Raise `timeout`, narrow with `role`/`identifier`, or call control_app to read the whole tree."
+        } else {
+            out["hint"] = "No element matched after scanning the full reachable tree (\(diagnostics.scanned) nodes). Check the `query`/`role` spelling — `role` accepts the humanized name shown in the tree (e.g. `link`) or the raw `AXLink`. Off-screen list/table rows are virtualized out of AX; reveal/scroll them into view first."
+        }
+        return out
     }
 }
 

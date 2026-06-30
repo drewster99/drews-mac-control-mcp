@@ -172,6 +172,13 @@ public struct AXElement: @unchecked Sendable {
         public var value: String?
         public var frame: CGRect?
         public var children: [AXElement]
+        // The remaining text fields control_app renders/searches on. Defaulted so older call sites
+        // that don't supply them still compile; the bulk read populates them.
+        public var axDescription: String? = nil
+        public var help: String? = nil
+        public var valueDescription: String? = nil
+        public var placeholder: String? = nil
+        public var url: String? = nil
     }
 
     /// Read role/subrole/identifier/title/value/frame/children in a single
@@ -182,14 +189,17 @@ public struct AXElement: @unchecked Sendable {
         let names: [String] = [
             kAXRoleAttribute as String, kAXSubroleAttribute as String, "AXIdentifier",
             kAXTitleAttribute as String, kAXValueAttribute as String,
-            kAXPositionAttribute as String, kAXSizeAttribute as String, kAXChildrenAttribute as String
+            kAXPositionAttribute as String, kAXSizeAttribute as String, kAXChildrenAttribute as String,
+            "AXDescription", "AXHelp", "AXValueDescription", "AXPlaceholderValue", "AXURL"
         ]
         var out: CFArray?
         let err = AXUIElementCopyMultipleAttributeValues(raw, names as CFArray, AXCopyMultipleAttributeOptions(), &out)
         guard err == .success, let values = out as? [AnyObject], values.count == names.count else {
             // Bulk read unsupported/failed — fall back to per-attribute reads (unchanged semantics).
             return SnapshotAttributes(role: role, subrole: subrole, identifier: identifier,
-                                      title: title, value: value, frame: frame, children: children)
+                                      title: title, value: value, frame: frame, children: children,
+                                      axDescription: axDescription, help: help,
+                                      valueDescription: valueDescription, placeholder: placeholderValue, url: url)
         }
 
         // A failed attribute comes back as an AXValue of type .axError (or kCFNull); treat as absent.
@@ -225,10 +235,18 @@ public struct AXElement: @unchecked Sendable {
             guard let raw = present(7), let array = raw as? [AXUIElement] else { return [] }
             return array.map(AXElement.init)
         }
+        var decodedURL: String? {
+            guard let raw = present(12) else { return nil }
+            if let url = raw as? URL { return url.absoluteString }
+            if let url = raw as? NSURL { return url.absoluteString }
+            return nil
+        }
 
         return SnapshotAttributes(role: string(0), subrole: string(1), identifier: string(2),
                                   title: string(3), value: decodedValue, frame: decodedFrame,
-                                  children: decodedChildren)
+                                  children: decodedChildren,
+                                  axDescription: string(8), help: string(9),
+                                  valueDescription: string(10), placeholder: string(11), url: decodedURL)
     }
 
     /// The element this (system-wide or app) element reports as focused.

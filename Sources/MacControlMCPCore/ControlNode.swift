@@ -271,8 +271,10 @@ public enum ControlRenderer {
     //     so the returned hierarchy covers the new view. refresh:"none" returns just {ok}.
     //
     // FIND / NAVIGATE / SCROLL (don't re-read the whole tree when you can target):
-    //   jump to a known element → find_elements(pid, {role|titleContains|identifier|value|actionable})
-    //     returns matching refs (usable with every verb here). pid is in the control_app result.
+    //   jump to a known element → find_elements(pid, query:"text", role:"link", identifier, actionable)
+    //     query substring-matches ANY visible text; role takes the name shown here (link/button/window)
+    //     or the raw AXLink. returns matching refs (usable with every verb here). pid is in the
+    //     control_app result.
     //   bring an off-screen element into view → reveal(ref), then read/expand it
     //   after navigating (a click that swaps a pane/sidebar/tab), see the new view via the acting
     //     verb's refresh:"window", or call control_app(...) again
