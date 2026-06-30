@@ -19,6 +19,20 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(serverInfo["version"] as? String, AppVersion.marketingVersion)
     }
 
+    func testInitializeCapturesClientInfo() throws {
+        let server = MCPServer()
+        XCTAssertNil(server.clientInfo)
+        let line = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"Cursor","version":"1.2"}}}"#
+        _ = server.handleLine(line)
+        XCTAssertEqual(server.clientInfo, "Cursor 1.2")
+    }
+
+    func testInitializeWithoutClientInfoLeavesItNil() throws {
+        let server = MCPServer()
+        _ = server.handleLine(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+        XCTAssertNil(server.clientInfo)
+    }
+
     func testToolsListExposesGrantFreeTools() throws {
         let server = MCPServer()
         let object = try resultObject(server.handleLine(#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#))

@@ -32,4 +32,18 @@ public protocol MCPHostProtocol {
     /// to compare the live agent's version against its own and flag drift (e.g. a stale on-demand
     /// host launchd booted from an older install).
     func buildInfo(withReply reply: @escaping (String) -> Void)
+
+    /// Turn the global debug monitor on/off. When on, the host streams every connected client's
+    /// request/response (with the captured client identity) to THIS connection's debug sink. Global
+    /// — no per-client filtering. Replies with the resulting active state. Used by the app's
+    /// dedicated debug connection, not by the relay.
+    func setDebugMonitoring(enabled: Bool, withReply reply: @escaping (Bool) -> Void)
+}
+
+/// Host → app callback for the live debug stream: one JSON event per MCP request/response, shaped
+/// `{ timestamp, sessionId, client, call, response }`. Registered as the app's `exportedObject` on
+/// the debug connection; the host invokes it whenever monitoring is active.
+@objc(MCPDebugSink)
+public protocol MCPDebugSink {
+    func debugEvent(_ json: String)
 }

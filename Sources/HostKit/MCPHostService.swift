@@ -52,6 +52,9 @@ public func makeFullServer() -> MCPServer {
 public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendable {
     private let server: MCPServer
     private let lock = NSLock()
+    /// Identifies this connection (one per MCP client) in the debug stream. The relay's pid gives
+    /// cross-reconnect continuity; this distinguishes concurrent clients within a host run.
+    private let sessionId = UUID().uuidString
 
     public init(server: MCPServer = makeFullServer()) {
         self.server = server
@@ -61,9 +64,38 @@ public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendabl
         DebugLog.request(line)
         lock.lock()
         let response = server.handleLine(line).map { String(decoding: $0, as: UTF8.self) }
+        let client = server.clientInfo
         lock.unlock()
         DebugLog.response(response)
+        if DebugMonitor.shared.isActive {
+            DebugMonitor.shared.emit(sessionId: sessionId, client: client, call: line, response: response)
+        }
         reply(response)
+    }
+
+    /// Carries this activation's token to the (later-firing) connection error handler, so a stale
+    /// connection's failure only clears the monitor if its sink is still the current one.
+    private final class TokenBox: @unchecked Sendable { var value = 0 }
+
+    public func setDebugMonitoring(enabled: Bool, withReply reply: @escaping (Bool) -> Void) {
+        guard enabled, let connection = NSXPCConnection.current() else {
+            DebugMonitor.shared.deactivate()
+            reply(false)
+            return
+        }
+        let tokenBox = TokenBox()
+        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+            // The app's debug connection died — stop streaming, but only if this is still the
+            // active sink (a reconnect may have registered a newer one).
+            DebugMonitor.shared.deactivate(ifCurrent: tokenBox.value)
+        }
+        guard let sink = proxy as? MCPDebugSink else {
+            DebugMonitor.shared.deactivate()
+            reply(false)
+            return
+        }
+        tokenBox.value = DebugMonitor.shared.activate(sink)
+        reply(true)
     }
 
     private struct PermissionsStatus: Encodable {

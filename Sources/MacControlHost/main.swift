@@ -28,6 +28,10 @@ final class HostDelegate: NSObject, NSXPCListenerDelegate {
         // so refs are namespaced per client (the connection retains exportedObject).
         newConnection.exportedInterface = NSXPCInterface(with: MCPHostProtocol.self)
         newConnection.exportedObject = MCPHostService()
+        // The app's debug connection exports an MCPDebugSink the host calls back to stream events.
+        // Setting this on every connection is harmless — the host only calls sinks that registered
+        // via setDebugMonitoring, which the relay never does.
+        newConnection.remoteObjectInterface = NSXPCInterface(with: MCPDebugSink.self)
         newConnection.resume()
         return true
     }

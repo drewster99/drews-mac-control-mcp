@@ -83,14 +83,36 @@ enum AgentVersion {
     case unreachable(String)
 }
 
+/// One MCP request/response captured by the host's debug monitor.
+struct DebugEvent: Identifiable {
+    let id = UUID()
+    let timestamp: String
+    let client: String?
+    let call: String
+    let response: String?
+}
+
+/// Receives the host's live debug events on an XPC background queue and forwards them on (the
+/// handler hops to the main actor). `onEvent` is set once before the connection resumes.
+final class DebugSink: NSObject, MCPDebugSink, @unchecked Sendable {
+    var onEvent: ((String) -> Void)?
+    func debugEvent(_ json: String) { onEvent?(json) }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var agentStatus = "—"
     @Published var lastMessage = ""
     @Published var agentVersion: AgentVersion = .unknown
+    @Published var debugMonitoring = false
+    @Published var debugEvents: [DebugEvent] = []
+    @Published var showAllDebugEvents = false
 
     /// This app's own version — the "client" side of the drift check.
     let clientVersion = BuildInfo.current
+
+    private let debugSink = DebugSink()
+    private var debugConnection: NSXPCConnection?
 
     /// SMAppService only registers a LaunchAgent for a SIGNED app in a stable location. The
     /// unsigned Xcode/DerivedData build fails to register (silently, before this fix) — so warn
@@ -241,6 +263,64 @@ final class AppModel: ObservableObject {
         NSPasteboard.general.setString(configJSON, forType: .string)
     }
 
+    // MARK: - Debug monitoring (dedicated XPC connection)
+
+    func setDebugMonitoring(_ on: Bool) {
+        if on { startDebugMonitoring() } else { stopDebugMonitoring() }
+    }
+
+    /// Open a dedicated debug connection: it exports our sink (host → app event stream) and turns
+    /// the host's global monitor on. Separate from the short-lived version-check connection.
+    private func startDebugMonitoring() {
+        debugSink.onEvent = { [weak self] json in
+            Task { @MainActor in self?.appendDebugEvent(json) }
+        }
+        let connection = NSXPCConnection(machServiceName: mcpMachServiceName, options: [])
+        connection.remoteObjectInterface = NSXPCInterface(with: MCPHostProtocol.self)
+        connection.exportedInterface = NSXPCInterface(with: MCPDebugSink.self)
+        connection.exportedObject = debugSink
+        connection.setCodeSigningRequirement(mcpHostRequirement)
+        connection.invalidationHandler = { [weak self] in
+            Task { @MainActor in self?.debugMonitoring = false }
+        }
+        connection.resume()
+        debugConnection = connection
+
+        let proxy = connection.remoteObjectProxyWithErrorHandler { [weak self] _ in
+            Task { @MainActor in self?.debugMonitoring = false }
+        } as? MCPHostProtocol
+        proxy?.setDebugMonitoring(enabled: true) { [weak self] active in
+            Task { @MainActor in self?.debugMonitoring = active }
+        }
+    }
+
+    private func stopDebugMonitoring() {
+        if let proxy = debugConnection?.remoteObjectProxyWithErrorHandler({ _ in }) as? MCPHostProtocol {
+            proxy.setDebugMonitoring(enabled: false) { _ in }
+        }
+        debugConnection?.invalidate()
+        debugConnection = nil
+        debugMonitoring = false
+    }
+
+    private func appendDebugEvent(_ json: String) {
+        guard let data = json.data(using: .utf8) else { return }
+        let object: Any
+        do {
+            object = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            return
+        }
+        guard let dictionary = object as? [String: Any] else { return }
+        debugEvents.append(DebugEvent(
+            timestamp: dictionary["timestamp"] as? String ?? "",
+            client: dictionary["client"] as? String,
+            call: dictionary["call"] as? String ?? "",
+            response: dictionary["response"] as? String))
+        // Bound memory: keep the most recent 500 events.
+        if debugEvents.count > 500 { debugEvents.removeFirst(debugEvents.count - 500) }
+    }
+
     private func open(_ urlString: String) {
         if let url = URL(string: urlString) { NSWorkspace.shared.open(url) }
     }
@@ -283,6 +363,12 @@ struct ContentView: View {
         case .unreachable: return .secondary
         case .unknown, .checking: return .secondary
         }
+    }
+
+    /// Newest first; the most recent 10 unless the user expanded the list.
+    private var visibleDebugEvents: [DebugEvent] {
+        let newestFirst = Array(model.debugEvents.reversed())
+        return model.showAllDebugEvents ? newestFirst : Array(newestFirst.prefix(10))
     }
 
     var body: some View {
@@ -343,9 +429,66 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            GroupBox("4 · Debug — live MCP monitor") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Monitor MCP calls", isOn: Binding(
+                        get: { model.debugMonitoring },
+                        set: { model.setDebugMonitoring($0) }))
+                    if model.debugEvents.isEmpty {
+                        Text(model.debugMonitoring ? "Monitoring — waiting for calls…" : "Off")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        ForEach(visibleDebugEvents) { event in
+                            DebugEventRow(event: event)
+                        }
+                        if model.debugEvents.count > 10 {
+                            Button(model.showAllDebugEvents
+                                   ? "Show fewer"
+                                   : "Show more (\(model.debugEvents.count - 10) earlier)") {
+                                model.showAllDebugEvents.toggle()
+                            }
+                            .font(.caption)
+                        }
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             Spacer()
             Button("Refresh") { model.refresh() }
         }
         .onAppear { model.refresh() }
+    }
+}
+
+/// One compact row in the debug monitor: timestamp + client on top, then the call and its response
+/// (each truncated to a single line; secrets in payloads can appear, so monitoring is opt-in).
+struct DebugEventRow: View {
+    let event: DebugEvent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 6) {
+                Text(shortTime).font(.caption2).foregroundStyle(.secondary)
+                if let client = event.client, !client.isEmpty {
+                    Text(client).font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Text(event.call)
+                .font(.system(.caption2, design: .monospaced))
+                .lineLimit(1).truncationMode(.middle)
+            Text(event.response ?? "—")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// HH:MM:SS pulled from the ISO-8601 timestamp; falls back to the raw string.
+    private var shortTime: String {
+        guard let tIndex = event.timestamp.firstIndex(of: "T") else { return event.timestamp }
+        return String(event.timestamp[event.timestamp.index(after: tIndex)...].prefix(8))
     }
 }

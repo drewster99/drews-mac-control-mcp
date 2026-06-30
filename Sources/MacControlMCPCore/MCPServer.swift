@@ -14,6 +14,11 @@ public final class MCPServer {
 
     private let tools: [Tool]
 
+    /// The connecting MCP client's self-reported identity ("name version"), captured from the
+    /// `initialize` request's `clientInfo` (the protocol hands it to us; we just keep it). Used to
+    /// label events in the debug stream. nil until the client initializes.
+    public private(set) var clientInfo: String?
+
     public init(tools: [Tool] = MCPServer.defaultTools()) {
         self.tools = tools
     }
@@ -40,6 +45,11 @@ public final class MCPServer {
         if request.isNotification { return nil }
         switch request.method {
         case "initialize":
+            if let info = request.params["clientInfo"] as? [String: Any] {
+                let identity = [info["name"] as? String, info["version"] as? String]
+                    .compactMap { $0 }.joined(separator: " ")
+                clientInfo = identity.isEmpty ? nil : identity
+            }
             let version = (request.params["protocolVersion"] as? String) ?? Self.defaultProtocolVersion
             return JSONRPC.responseData(id: request.id, result: [
                 "protocolVersion": version,
