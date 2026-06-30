@@ -107,12 +107,20 @@ final class Probe {
     var totalCallbackMs = 0.0
     var firstEventMs: Double?
     var lastEventMs: Double?
+    // selftest: wait for a specific notification after a self-triggered change, to time delivery.
+    var awaiting: String?
+    var triggerMs: Double?
+    var responseMs: Double?
 
     func record(element: AXUIElement, notification: String) {
         let start = nowMs()
         eventCount += 1
         if firstEventMs == nil { firstEventMs = start }
         lastEventMs = start
+        if let awaiting, notification == awaiting, responseMs == nil {
+            responseMs = start
+            CFRunLoopStop(CFRunLoopGetCurrent())
+        }
         if watching {
             let ref = refByElement[AXElement(element)] ?? "(untracked)"
             let role = (copyAXString(element, kAXRoleAttribute) ?? "?")
@@ -249,6 +257,92 @@ func watch(appQuery: String, seconds: Double, maxNodes: Int) {
                  probe.eventCount > 0 ? probe.totalCallbackMs / Double(probe.eventCount) : 0, unsubMs))
 }
 
+// MARK: - Self-test (probe triggers its own AX changes and times notification delivery)
+
+func mainWindow(pid: pid_t) -> AXUIElement? {
+    let app = AXUIElementCreateApplication(pid)
+    var value: CFTypeRef?
+    if AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &value) == .success,
+       let v = value, CFGetTypeID(v) == AXUIElementGetTypeID() {
+        return unsafeDowncast(v, to: AXUIElement.self)
+    }
+    var windows: CFTypeRef?
+    if AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows) == .success,
+       let array = windows as? [AXUIElement], let first = array.first {
+        return first
+    }
+    return nil
+}
+
+func windowPosition(_ window: AXUIElement) -> CGPoint? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &value) == .success,
+          let v = value, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+    var point = CGPoint.zero
+    guard AXValueGetValue(unsafeDowncast(v, to: AXValue.self), .cgPoint, &point) else { return nil }
+    return point
+}
+
+func setWindowPosition(_ window: AXUIElement, _ point: CGPoint) {
+    var mutablePoint = point
+    guard let value = AXValueCreate(.cgPoint, &mutablePoint) else { return }
+    AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
+}
+
+func resolveOrLaunch(_ query: String) -> NSRunningApplication? {
+    if let app = resolveApp(query) { return app }
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    process.arguments = ["-a", query]
+    try? process.run()
+    process.waitUntilExit()
+    Thread.sleep(forTimeInterval: 1.5)
+    return NSWorkspace.shared.runningApplications.first { ($0.localizedName ?? "").lowercased().contains(query.lowercased()) }
+}
+
+func selftest(appQuery: String, iterations: Int) {
+    guard let app = resolveOrLaunch(appQuery) else {
+        FileHandle.standardError.write(Data("Could not resolve/launch \"\(appQuery)\".\n".utf8))
+        exit(1)
+    }
+    let pid = app.processIdentifier
+    print("== selftest \(app.localizedName ?? "?") (\(pid)) — subscribe→notification latency ==")
+
+    var subscription: Subscription?
+    let subMs = milliseconds { subscription = subscribe(pid: pid) }
+    guard subscription != nil else { print("  subscribe FAILED"); exit(1) }
+    print(String(format: "  subscribe: %.1f ms", subMs))
+
+    guard let window = mainWindow(pid: pid), let origin = windowPosition(window) else {
+        print("  no movable window to test against"); exit(1)
+    }
+
+    var latencies: [Double] = []
+    for _ in 0..<iterations {
+        Probe.shared.responseMs = nil
+        Probe.shared.awaiting = kAXWindowMovedNotification
+        Probe.shared.triggerMs = nowMs()
+        setWindowPosition(window, CGPoint(x: origin.x + 3, y: origin.y))
+        CFRunLoopRunInMode(.defaultMode, 1.0, false)
+        if let response = Probe.shared.responseMs, let trigger = Probe.shared.triggerMs {
+            latencies.append(response - trigger)
+        }
+        setWindowPosition(window, origin)   // restore
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+    setWindowPosition(window, origin)
+    Probe.shared.awaiting = nil
+
+    if latencies.isEmpty {
+        print("  no kAXWindowMoved notifications delivered — this app may not post them.")
+    } else {
+        let sorted = latencies.sorted()
+        print(String(format: "  %d/%d triggers delivered. latency ms: min %.1f  median %.1f  max %.1f  avg %.1f",
+                     latencies.count, iterations, sorted[0], sorted[sorted.count / 2], sorted[sorted.count - 1],
+                     latencies.reduce(0, +) / Double(latencies.count)))
+    }
+}
+
 func resolveApp(_ query: String) -> NSRunningApplication? {
     if query == "front" { return NSWorkspace.shared.frontmostApplication }
     if let pid = Int32(query) { return regularApps.first { $0.processIdentifier == pid } }
@@ -268,6 +362,10 @@ if arguments.first == "watch" {
     let query = arguments.count > 1 ? arguments[1] : "front"
     let seconds = arguments.count > 2 ? (Double(arguments[2]) ?? 30) : 30
     watch(appQuery: query, seconds: seconds, maxNodes: maxNodes)
+} else if arguments.first == "selftest" {
+    let query = arguments.count > 1 ? arguments[1] : "Calculator"
+    let iterations = arguments.count > 2 ? (Int(arguments[2]) ?? 10) : 10
+    selftest(appQuery: query, iterations: iterations)
 } else {
     measureAll(maxNodes: maxNodes)
 }
