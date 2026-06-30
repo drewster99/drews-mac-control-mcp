@@ -386,6 +386,55 @@ func enumeratePass(breadthFirst: Bool, maxNodes: Int, deadlineSeconds: Double) {
     print(String(format: "  ── total: %d nodes, %.0f ms ──\n", totalNodes, totalMs))
 }
 
+// MARK: - Collections: total vs visible vs selected rows (can we bound to on-screen rows?)
+
+func axArrayCount(_ element: AXElement, _ attribute: String) -> Int? {
+    guard let value = element.copyAttribute(attribute) else { return nil }
+    return (value as? [AXUIElement])?.count
+}
+
+func collectionsMode(appQuery: String, maxNodes: Int, deadlineSeconds: Double) {
+    guard let app = resolveApp(appQuery) else {
+        FileHandle.standardError.write(Data("No regular app matches \"\(appQuery)\".\n".utf8))
+        exit(1)
+    }
+    let pid = app.processIdentifier
+    let collectionRoles: Set<String> = ["AXTable", "AXOutline", "AXList", "AXGrid", "AXBrowser"]
+    let root = AXElement.application(pid: pid)
+    root.setMessagingTimeout(2)
+    let deadline = Date().addingTimeInterval(deadlineSeconds)
+
+    var frontier: [AXElement] = [root]
+    var head = 0
+    var visited: Set<AXElement> = [root]
+    var scanned = 0
+    print("== \(app.localizedName ?? "?") (\(pid)) — collections (rows / visibleRows / selectedRows) ==")
+    var found = 0
+
+    while head < frontier.count {
+        if scanned >= maxNodes || Date() >= deadline { print("  [scan capped]"); break }
+        let element = frontier[head]; head += 1
+        scanned += 1
+        let attrs = element.snapshotAttributes()
+        let role = attrs.role ?? "AXUnknown"
+        if collectionRoles.contains(role) {
+            // Read row stats but do NOT descend into the (potentially thousands of) rows.
+            let rows = axArrayCount(element, "AXRows") ?? axArrayCount(element, kAXChildrenAttribute as String) ?? 0
+            let visible = axArrayCount(element, "AXVisibleRows")
+            let selected = axArrayCount(element, "AXSelectedRows")
+            found += 1
+            print(String(format: "  %@  rows=%d  visibleRows=%@  selectedRows=%@  label=%@",
+                         role as NSString, rows,
+                         (visible.map(String.init) ?? "nil") as NSString,
+                         (selected.map(String.init) ?? "nil") as NSString,
+                         (attrs.title ?? "—") as NSString))
+        } else {
+            for child in attrs.children where visited.insert(child).inserted { frontier.append(child) }
+        }
+    }
+    if found == 0 { print("  (no AXTable/AXOutline/AXList/AXGrid found in \(scanned) nodes)") }
+}
+
 // MARK: - Role histogram for one app (what's eating the nodes?)
 
 func rolesMode(appQuery: String, maxNodes: Int, deadlineSeconds: Double) {
@@ -421,6 +470,8 @@ if arguments.first == "watch" {
     let query = arguments.count > 1 ? arguments[1] : "Calculator"
     let iterations = arguments.count > 2 ? (Int(arguments[2]) ?? 10) : 10
     selftest(appQuery: query, iterations: iterations)
+} else if arguments.first == "collections" {
+    collectionsMode(appQuery: arguments.count > 1 ? arguments[1] : "front", maxNodes: 20_000, deadlineSeconds: 20)
 } else if arguments.first == "roles" {
     rolesMode(appQuery: arguments.count > 1 ? arguments[1] : "front", maxNodes: 300_000, deadlineSeconds: 30)
 } else if arguments.first == "enumerate" {
