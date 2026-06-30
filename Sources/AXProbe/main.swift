@@ -60,16 +60,26 @@ struct WalkResult {
     var capped = false
 }
 
-/// Iterative DFS over the entire subtree. `maxNodes`/`deadline` are safety caps only — when either
-/// trips, `capped` is set so the measurement is reported honestly rather than hanging.
-func walkTree(pid: pid_t, maxNodes: Int, deadline: Date) -> WalkResult {
+/// Iterative full-subtree walk, depth-first (stack) or breadth-first (queue). `maxNodes`/`deadline`
+/// are safety caps only — when either trips, `capped` is set so the measurement is honest rather
+/// than hanging. Same per-node work and the same ref minting in both orders, so timing is comparable.
+func walkTree(pid: pid_t, maxNodes: Int, deadline: Date, breadthFirst: Bool) -> WalkResult {
     var result = WalkResult()
     let app = AXElement.application(pid: pid)
     app.setMessagingTimeout(2)
-    var stack: [AXElement] = [app]
+    var frontier: [AXElement] = [app]
+    var head = 0                              // read cursor for breadth-first
     var visited: Set<AXElement> = [app]
 
-    while let element = stack.popLast() {
+    while true {
+        let element: AXElement
+        if breadthFirst {
+            if head >= frontier.count { break }
+            element = frontier[head]; head += 1
+        } else {
+            guard let popped = frontier.popLast() else { break }
+            element = popped
+        }
         if result.nodeCount >= maxNodes || Date() >= deadline { result.capped = true; break }
         let attrs = element.snapshotAttributes()
         let role = attrs.role ?? "AXUnknown"
@@ -79,7 +89,7 @@ func walkTree(pid: pid_t, maxNodes: Int, deadline: Date) -> WalkResult {
         let group = Group.of(role)
         result.groups[group, default: 0] += 1
         if group == .other { result.otherRoles[role, default: 0] += 1 }
-        for child in attrs.children where visited.insert(child).inserted { stack.append(child) }
+        for child in attrs.children where visited.insert(child).inserted { frontier.append(child) }
     }
     return result
 }
@@ -205,7 +215,7 @@ func measureAll(maxNodes: Int) {
         let pid = app.processIdentifier
         let name = app.localizedName ?? "(\(pid))"
         var walk = WalkResult()
-        let walkMs = milliseconds { walk = walkTree(pid: pid, maxNodes: maxNodes, deadline: Date().addingTimeInterval(10)) }
+        let walkMs = milliseconds { walk = walkTree(pid: pid, maxNodes: maxNodes, deadline: Date().addingTimeInterval(10), breadthFirst: false) }
         var subscription: Subscription?
         let subMs = milliseconds { subscription = subscribe(pid: pid) }
         var unsubMs = 0.0
@@ -234,7 +244,7 @@ func watch(appQuery: String, seconds: Double, maxNodes: Int) {
     print("== watch \(app.localizedName ?? "?") (\(pid)) ==")
 
     var walk = WalkResult()
-    let walkMs = milliseconds { walk = walkTree(pid: pid, maxNodes: maxNodes, deadline: Date().addingTimeInterval(20)) }
+    let walkMs = milliseconds { walk = walkTree(pid: pid, maxNodes: maxNodes, deadline: Date().addingTimeInterval(20), breadthFirst: false) }
     print(String(format: "  walk: %d nodes in %.1f ms%@", walk.nodeCount, walkMs, walk.capped ? " [CAPPED]" : ""))
     print("  groups: " + Group.allCases.compactMap { g in (walk.groups[g] ?? 0) > 0 ? "\(g.rawValue):\(walk.groups[g]!)" : nil }.joined(separator: "  "))
 
@@ -351,6 +361,29 @@ func resolveApp(_ query: String) -> NSRunningApplication? {
         ?? regularApps.first { $0.bundleIdentifier == query }
 }
 
+// MARK: - Enumerate every app, one pass per traversal order
+
+func enumeratePass(breadthFirst: Bool, maxNodes: Int, deadlineSeconds: Double) {
+    let apps = regularApps.sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
+    print("== \(breadthFirst ? "BREADTH-first" : "DEPTH-first") — full enumeration of \(apps.count) apps ==")
+    var totalNodes = 0
+    var totalMs = 0.0
+    for app in apps {
+        let pid = app.processIdentifier
+        let name = app.localizedName ?? "(\(pid))"
+        var walk = WalkResult()
+        let ms = milliseconds {
+            walk = walkTree(pid: pid, maxNodes: maxNodes,
+                            deadline: Date().addingTimeInterval(deadlineSeconds), breadthFirst: breadthFirst)
+        }
+        totalNodes += walk.nodeCount
+        totalMs += ms
+        print(String(format: "  %-26@ %8d nodes  %9.1f ms%@",
+                     String(name.prefix(26)) as NSString, walk.nodeCount, ms, walk.capped ? "  [CAPPED]" : ""))
+    }
+    print(String(format: "  ── total: %d nodes, %.0f ms ──\n", totalNodes, totalMs))
+}
+
 // MARK: - Entry
 
 requireAccessibility()
@@ -366,6 +399,12 @@ if arguments.first == "watch" {
     let query = arguments.count > 1 ? arguments[1] : "Calculator"
     let iterations = arguments.count > 2 ? (Int(arguments[2]) ?? 10) : 10
     selftest(appQuery: query, iterations: iterations)
+} else if arguments.first == "enumerate" {
+    // All apps depth-first, then all apps breadth-first (same caps), to compare traversal order.
+    let fullMaxNodes = 300_000
+    let perAppDeadline = 30.0
+    enumeratePass(breadthFirst: false, maxNodes: fullMaxNodes, deadlineSeconds: perAppDeadline)
+    enumeratePass(breadthFirst: true, maxNodes: fullMaxNodes, deadlineSeconds: perAppDeadline)
 } else {
     measureAll(maxNodes: maxNodes)
 }
