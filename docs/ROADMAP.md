@@ -14,6 +14,27 @@ See [CONTROL_APP_DESIGN.md](./CONTROL_APP_DESIGN.md) and [MCP_DESIGN.md](./MCP_D
   the only synchronization is the implicit post-action settle plus the AX-predicate `wait_for`;
   extend that family with text-change and launch-complete conditions.
 
+- **Live app-session cache (subscribe + MCP-idle TTL)** — back the `App()` interface with a
+  per-app live cache so repeated `App(A)` / `App(B)` / `App(A)` don't pay a full enumeration each
+  time. On the first `App(identity)`: enumerate (visible-rows rule — see AXProbe spike), build the
+  curated tree + refs, and **subscribe per element**; cache it keyed by pid. Later calls touching
+  that app return the **subscription-maintained** cache instantly. Eviction is keyed on **caller
+  interest, not app activity**: any call related to app A (`App(identity)`→pid A, a ref that
+  resolves to pid A, `get_changes(pid A)`, a `Perform` on A) resets A's **500 s** idle timer; a
+  periodic sweep unsubscribes everything for A and drops its cached tree/refs when no related call
+  arrives within 500 s. Multiple apps cached at once. Open design points:
+  (a) **targeted subtree reload** — a change notification names the element, so re-walk only that
+  subtree, not the whole app (the AXProbe submon did a full ~84–259 ms re-walk per change; fine for
+  a spike, too coarse for a long-lived cache);
+  (b) **staleness policy** — subscriptions keep the cache fresh, but apps that under-report changes
+  drift, so either revalidate-on-access when the subscription has been quiet, or accept + offer an
+  explicit refresh;
+  (c) **evict on app termination** (pid death / observer invalidation; pid changes on relaunch);
+  (d) **per-client vs process-global** — one active caller is fine per-client; dedupe identical
+  subscriptions across clients later (ties to cross-client serialization, below).
+  Feasibility validated by AXProbe: per-element subscribe ~0.05 ms/add, delivery ~2 ms, delta
+  reload correct (no double-subscribe), and the visible-rows rule keeps per-app trees small.
+
 - **Serialize mutating actions across clients** — the host runs one `MCPHostService` per
   connection with no cross-client serialization (each has its own per-instance lock), so two
   simultaneously-active clients run truly in parallel and interleave synthetic input, focus
