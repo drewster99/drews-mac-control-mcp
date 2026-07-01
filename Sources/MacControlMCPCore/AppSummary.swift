@@ -14,9 +14,10 @@ import Foundation
 public struct AppSummary: Equatable, Sendable {
     public struct Group: Equatable, Sendable {
         public let name: String          // "Buttons", "Text fields", "Other", "Text"
-        public let entries: [String]     // rendered, name-first
+        public let entries: [String]     // rendered, name-first, deduped
         public let unnamed: Int          // actionable-but-unlabeled, surfaced as elision
-        public let more: Int             // truncated past the cap
+        public let more: Int             // deduped past the cap (shown - total)
+        public let total: Int            // distinct entries after dedup
     }
     public struct Window: Equatable, Sendable {
         public let title: String
@@ -105,15 +106,20 @@ public enum AppProjection {
         return out.filter { !$0.entries.isEmpty || $0.unnamed > 0 }
     }
 
-    /// Build a rendered group from nodes, with a per-group cap and an unnamed/elision count.
+    /// Build a rendered group from nodes: dedup identical rendered entries (many apps repeat the
+    /// same "Copy code" button / message row), then cap. `total` is the distinct count.
     static func group(_ name: String, _ nodes: [ControlNode], render: (ControlNode) -> String?) -> AppSummary.Group {
         var entries: [String] = []
         var unnamed = 0
+        var seen = Set<String>()
         for node in nodes {
-            if let rendered = render(node) { entries.append(rendered) } else { unnamed += 1 }
+            guard let rendered = render(node) else { unnamed += 1; continue }
+            if seen.insert(rendered).inserted { entries.append(rendered) }   // drop exact duplicates
         }
-        let more = max(0, entries.count - perGroupCap)
-        return AppSummary.Group(name: name, entries: Array(entries.prefix(perGroupCap)), unnamed: unnamed, more: more)
+        let total = entries.count
+        let more = max(0, total - perGroupCap)
+        return AppSummary.Group(name: name, entries: Array(entries.prefix(perGroupCap)),
+                                unnamed: unnamed, more: more, total: total)
     }
 
     static func collect(_ node: ControlNode, into visit: (ControlNode) -> Void) {
@@ -163,9 +169,9 @@ public enum AppRenderer {
         if let window = summary.activeWindow {
             lines.append("Active window: \(window.title)")
             for group in window.groups {
-                var line = "  \(group.name): " + group.entries.joined(separator: ", ")
-                if group.unnamed > 0 { line += " [+\(group.unnamed) unnamed]" }
+                var line = "  \(group.name) (\(group.total)): " + group.entries.joined(separator: ", ")
                 if group.more > 0 { line += " [+\(group.more) more]" }
+                if group.unnamed > 0 { line += " [+\(group.unnamed) unnamed]" }
                 lines.append(line)
             }
         } else {

@@ -52,8 +52,8 @@ final class AppSummaryTests: XCTestCase {
         XCTAssertTrue(text.contains("Windows: Vacation plan, New Note"))
         XCTAssertTrue(text.contains("Menus: File, Edit"))
         XCTAssertTrue(text.contains("Active window: Vacation plan"))
-        XCTAssertTrue(text.contains("Buttons: Save, Cancel [+1 unnamed]"))
-        XCTAssertTrue(text.contains("Text fields: Title =\"My note\""))
+        XCTAssertTrue(text.contains("Buttons (2): Save, Cancel [+1 unnamed]"))
+        XCTAssertTrue(text.contains("Text fields (1): Title =\"My note\""))
     }
 
     func testActiveWindowOverride() {
