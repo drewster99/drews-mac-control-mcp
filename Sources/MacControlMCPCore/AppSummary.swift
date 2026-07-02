@@ -34,7 +34,7 @@ public struct AppSummary: Equatable, Sendable {
 }
 
 public enum AppProjection {
-    static let perGroupCap = 40
+    static let perGroupCap = 60
 
     /// Top-level window-like containers. A window's humanized `type` reflects its SUBROLE, so a
     /// Safari window with subrole AXDialog renders as `dialog`, not `window` — match all of them.
