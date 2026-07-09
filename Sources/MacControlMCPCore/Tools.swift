@@ -235,8 +235,8 @@ public struct OpenTool: Tool {
             "inputSchema": [
                 "type": "object",
                 "properties": [
-                    "target": ["type": "string", "description": "What to open: a file/folder path, a URL, an app name, a bundle identifier, or a .app path."],
-                    "application": ["type": "string", "description": "Optional. Open `target` using this application (name, bundle id, or .app path) instead of the default handler."],
+                    "target": ["type": "string", "description": "What to open: an absolute or ~-rooted file/folder path, a URL, an app name, a bundle identifier, or a .app path. Relative paths are rejected (the server's working directory is not yours)."],
+                    "application": ["type": "string", "description": "Optional. Open `target` using this application (name, bundle id, or absolute .app path) instead of the default handler."],
                     "background": ["type": "boolean", "description": "Open without bringing the app to the foreground (open -g). Default false."],
                     "newInstance": ["type": "boolean", "description": "Open a new instance even if the app is already running (open -n). Default false."]
                 ],
@@ -261,6 +261,10 @@ public struct OpenTool: Tool {
         let background = (arguments["background"] as? Bool) ?? false
         let newInstance = (arguments["newInstance"] as? Bool) ?? false
 
+        if let rejection = relativePathRejection(target: target, application: application) {
+            return rejection
+        }
+
         let invocation = self.invocation(target: target, application: application,
                                          background: background, newInstance: newInstance)
         let result = Shell.runFull("/usr/bin/open", invocation.arguments)
@@ -276,6 +280,31 @@ public struct OpenTool: Tool {
             "status": Int(result.status),
             "error": output.isEmpty ? "open_failed" : output
         ])
+    }
+
+    /// Structured rejection when `target` or `application` is a relative filesystem path, or nil when
+    /// both are acceptable. The host is a LaunchAgent whose working directory has nothing to do with
+    /// the client's, so a relative path would silently resolve against the wrong directory — failing
+    /// confusingly, or opening a different file that happens to exist there. Requiring absolute (or
+    /// `~`-rooted) paths turns that misresolution into an actionable error. Internal, not private, so
+    /// tests can probe the classification without launching anything.
+    func relativePathRejection(target: String, application: String?) -> String? {
+        if let application, isRelativePath(application) {
+            return JSONText.from([
+                "ok": false, "application": application, "error": "relative_application_path",
+                "howToFix": "Pass `application` as an app name, a bundle id, or an absolute .app path (e.g. /Applications/Safari.app)."
+            ])
+        }
+        // URLs are exempt: `https://…` contains slashes, so isPath is true, yet it is not a
+        // filesystem path. The with-application form passes the target straight through as an operand
+        // without invocation()'s URL check, so the exemption has to live here too.
+        if !looksLikeURL(target), isRelativePath(target) {
+            return JSONText.from([
+                "ok": false, "target": target, "error": "relative_path",
+                "howToFix": "Pass an absolute path (starting with / or ~/). The server runs with its own working directory and cannot resolve paths relative to yours."
+            ])
+        }
+        return nil
     }
 
     /// Builds the `open` argument array for a request. Pure (apart from the injected bundle-id
@@ -322,6 +351,13 @@ public struct OpenTool: Tool {
 
     private func isPath(_ string: String) -> Bool {
         string.contains("/") || string.hasPrefix("~")
+    }
+
+    /// True when `string` is path-like but does not resolve to an absolute location. `~` and `~/…`
+    /// expand to the home directory (absolute); `~nosuchuser/…` is left unchanged by
+    /// `expandingTildeInPath`, so it is rejected along with `a/b`, `./a`, and `../a`.
+    private func isRelativePath(_ string: String) -> Bool {
+        isPath(string) && !expandingTilde(string).hasPrefix("/")
     }
 
     /// Expands a leading `~` only. `NSString.expandingTildeInPath` also collapses `//` to `/`,

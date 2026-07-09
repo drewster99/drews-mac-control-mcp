@@ -128,4 +128,45 @@ final class OpenToolTests: XCTestCase {
         let schema = try XCTUnwrap(descriptor["inputSchema"] as? [String: Any])
         XCTAssertEqual(schema["required"] as? [String], ["target"])
     }
+
+    // MARK: - Relative paths
+    //
+    // The host's working directory is undefined (a LaunchAgent, effectively "/") and the client's is
+    // unknowable, so a relative path is rejected rather than resolved against the wrong root.
+
+    private func callPayload(_ arguments: [String: Any]) throws -> [String: Any] {
+        let json = tool().call(arguments)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+    }
+
+    func testRelativeTargetIsRejectedWithoutLaunching() throws {
+        for target in ["docs/report.pdf", "./report.pdf", "../report.pdf", "~nosuchuser/report.pdf"] {
+            let payload = try callPayload(["target": target])
+            XCTAssertEqual(payload["ok"] as? Bool, false, "target: \(target)")
+            XCTAssertEqual(payload["error"] as? String, "relative_path", "target: \(target)")
+            XCTAssertNotNil(payload["howToFix"], "target: \(target)")
+        }
+    }
+
+    func testRelativeApplicationIsRejectedWithoutLaunching() throws {
+        let payload = try callPayload(["target": "/tmp/x.txt", "application": "Apps/Editor.app"])
+        XCTAssertEqual(payload["ok"] as? Bool, false)
+        XCTAssertEqual(payload["error"] as? String, "relative_application_path")
+    }
+
+    /// A URL satisfies isPath (it contains slashes) and is never `/`-prefixed, but it must not be
+    /// mistaken for a relative filesystem path — in either the plain or the with-application form.
+    func testURLTargetIsExemptFromRelativeRejection() {
+        XCTAssertNil(tool().relativePathRejection(target: "https://example.com/a/b", application: nil))
+        XCTAssertNil(tool().relativePathRejection(target: "https://example.com/a/b", application: "Safari"))
+        XCTAssertNil(tool().relativePathRejection(target: "mailto:dev@example.com", application: nil))
+    }
+
+    func testAbsoluteTildeAndNameFormsAreNotRejected() {
+        for target in ["/tmp/report.pdf", "~/Documents/notes.txt", "~", "Safari", "com.apple.Safari"] {
+            XCTAssertNil(tool().relativePathRejection(target: target, application: nil), "target: \(target)")
+        }
+        XCTAssertNil(tool().relativePathRejection(target: "/tmp/x", application: "/Applications/Safari.app"))
+        XCTAssertNil(tool().relativePathRejection(target: "/tmp/x", application: "com.apple.Safari"))
+    }
 }

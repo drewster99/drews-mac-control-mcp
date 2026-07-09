@@ -88,4 +88,16 @@ final class MCPServerTests: XCTestCase {
         XCTAssertNil(server.handleLine(#"{"jsonrpc":"2.0","method":"initialize","params":{}}"#))
         XCTAssertNil(server.handleLine(#"{"jsonrpc":"2.0","method":"tools/list"}"#))
     }
+
+    /// The unknown-method branch must never answer a notification either — the single guard at the
+    /// top of handle() covers it, which is why the branch carries no check of its own.
+    func testUnknownMethodSentAsNotificationGetsNoResponse() {
+        XCTAssertNil(MCPServer().handleLine(#"{"jsonrpc":"2.0","method":"bogus","params":{}}"#))
+    }
+
+    /// A notifications/* method carrying an id is NOT a notification (it has the key), so it bypasses
+    /// that top guard. The dedicated case must still swallow it rather than answer method-not-found.
+    func testNotificationMethodWithIdGetsNoResponse() {
+        XCTAssertNil(MCPServer().handleLine(#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized"}"#))
+    }
 }

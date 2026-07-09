@@ -70,7 +70,6 @@ public final class MCPServer {
             return JSONRPC.responseData(id: request.id, result: [:])
 
         default:
-            if request.isNotification { return nil }
             return JSONRPC.errorData(id: request.id, code: -32601, message: "method not found: \(request.method)")
         }
     }
