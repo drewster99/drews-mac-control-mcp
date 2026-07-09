@@ -10,6 +10,9 @@ dist/
 Generated/
 *.xcodeproj/
 
+# Claude Code local state (worktrees, session settings — never part of the repo)
+.claude/
+
 # macOS
 .DS_Store
 
