@@ -10,6 +10,7 @@
 
 import Foundation
 import HostKit
+import MacControlMCPCore
 
 func makeConnection() -> NSXPCConnection {
     let connection = NSXPCConnection(machServiceName: mcpMachServiceName, options: [])
@@ -113,15 +114,11 @@ func enclosingAppBundle() -> URL? {
 /// MCP call works — this makes the first MCP call bring the whole stack up by itself.
 func bootstrapHost() {
     guard let app = enclosingAppBundle() else { return }
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    process.arguments = ["-gj", app.path, "--args", "--register-and-exit"]
-    do {
-        try process.run()
-        process.waitUntilExit()
-    } catch {
-        // Best-effort; if launching the app fails we fall through to "host unavailable".
-    }
+    // Bounded and output-discarding: the relay's inherited stdout IS the client's JSON-RPC channel
+    // (a bare Process here would let `open` write into it), and an unbounded waitUntilExit would
+    // wedge the read loop behind a stuck LaunchServices. Best-effort — a failure or timeout falls
+    // through to "host unavailable", and LaunchServices may still complete the launch afterwards.
+    _ = Shell.runDiscardingOutput("/usr/bin/open", ["-gj", app.path, "--args", "--register-and-exit"], timeout: 10)
 }
 
 /// The relay loop runs in a `nonisolated` function — NOT `main.swift` top-level code, which

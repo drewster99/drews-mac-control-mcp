@@ -118,9 +118,8 @@ private func launchAndAwait(identity: String, deadline: Date, timing: inout [Str
     let t0 = Date()
     let expanded = (identity as NSString).expandingTildeInPath
     let isPath = identity.contains("/") || identity.hasPrefix("~")
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    var targetBundleId: String?
+    let openArguments: [String]
+    let targetBundleId: String?
     if isPath {
         guard FileManager.default.fileExists(atPath: expanded) else { timing["error"] = "path_missing"; return nil }
         // Only launch actual `.app` bundles. `open <path>` opens *anything* — a document or a
@@ -131,26 +130,32 @@ private func launchAndAwait(identity: String, deadline: Date, timing: inout [Str
         guard appURL.pathExtension.lowercased() == "app", let bundleId = Bundle(url: appURL)?.bundleIdentifier else {
             timing["error"] = "not_an_app"; return nil
         }
-        process.arguments = [expanded]
+        openArguments = [expanded]
         targetBundleId = bundleId
     } else if NSWorkspace.shared.urlForApplication(withBundleIdentifier: identity) != nil {
-        process.arguments = ["-b", identity]                 // bundle id
+        openArguments = ["-b", identity]                 // bundle id
         targetBundleId = identity
     } else {
-        process.arguments = ["-a", identity]                 // app name (no bundle id to match on)
+        openArguments = ["-a", identity]                 // app name (no bundle id to match on)
         targetBundleId = nil
     }
-    timing["form"] = process.arguments?.first ?? "?"
+    timing["form"] = openArguments.first ?? "?"
     let openStart = Date()
-    do {
-        try process.run()
-        process.waitUntilExit()
-    } catch {
+    // Bounded run (a wedged `open` under the host request lock must not stall every client) with
+    // output discarded — this helper is shared with the relay, whose stdout is the JSON-RPC channel.
+    // 10s dwarfs a healthy `open` (sub-second) while leaving the rest of the 15s launch reserve for
+    // the detection poll below.
+    switch Shell.runDiscardingOutput("/usr/bin/open", openArguments, timeout: min(10, deadline.timeIntervalSinceNow)) {
+    case .failedToLaunch:
         timing["error"] = "open_threw"; return nil
+    case .timedOut:
+        timing["openMs"] = ms(since: openStart)
+        timing["error"] = "open_timeout"; return nil
+    case .exited(let status):
+        timing["openMs"] = ms(since: openStart)
+        timing["openStatus"] = Int(status)
+        guard status == 0 else { timing["error"] = "open_nonzero"; return nil }
     }
-    timing["openMs"] = ms(since: openStart)
-    timing["openStatus"] = Int(process.terminationStatus)
-    guard process.terminationStatus == 0 else { timing["error"] = "open_nonzero"; return nil }
 
     // Detect via runningApplications (appears ~immediately). Do NOT gate on
     // NSRunningApplication.isFinishedLaunching — it's KVO/run-loop-driven and never updates from a

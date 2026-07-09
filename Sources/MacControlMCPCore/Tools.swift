@@ -36,8 +36,10 @@ enum JSONText {
 /// is ordered by the `readDone` semaphore (write before signal, read after wait).
 private final class DataBox: @unchecked Sendable { var data = Data() }
 
-/// Minimal subprocess runner for `simctl`. Returns stdout (empty on failure).
-enum Shell {
+/// Minimal hardened subprocess runner (simctl, /usr/bin/open): every variant enforces a hard deadline
+/// so a wedged child can never block a caller — or, in the host, hold the request lock — forever.
+/// Public so AXKit/relay callers share one runner instead of growing bare `Process` uses.
+public enum Shell {
     /// Default hard timeout for a child process. A wedged `simctl` (a real CoreSimulator failure
     /// mode) must not block the caller — and, in the host, must not hold the request lock — forever.
     static let defaultTimeout: TimeInterval = 30
@@ -102,6 +104,46 @@ enum Shell {
             return (process.terminationStatus, Data())
         }
         return (process.terminationStatus, box.data)
+    }
+
+    /// Outcome of `runDiscardingOutput`, separating spawn failure and deadline overrun from a normal
+    /// exit so callers can map each to a distinct structured error.
+    public enum RunOutcome {
+        case exited(status: Int32)
+        case failedToLaunch
+        case timedOut
+    }
+
+    /// Run a child to completion under a hard deadline, discarding ALL of its output. For callers
+    /// whose inherited stdio must never receive child bytes — the relay's inherited stdout IS the
+    /// MCP JSON-RPC channel — and who need only the exit status. On timeout the child is terminated,
+    /// SIGKILLed after a 2s grace, and reaped.
+    public static func runDiscardingOutput(_ launchPath: String, _ arguments: [String],
+                                           timeout: TimeInterval) -> RunOutcome {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return .failedToLaunch }
+
+        // `max(timeout, 0)`: a caller whose deadline already passed must time out immediately, not
+        // wait behind a wrapped-around dispatch time.
+        if exited.wait(timeout: .now() + max(timeout, 0)) == .timedOut {
+            process.terminate()
+            // The unconditional reap wait belongs ONLY inside the SIGKILL branch: if the 2s grace wait
+            // succeeded it consumed the semaphore's single signal, and a further wait would block
+            // forever. SIGKILL can't be caught, so this wait is bounded in practice.
+            if exited.wait(timeout: .now() + 2) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                exited.wait()
+            }
+            return .timedOut
+        }
+        return .exited(status: process.terminationStatus)
     }
 }
 

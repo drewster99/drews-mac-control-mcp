@@ -673,14 +673,26 @@ public struct GetChangesTool: Tool {
 }
 
 /// Map a signal name ("SIGTERM", "TERM") or number ("15") to its value.
-private func parseSignal(_ spec: String) -> Int32? {
+/// Internal (not private) so the ranking of accepted specs is directly unit-testable.
+func parseSignal(_ spec: String) -> Int32? {
     let named: [String: Int32] = [
         "SIGHUP": SIGHUP, "HUP": SIGHUP, "SIGINT": SIGINT, "INT": SIGINT,
         "SIGQUIT": SIGQUIT, "QUIT": SIGQUIT, "SIGKILL": SIGKILL, "KILL": SIGKILL,
         "SIGTERM": SIGTERM, "TERM": SIGTERM
     ]
     if let value = named[spec.uppercased()] { return value }
-    return Int32(spec)
+    // Only real signal numbers (1...NSIG-1, i.e. 1...31 on Darwin). Signal 0 is the kernel's
+    // existence probe — kill(pid, 0) delivers nothing, so the tool would report success while the
+    // process lives. Negative or oversized numbers would come back as a bare EINVAL.
+    guard let number = Int32(spec), (1...31).contains(number) else { return nil }
+    return number
+}
+
+/// Human-readable errno text. `strerror` is imported as an implicitly-unwrapped optional pointer,
+/// so unwrap explicitly instead of trapping if it ever returns nil.
+private func errnoDescription(_ code: Int32) -> String {
+    guard let cString = strerror(code) else { return "errno \(code)" }
+    return String(cString: cString)
 }
 
 /// Terminate an app by pid, name, or bundle id. No Accessibility needed (process + NSWorkspace only).
@@ -726,24 +738,64 @@ public struct KillTool: Tool {
             }
         }
 
-        func alive() -> Bool { kill(pid, 0) == 0 }
-        guard alive() else { return jsonString(["success": true, "pid": Int(pid), "note": "not running"]) }
+        // A server that kills itself can never deliver the reply, and name/bundle-id resolution can
+        // reach this process (it runs as an .accessory app, so it is in runningApplications).
+        // getpid() protects whichever process is serving — the shared host or the stdio server.
+        guard pid != getpid() else {
+            return jsonString([
+                "success": false, "error": "cannot_kill_self", "pid": Int(pid),
+                "howToFix": "This pid is the MacControl server itself. To restart it, run: launchctl kickstart -k gui/$UID/com.nuclearcyborg.maccontrol.host"
+            ])
+        }
 
+        // Validate the signal before touching the process (validate-before-act), so a bad signal
+        // spec fails the same way whether or not the target is running.
+        var requestedSignal: (value: Int32, label: String)?
         if let signalArg = (arguments["signal"] as? String), !signalArg.isEmpty {
             guard let signal = parseSignal(signalArg) else {
-                return jsonString(["success": false, "error": "unknown_signal", "signal": signalArg])
+                return jsonString([
+                    "success": false, "error": "unknown_signal", "signal": signalArg,
+                    "howToFix": "Use SIGHUP/SIGINT/SIGQUIT/SIGTERM/SIGKILL or a number 1-31. Signal 0 only probes existence — use list_running_apps to check liveness."
+                ])
             }
-            let sent = kill(pid, signal) == 0
+            requestedSignal = (signal, signalArg)
+        }
+
+        // kill(pid, 0) fails with EPERM for a live process we may not signal (root-owned or
+        // SIP-protected); that must read as alive, or such targets would report "not running".
+        func alive() -> Bool {
+            if kill(pid, 0) == 0 { return true }
+            return errno == EPERM
+        }
+        guard alive() else { return jsonString(["success": true, "pid": Int(pid), "note": "not running"]) }
+
+        // The target can exit between alive() and kill() — ESRCH there is the goal state, not a
+        // failure. Anything else (in practice EPERM) is surfaced with the OS's own words.
+        func sendFailure(_ label: String) -> String {
+            let code = errno
+            if code == ESRCH {
+                return jsonString(["success": true, "pid": Int(pid), "note": "not running"])
+            }
+            return jsonString([
+                "success": false, "error": "kill_failed", "pid": Int(pid),
+                "signal": label, "reason": errnoDescription(code),
+                "howToFix": "\"Operation not permitted\" means the process belongs to another user or is SIP-protected; this server cannot signal it."
+            ])
+        }
+
+        if let (signal, label) = requestedSignal {
+            guard kill(pid, signal) == 0 else { return sendFailure(label) }
             // Signals are async — give the process a moment to actually exit before reporting state.
             let deadline = Date().addingTimeInterval(1.5)
             while alive(), Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
-            return jsonString(["success": sent, "pid": Int(pid), "signal": signalArg, "stillRunning": alive()])
+            return jsonString(["success": true, "pid": Int(pid), "signal": label, "stillRunning": alive()])
         }
 
-        // Graceful escalation: each rung gets up to 2s to take effect before the next.
+        // Graceful escalation: each rung gets up to 2s to take effect before the next. Failing fast
+        // on the first rung cannot mask a later success — kill() permission depends on the target,
+        // not the signal.
         for (signal, label) in [(SIGHUP, "SIGHUP"), (SIGTERM, "SIGTERM"), (SIGKILL, "SIGKILL")] {
-            guard alive() else { break }
-            _ = kill(pid, signal)
+            guard kill(pid, signal) == 0 else { return sendFailure(label) }
             let deadline = Date().addingTimeInterval(2)
             while alive(), Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
             if !alive() {

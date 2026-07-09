@@ -24,8 +24,11 @@ public struct AXElement: @unchecked Sendable {
         AXElement(AXUIElementCreateSystemWide())
     }
 
-    /// Applies to the whole subtree; set once at session start so a hung target can't
-    /// block reads indefinitely.
+    /// Sets the AX messaging timeout for calls made through THIS reference only — per
+    /// `AXUIElementSetMessagingTimeout` it does not apply to children, nor even to other references
+    /// CFEqual to this one. Exception: on the system-wide element it sets the PROCESS-GLOBAL timeout.
+    /// 0 means "use the current global" (or, on the system-wide element, "reset the global to its
+    /// default").
     public func setMessagingTimeout(_ seconds: Float) {
         _ = AXUIElementSetMessagingTimeout(raw, seconds)
     }

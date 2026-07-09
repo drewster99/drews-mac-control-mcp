@@ -24,6 +24,10 @@ public struct ScreenshotTool: Tool {
 
     public let name = "screenshot"
 
+    /// Below this the capture is unreadably small, and tiny values put extreme-aspect displays at
+    /// risk of a zero scaled dimension, which ScreenCaptureKit rejects opaquely.
+    private static let minimumMaxDimension = 16
+
     public var descriptor: [String: Any] {
         [
             "name": name,
@@ -33,7 +37,9 @@ public struct ScreenshotTool: Tool {
                 "properties": [
                     "target": ["type": "string", "enum": ["screen", "simulator"]],
                     "udid": ["type": "string", "description": "Simulator UDID (defaults to first booted)."],
-                    "maxDimension": ["type": "integer", "description": "Downscale longest side to this many px."]
+                    "maxDimension": ["type": "integer",
+                                     "minimum": Self.minimumMaxDimension,
+                                     "description": "Downscale longest side to this many px (min \(Self.minimumMaxDimension))."]
                 ],
                 "required": ["target"]
             ]
@@ -48,7 +54,17 @@ public struct ScreenshotTool: Tool {
             guard hasScreenRecording() else {
                 return #"{"error":"screen_recording_not_granted","howToFix":"Grant Screen Recording to the host in System Settings ‣ Privacy & Security ‣ Screen Recording","deepLink":"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"}"#
             }
-            return captureScreen(maxDimension: arguments["maxDimension"] as? Int)
+            // JSON null conventionally means "no value" — treat it exactly like an omitted key.
+            guard let rawMaxDimension = arguments["maxDimension"], !(rawMaxDimension is NSNull) else {
+                return captureScreen(maxDimension: nil)
+            }
+            // NSNumber (not `as? Int`) so JSON floats like 500.5 downscale instead of being silently
+            // ignored; the floor also rejects booleans, which bridge to 0 or 1.
+            guard let maxDimension = (rawMaxDimension as? NSNumber)?.intValue,
+                  maxDimension >= Self.minimumMaxDimension else {
+                return #"{"error":"invalid_maxDimension","howToFix":"Pass an integer of at least \#(Self.minimumMaxDimension) — the pixel size for the screenshot's longest side — or omit it for full resolution."}"#
+            }
+            return captureScreen(maxDimension: maxDimension)
         default:
             return #"{"error":"unsupported_target","howToFix":"Use target screen or simulator."}"#
         }
@@ -109,8 +125,11 @@ enum CaptureSupport {
                 let longest = max(display.width, display.height)
                 if let maxDimension, maxDimension > 0, longest > maxDimension {
                     let scale = Double(maxDimension) / Double(longest)
-                    config.width = Int(Double(display.width) * scale)
-                    config.height = Int(Double(display.height) * scale)
+                    // Clamp to 1: past a 32:1 aspect ratio the short side rounds to zero even at the
+                    // minimum allowed maxDimension, and ScreenCaptureKit fails opaquely on a
+                    // zero-dimension configuration.
+                    config.width = max(1, Int((Double(display.width) * scale).rounded()))
+                    config.height = max(1, Int((Double(display.height) * scale).rounded()))
                 } else {
                     config.width = display.width
                     config.height = display.height

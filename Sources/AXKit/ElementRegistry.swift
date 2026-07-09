@@ -116,7 +116,7 @@ public final class ElementRegistry {
             // budget — a wall-clock check between probes can't preempt a single in-flight AX call.
             stored.element.setMessagingTimeout(1)
             if stored.element.isAlive {
-                stored.element.setMessagingTimeout(0)   // restore default — don't leave a live handle at 1s
+                stored.element.setMessagingTimeout(0)   // 0 = revert this handle to the current global timeout
             } else {
                 dead.append((ref, stored.element))
             }
@@ -423,18 +423,35 @@ public final class ElementRegistry {
                limit: limit, maxDepth: maxDepth, budget: budget).matches
     }
 
-    public func focused() -> Match? {
+    /// Runs `body` with the process-global AX messaging timeout lowered to `seconds`, then restores
+    /// the default. The system-wide element is the only handle for a focus query or hit-test (there's
+    /// no target pid yet), but per `AXUIElementSetMessagingTimeout` a timeout set on it is
+    /// PROCESS-GLOBAL — leaving it lowered would silently clamp every AX call on every connection in
+    /// this host. Passing 0 to the system-wide element resets the global to its default; there is no
+    /// getter for the global timeout, so restoring a saved prior value is impossible — call sites must
+    /// not nest, and nothing else in the host may set a session-long global.
+    private func withGlobalMessagingTimeout<T>(_ seconds: Float, _ body: (AXElement) -> T) -> T {
         let systemWide = AXElement.systemWide()
-        systemWide.setMessagingTimeout(1)
-        guard let element = systemWide.focusedElement else { return nil }
-        return register(element)
+        systemWide.setMessagingTimeout(seconds)
+        defer { systemWide.setMessagingTimeout(0) }
+        return body(systemWide)
+    }
+
+    public func focused() -> Match? {
+        // register() stays inside the lowered window on purpose: its reads hit the same app that just
+        // answered the focus query — the process most likely to be wedged — and the focused element
+        // has no per-object timeout, so only the global bounds those reads.
+        withGlobalMessagingTimeout(1) { (systemWide) -> Match? in
+            guard let element = systemWide.focusedElement else { return nil }
+            return register(element)
+        }
     }
 
     public func elementAt(x: Float, y: Float) -> Match? {
-        let systemWide = AXElement.systemWide()
-        systemWide.setMessagingTimeout(1)
-        guard let element = systemWide.elementAtPosition(x: x, y: y) else { return nil }
-        return register(element)
+        withGlobalMessagingTimeout(1) { (systemWide) -> Match? in
+            guard let element = systemWide.elementAtPosition(x: x, y: y) else { return nil }
+            return register(element)
+        }
     }
 
     /// Drive an app's menu bar by title path ("File" → "Export…" → "PDF…"), pressing each
