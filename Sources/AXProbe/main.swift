@@ -50,6 +50,14 @@ enum Group: String, CaseIterable {
     }
 }
 
+/// One-line "Name:count" summary of the non-empty groups, in `Group.allCases` order.
+func groupSummary(_ groups: [Group: Int], separator: String) -> String {
+    Group.allCases.compactMap { group -> String? in
+        guard let count = groups[group], count > 0 else { return nil }
+        return "\(group.rawValue):\(count)"
+    }.joined(separator: separator)
+}
+
 // Roles that expose AXVisibleRows (tables/outlines/lists/grids/browsers). The visible-rows rule
 // gates on these so we don't pay an AXVisibleRows IPC on every ordinary node.
 let collectionRoles: Set<String> = ["AXTable", "AXOutline", "AXList", "AXGrid", "AXBrowser"]
@@ -130,6 +138,8 @@ let monitoredNotifications: [String] = [
 ]
 
 /// Live update recorder used by the C callback (which can't capture context). Single-app at a time.
+/// No locking: the AX observer's run-loop source is added to the current (main) run loop from
+/// top-level code, so callbacks and all other access are confined to the main thread.
 final class Probe {
     static let shared = Probe()
     var refByElement: [AXElement: String] = [:]
@@ -245,7 +255,7 @@ func measureAll(maxNodes: Int) {
         totalNodes += walk.nodeCount
         totalWalk += walkMs
         if walkMs > slowest.1 { slowest = (name, walkMs) }
-        let groups = Group.allCases.compactMap { g in (walk.groups[g] ?? 0) > 0 ? "\(g.rawValue):\(walk.groups[g]!)" : nil }.joined(separator: " ")
+        let groups = groupSummary(walk.groups, separator: " ")
         let added = subscription.map { "\($0.added)/\(monitoredNotifications.count)" } ?? "FAILED"
         print(String(format: "  %-26@ %7d %8.1fms %7.1fms %6.1fms  %@ [%@]%@",
                      String(name.prefix(26)) as NSString, walk.nodeCount, walkMs,
@@ -267,7 +277,7 @@ func watch(appQuery: String, seconds: Double, maxNodes: Int) {
     var walk = WalkResult()
     let walkMs = milliseconds { walk = walkTree(pid: pid, maxNodes: maxNodes, deadline: Date().addingTimeInterval(20), breadthFirst: false) }
     print(String(format: "  walk: %d nodes in %.1f ms%@", walk.nodeCount, walkMs, walk.capped ? " [CAPPED]" : ""))
-    print("  groups: " + Group.allCases.compactMap { g in (walk.groups[g] ?? 0) > 0 ? "\(g.rawValue):\(walk.groups[g]!)" : nil }.joined(separator: "  "))
+    print("  groups: " + groupSummary(walk.groups, separator: "  "))
 
     Probe.shared.refByElement = walk.refByElement
     var subscription: Subscription?
@@ -325,7 +335,14 @@ func resolveOrLaunch(_ query: String) -> NSRunningApplication? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
     process.arguments = ["-a", query]
-    try? process.run()
+    do {
+        try process.run()
+    } catch {
+        // Report why the launch attempt failed rather than silently waiting on an app that was
+        // never asked to start.
+        FileHandle.standardError.write(Data("Failed to launch \"\(query)\" via /usr/bin/open: \(error)\n".utf8))
+        return nil
+    }
     process.waitUntilExit()
     Thread.sleep(forTimeInterval: 1.5)
     return NSWorkspace.shared.runningApplications.first { ($0.localizedName ?? "").lowercased().contains(query.lowercased()) }
@@ -388,6 +405,9 @@ func samePointer(_ a: AXUIElement, _ b: AXUIElement) -> Bool {
     Unmanaged.passUnretained(a).toOpaque() == Unmanaged.passUnretained(b).toOpaque()
 }
 
+/// Identity counters for the C callback. No locking: the observer's run-loop source is added to the
+/// current (main) run loop from top-level code, so callbacks and all other access are confined to
+/// the main thread.
 final class IdentityProbe {
     static let shared = IdentityProbe()
     var stored: [AXElement: AXUIElement] = [:]   // the exact instance we subscribed, keyed by CFEqual identity

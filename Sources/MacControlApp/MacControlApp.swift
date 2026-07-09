@@ -105,8 +105,12 @@ final class AppModel: ObservableObject {
     @Published var lastMessage = ""
     @Published var agentVersion: AgentVersion = .unknown
     @Published var debugMonitoring = false
-    @Published var debugEvents: [DebugEvent] = []
-    @Published var showAllDebugEvents = false
+    @Published private(set) var debugEvents: [DebugEvent] = []
+    @Published private(set) var showAllDebugEvents = false
+    /// The rows the debug monitor renders: newest first, capped at the most recent 10 unless the user
+    /// expanded the list. Precomputed here rather than derived in `body` so the reverse/slice work
+    /// runs once per mutation instead of on every view update.
+    @Published private(set) var visibleDebugEvents: [DebugEvent] = []
 
     /// This app's own version — the "client" side of the drift check.
     let clientVersion = BuildInfo.current
@@ -319,6 +323,20 @@ final class AppModel: ObservableObject {
             response: dictionary["response"] as? String))
         // Bound memory: keep the most recent 500 events.
         if debugEvents.count > 500 { debugEvents.removeFirst(debugEvents.count - 500) }
+        rebuildVisibleDebugEvents()
+    }
+
+    /// Flips the debug monitor between the newest 10 events and the full capped history.
+    func toggleShowAllDebugEvents() {
+        showAllDebugEvents.toggle()
+        rebuildVisibleDebugEvents()
+    }
+
+    /// Every mutation of `debugEvents` or `showAllDebugEvents` funnels through here so
+    /// `visibleDebugEvents` can never drift from the state it is derived from.
+    private func rebuildVisibleDebugEvents() {
+        let recent = showAllDebugEvents ? debugEvents[...] : debugEvents.suffix(10)
+        visibleDebugEvents = Array(recent.reversed())
     }
 
     private func open(_ urlString: String) {
@@ -363,12 +381,6 @@ struct ContentView: View {
         case .unreachable: return .secondary
         case .unknown, .checking: return .secondary
         }
-    }
-
-    /// Newest first; the most recent 10 unless the user expanded the list.
-    private var visibleDebugEvents: [DebugEvent] {
-        let newestFirst = Array(model.debugEvents.reversed())
-        return model.showAllDebugEvents ? newestFirst : Array(newestFirst.prefix(10))
     }
 
     var body: some View {
@@ -438,14 +450,14 @@ struct ContentView: View {
                         Text(model.debugMonitoring ? "Monitoring — waiting for calls…" : "Off")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
-                        ForEach(visibleDebugEvents) { event in
+                        ForEach(model.visibleDebugEvents) { event in
                             DebugEventRow(event: event)
                         }
                         if model.debugEvents.count > 10 {
                             Button(model.showAllDebugEvents
                                    ? "Show fewer"
                                    : "Show more (\(model.debugEvents.count - 10) earlier)") {
-                                model.showAllDebugEvents.toggle()
+                                model.toggleShowAllDebugEvents()
                             }
                             .font(.caption)
                         }
