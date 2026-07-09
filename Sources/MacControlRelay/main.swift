@@ -39,6 +39,33 @@ let mutatingTools: Set<String> = [
 // must match this value) so a caller-supplied timeout can't routinely exceed it.
 let xpcCallTimeout: TimeInterval = 60
 
+// Deferrable tools can PARK the call while the host waits for the user to go idle (up to the
+// configured defer budget, capped at DEFER_MAX). The relay must wait longer than the base budget
+// for those, or a legitimate defer would trip a false "host unavailable". Conservative static
+// superset by name — it can't see control_app's auto-launch branch or open(background:true), and
+// doesn't need to: the extra ceiling is only headroom, and the host enforces the actual deferral.
+// A DEAD host is still caught promptly by the connection error handler regardless; only a
+// live-wedged host on one of these calls waits out the longer ceiling.
+let deferrableTools: Set<String> = [
+    "click", "click_point", "scroll", "key", "type", "drag", "hover",
+    "window", "menu_pick", "open", "launch_app", "app", "control_app", "batch"
+]
+let deferMaxSeconds: TimeInterval = 600   // DEFER_MAX (== ActivityConfig.deferBudgetCeiling)
+
+/// The XPC wait budget for a request: the base budget, plus the defer headroom when the call could
+/// park waiting for the user to be idle.
+func xpcTimeout(for line: String) -> TimeInterval {
+    guard let data = line.data(using: .utf8) else { return xpcCallTimeout }
+    let object: Any
+    do { object = try JSONSerialization.jsonObject(with: data) } catch { return xpcCallTimeout }
+    guard let dict = object as? [String: Any],
+          (dict["method"] as? String) == "tools/call",
+          let params = dict["params"] as? [String: Any],
+          let name = params["name"] as? String,
+          deferrableTools.contains(name) else { return xpcCallTimeout }
+    return xpcCallTimeout + deferMaxSeconds
+}
+
 /// First-write-wins box for an XPC call's outcome, guarded by a lock. Both the reply block and
 /// the connection error handler run on XPC's background queue; on timeout the relay settles it
 /// from the loop thread. Whoever settles first wins, so a late reply after a timeout is ignored
@@ -153,9 +180,10 @@ func runRelay() {
                 proxy.handle(line: line) { reply in
                     if box.settle(response: reply, failed: false) { semaphore.signal() }
                 }
-                if semaphore.wait(timeout: .now() + xpcCallTimeout) == .timedOut {
+                let budget = xpcTimeout(for: line)
+                if semaphore.wait(timeout: .now() + budget) == .timedOut {
                     box.settle(response: nil, failed: true)
-                    DebugLog.event("timeout", "xpc handle exceeded \(Int(xpcCallTimeout))s")
+                    DebugLog.event("timeout", "xpc handle exceeded \(Int(budget))s")
                 }
             } else {
                 box.settle(response: nil, failed: true)

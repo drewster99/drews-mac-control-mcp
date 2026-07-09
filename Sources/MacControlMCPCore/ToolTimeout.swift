@@ -10,6 +10,12 @@
 //  abandoned host service. NOTE: clamping only prevents the spurious relay timeout; it does not
 //  cancel the orphaned host-side work (that needs a host-side deadline / cancellation token).
 //
+//  This clamps the tool's WORK budget only. The idle-defer wait (docs/planning/USER_ACTIVITY_DESIGN.md)
+//  is a separate budget the DeferringTool prepends, and the relay gives deferrable tools extra XPC
+//  headroom (base + DEFER_MAX) so a long defer doesn't trip a false timeout — so for those tools the
+//  relay's real ceiling is larger than `relayBudgetSeconds`, and a caller `timeout` (treated as the
+//  defer+work TOTAL) is split by the DeferringTool before the remaining work budget reaches here.
+//
 
 import Foundation
 

@@ -15,6 +15,30 @@ import Foundation
 import InputKit
 import MacControlMCPCore
 
+/// Which tools interrupt the user and how they defer/restore (docs/planning/USER_ACTIVITY_DESIGN.md
+/// §4). Tools absent from this map are never deferred (reads, semantic AX writes, destructive).
+/// `focus_keyboard` is deliberately absent — it sets AXFocused without fronting the app, so it
+/// doesn't steal the active user's input.
+let interruptionProfiles: [String: InterruptionProfile] = [
+    // Physical input — always deferred; mouse-movers restore the pointer.
+    "click_point": .init(mode: .always, restoresMouse: true, restoresFocus: false),
+    "hover": .init(mode: .always, restoresMouse: true, restoresFocus: false),
+    "drag": .init(mode: .always, restoresMouse: true, restoresFocus: false),
+    "click": .init(mode: .always, restoresMouse: true, restoresFocus: false),
+    "type": .init(mode: .always, restoresMouse: true, restoresFocus: false),
+    "scroll": .init(mode: .always, restoresMouse: false, restoresFocus: false),
+    "key": .init(mode: .always, restoresMouse: false, restoresFocus: false),
+    "window": .init(mode: .always, restoresMouse: false, restoresFocus: false),
+    "menu_pick": .init(mode: .always, restoresMouse: false, restoresFocus: false),
+    // Focus-grab-is-the-intent — deferred only when the user opts in via deferFocusTools.
+    "open": .init(mode: .focusTool, restoresMouse: false, restoresFocus: false),
+    "launch_app": .init(mode: .focusTool, restoresMouse: false, restoresFocus: false),
+    "app": .init(mode: .focusTool, restoresMouse: false, restoresFocus: false),
+    "control_app": .init(mode: .focusTool, restoresMouse: false, restoresFocus: false),
+    // The batch scope: defers ONCE up front, runs its (undecorated) steps, restores mouse + focus once.
+    "batch": .init(mode: .always, restoresMouse: true, restoresFocus: true)
+]
+
 /// The single place that wires every tool layer together — used by both the stdio
 /// executable and the XPC host so they never drift.
 public func makeFullServer() -> MCPServer {
@@ -46,7 +70,14 @@ public func makeFullServer() -> MCPServer {
         }
         return tool.call(arguments)
     }
-    return MCPServer(tools: baseTools + [BatchTool(dispatch: dispatch)],
+    // `batch` dispatches over the UNDECORATED base tools, so its steps never re-defer — the batch
+    // scope defers once and restores once. The server list, in contrast, exposes each interrupting
+    // tool wrapped in DeferringTool so a direct call defers.
+    let serverTools = (baseTools + [BatchTool(dispatch: dispatch)]).map { tool -> Tool in
+        guard let profile = interruptionProfiles[tool.name] else { return tool }
+        return DeferringTool(inner: tool, profile: profile)
+    }
+    return MCPServer(tools: serverTools,
                     activityHeader: { ActivityMonitor.shared.snapshot().dictionary })
 }
 
