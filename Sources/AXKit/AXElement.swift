@@ -182,6 +182,17 @@ public struct AXElement: @unchecked Sendable {
         public var valueDescription: String? = nil
         public var placeholder: String? = nil
         public var url: String? = nil
+        // The remaining fields ControlWalker needs. `numericValue` decodes the SAME slot as `value`
+        // — `value` stringifies an NSNumber, which would destroy the numeric-vs-text distinction the
+        // renderer depends on (=0.72 bare vs ="007" quoted), so the raw-typed reading is kept too.
+        public var numericValue: Double? = nil
+        public var minValue: Double? = nil
+        public var maxValue: Double? = nil
+        public var disclosureLevel: Int? = nil
+        public var isDisclosing: Bool? = nil
+        public var rowCount: Int? = nil
+        public var columnCount: Int? = nil
+        public var columnTitles: [String]? = nil
     }
 
     /// Read role/subrole/identifier/title/value/frame/children in a single
@@ -193,7 +204,9 @@ public struct AXElement: @unchecked Sendable {
             kAXRoleAttribute as String, kAXSubroleAttribute as String, "AXIdentifier",
             kAXTitleAttribute as String, kAXValueAttribute as String,
             kAXPositionAttribute as String, kAXSizeAttribute as String, kAXChildrenAttribute as String,
-            "AXDescription", "AXHelp", "AXValueDescription", "AXPlaceholderValue", "AXURL"
+            "AXDescription", "AXHelp", "AXValueDescription", "AXPlaceholderValue", "AXURL",
+            "AXMinValue", "AXMaxValue", "AXDisclosureLevel", "AXDisclosing",
+            "AXRowCount", "AXColumnCount", "AXColumnTitles"
         ]
         var out: CFArray?
         let err = AXUIElementCopyMultipleAttributeValues(raw, names as CFArray, AXCopyMultipleAttributeOptions(), &out)
@@ -202,7 +215,10 @@ public struct AXElement: @unchecked Sendable {
             return SnapshotAttributes(role: role, subrole: subrole, identifier: identifier,
                                       title: title, value: value, frame: frame, children: children,
                                       axDescription: axDescription, help: help,
-                                      valueDescription: valueDescription, placeholder: placeholderValue, url: url)
+                                      valueDescription: valueDescription, placeholder: placeholderValue, url: url,
+                                      numericValue: numericValue, minValue: minValue, maxValue: maxValue,
+                                      disclosureLevel: disclosureLevel, isDisclosing: isDisclosing,
+                                      rowCount: rowCount, columnCount: columnCount, columnTitles: columnTitles)
         }
 
         // A failed attribute comes back as an AXValue of type .axError (or kCFNull); treat as absent.
@@ -238,18 +254,28 @@ public struct AXElement: @unchecked Sendable {
             guard let raw = present(7), let array = raw as? [AXUIElement] else { return [] }
             return array.map(AXElement.init)
         }
-        var decodedURL: String? {
-            guard let raw = present(12) else { return nil }
-            if let url = raw as? URL { return url.absoluteString }
-            if let url = raw as? NSURL { return url.absoluteString }
-            return nil
+        var decodedURL: String? { AXElement.decodeURL(present(12)) }
+        // Same casts the per-attribute accessors use, so the decoded values are indistinguishable.
+        func number(_ index: Int) -> Double? { (present(index) as? NSNumber)?.doubleValue }
+        func boolean(_ index: Int) -> Bool? {
+            guard let raw = present(index), CFGetTypeID(raw) == CFBooleanGetTypeID() else { return nil }
+            return CFBooleanGetValue(unsafeDowncast(raw, to: CFBoolean.self))
         }
+        // `numericValue` shares slot 4 with `value`: an AXValue that bridges to NSNumber is numeric
+        // (this is also how a CFBoolean-backed checkbox value reads as 0/1, matching the accessor).
+        var decodedNumericValue: Double? { (present(4) as? NSNumber)?.doubleValue }
 
         return SnapshotAttributes(role: string(0), subrole: string(1), identifier: string(2),
                                   title: string(3), value: decodedValue, frame: decodedFrame,
                                   children: decodedChildren,
                                   axDescription: string(8), help: string(9),
-                                  valueDescription: string(10), placeholder: string(11), url: decodedURL)
+                                  valueDescription: string(10), placeholder: string(11), url: decodedURL,
+                                  numericValue: decodedNumericValue,
+                                  minValue: number(13), maxValue: number(14),
+                                  disclosureLevel: number(15).map { Int($0) }, isDisclosing: boolean(16),
+                                  rowCount: number(17).map { Int($0) },
+                                  columnCount: number(18).map { Int($0) },
+                                  columnTitles: present(19) as? [String])
     }
 
     /// The element this (system-wide or app) element reports as focused.
@@ -383,7 +409,19 @@ public extension AXElement {
     var placeholderValue: String? { stringAttribute("AXPlaceholderValue") }
 
     /// AXURL destination as an absolute string (links, web areas, some images).
-    var url: String? { (copyAttribute("AXURL") as? NSURL)?.absoluteString }
+    var url: String? { AXElement.decodeURL(copyAttribute("AXURL")) }
+
+    /// The single AXURL decoder, shared by this accessor and the bulk `snapshotAttributes()` read.
+    /// It must be shared: bridging to `URL` resolves a Finder file-reference URL to its real path
+    /// (`file:///Users/…`), while `NSURL` preserves the opaque `file:///.file/id=…` form — so two
+    /// decoders meant `find_elements` and `control_app` reported different URLs for the same element.
+    /// The resolved path is the useful one, and the one find_elements already returned.
+    static func decodeURL(_ raw: Any?) -> String? {
+        guard let raw else { return nil }
+        if let url = raw as? URL { return url.absoluteString }
+        if let url = raw as? NSURL { return url.absoluteString }
+        return nil
+    }
 
     /// Whether the element is enabled (`AXEnabled`). Defaults to `true` when the attribute is absent —
     /// many elements that don't expose it are still interactive, so absence shouldn't read as disabled.

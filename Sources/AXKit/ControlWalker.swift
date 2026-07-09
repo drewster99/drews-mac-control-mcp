@@ -36,6 +36,9 @@ public enum ControlWalker {
         let rowCount: Int?
         let columnCount: Int?
         let columnTitles: [String]?
+        /// The element's `AXChildren` as captured by `draft`'s bulk read, so neither the expansion
+        /// step nor the frontier's hidden-count has to pay a second cross-process read for them.
+        let childElements: [AXElement]
         var children: [Build] = []
         var hidden: HiddenCount = .none
 
@@ -43,24 +46,30 @@ public enum ControlWalker {
              identifier: String?, textValue: String?, numericValue: Double?, minValue: Double?,
              maxValue: Double?, valueDescription: String?, url: String?, placeholder: String?,
              states: [String], actions: [String], disclosureLevel: Int?,
-             rowCount: Int?, columnCount: Int?, columnTitles: [String]?) {
+             rowCount: Int?, columnCount: Int?, columnTitles: [String]?, childElements: [AXElement]) {
             self.element = element; self.ref = ref; self.role = role; self.subrole = subrole
             self.label = label; self.identifier = identifier; self.textValue = textValue
             self.numericValue = numericValue; self.minValue = minValue; self.maxValue = maxValue
             self.valueDescription = valueDescription; self.url = url; self.placeholder = placeholder
             self.states = states; self.actions = actions; self.disclosureLevel = disclosureLevel
             self.rowCount = rowCount; self.columnCount = columnCount; self.columnTitles = columnTitles
+            self.childElements = childElements
         }
     }
 
-    /// Read one element's metadata + mint its ref. This is the heavy per-node AX cost (§8).
+    /// Read one element's metadata + mint its ref. This is the heavy per-node AX cost (§8), so almost
+    /// all of it rides ONE bulk `snapshotAttributes()` round trip. Only the reads with no bulk
+    /// equivalent stay separate: actions and settability use different AX APIs, `booleanAttributes`
+    /// needs the element's own attribute-name list, and the disclosure-settability probe is asked
+    /// for solely on the handful of rows that already advertise `AXDisclosing`.
     private static func draft(_ element: AXElement, registry: ElementRegistry, pid: pid_t?) -> Build {
-        let role = element.role ?? "AXUnknown"
-        let subrole = element.subrole
-        let label = [element.title, element.axDescription, element.help]
+        let attributes = element.snapshotAttributes()
+        let role = attributes.role ?? "AXUnknown"
+        let subrole = attributes.subrole
+        let label = [attributes.title, attributes.axDescription, attributes.help]
             .compactMap { $0 }.first(where: { !$0.isEmpty })
-        let numeric = element.numericValue
-        let textValue = numeric == nil ? element.value : nil
+        let numeric = attributes.numericValue
+        let textValue = numeric == nil ? attributes.value : nil
 
         var seen = Set<String>()
         var actions = element.rawActionNames
@@ -70,8 +79,8 @@ public enum ControlWalker {
         // non-row elements spuriously expose AXDisclosing), and only when it's actually
         // performable: AXDisclosing is settable, or there's a disclosure-triangle child to press.
         let rowLike = role == "AXRow" || role == "AXOutlineRow" || subrole == "AXOutlineRow"
-        if rowLike, let disclosing = element.isDisclosing,
-           element.isDisclosingSettable || element.children.contains(where: { $0.role == "AXDisclosureTriangle" }) {
+        if rowLike, let disclosing = attributes.isDisclosing,
+           element.isDisclosingSettable || attributes.children.contains(where: { $0.role == "AXDisclosureTriangle" }) {
             actions.append(disclosing ? "collapse" : "disclose")
         }
 
@@ -90,28 +99,32 @@ public enum ControlWalker {
             role: role,
             subrole: subrole,
             label: label,
-            identifier: element.identifier,
+            identifier: attributes.identifier,
             textValue: textValue,
             numericValue: numeric,
             // Only real range controls (numeric AXValue) carry min/max — many Catalyst/bridged
             // elements spuriously expose AXMinValue/AXMaxValue=0, which would spam `[0–0]`.
-            minValue: numeric != nil ? element.minValue : nil,
-            maxValue: numeric != nil ? element.maxValue : nil,
-            valueDescription: element.valueDescription,
-            url: element.url,
-            placeholder: element.placeholderValue,
+            minValue: numeric != nil ? attributes.minValue : nil,
+            maxValue: numeric != nil ? attributes.maxValue : nil,
+            valueDescription: attributes.valueDescription,
+            url: attributes.url,
+            placeholder: attributes.placeholder,
             states: states,
             actions: actions,
-            disclosureLevel: element.disclosureLevel,
-            rowCount: isCollection ? element.rowCount : nil,
-            columnCount: isCollection ? element.columnCount : nil,
-            columnTitles: isCollection ? element.columnTitles : nil
+            disclosureLevel: attributes.disclosureLevel,
+            rowCount: isCollection ? attributes.rowCount : nil,
+            columnCount: isCollection ? attributes.columnCount : nil,
+            columnTitles: isCollection ? attributes.columnTitles : nil,
+            childElements: attributes.children
         )
     }
 
-    /// Hidden-count for a node we didn't expand: one cheap child-count read (§5).
-    private static func frontierHidden(_ element: AXElement) -> HiddenCount {
-        guard let count = element.childCount else { return .unknown }
+    /// Hidden-count for a node we didn't expand. The draft-time children are authoritative when
+    /// non-empty; an empty capture is ambiguous (genuinely childless, or a failed bulk slot), so
+    /// that case still pays the cheap child-count read to tell `.none` from `.unknown` (§5).
+    private static func frontierHidden(_ node: Build) -> HiddenCount {
+        if !node.childElements.isEmpty { return .known(node.childElements.count) }
+        guard let count = node.element.childCount else { return .unknown }
         return count > 0 ? .known(count) : .none
     }
 
@@ -125,11 +138,14 @@ public enum ControlWalker {
         if collectionRoles.contains(node.role) {
             let visible = element.visibleRows ?? element.visibleCells ?? []
             let selected = element.selectedRows ?? element.selectedCells ?? []
-            if !visible.isEmpty || !selected.isEmpty || element.rowCount != nil {
+            // `node.rowCount` was captured by draft under this same collection-role predicate, so it
+            // is populated here — and reusing it keeps the hidden count consistent with the
+            // `[N rows × M cols]` the renderer prints from the same value.
+            if !visible.isEmpty || !selected.isEmpty || node.rowCount != nil {
                 var seen = Set<AXElement>()
                 let union = (visible + selected).filter { seen.insert($0).inserted }
                 let hidden: HiddenCount
-                if let total = element.rowCount {
+                if let total = node.rowCount {
                     let remaining = total - union.count
                     hidden = remaining > 0 ? .known(remaining) : .none
                 } else {
@@ -139,7 +155,7 @@ public enum ControlWalker {
             }
             // No row/cell info — treat as an ordinary container.
         }
-        let kids = element.children
+        let kids = node.childElements
         if isRoot, let windowFilter {
             // Keep the selected window + non-window children (e.g. the menu bar); drop other windows.
             return (kids.filter { $0.role != "AXWindow" || $0.title == windowFilter }, .none)
@@ -206,7 +222,7 @@ public enum ControlWalker {
         // Everything still queued was never expanded → frontier; advertise its child count.
         for position in index..<queue.count {
             let node = queue[position]
-            if case .none = node.hidden { node.hidden = frontierHidden(node.element) }
+            if case .none = node.hidden { node.hidden = frontierHidden(node) }
         }
         return freeze(rootBuild)
     }
