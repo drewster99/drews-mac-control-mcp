@@ -661,7 +661,9 @@ public struct TypeTool: Tool {
             }
             let focused = element.isFocused
             // Keystroke no-op detection (AppKit NSTextView ignores synthetic Unicode keys) → paste.
-            let canVerify = !paste && (isTextInput(element) || element.isValueSettable)
+            // The baseline is read on the forced-paste path too (hence no `!paste` here), so a paste
+            // that visibly never landed can be reported rather than passed off as a silent success.
+            let canVerify = isTextInput(element) || element.isValueSettable
             let before = canVerify ? element.value : nil
             if let pid = element.pid {
                 _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { type(text, paste) })
@@ -672,7 +674,8 @@ public struct TypeTool: Tool {
             // Only treat keys as a no-op when we actually READ a baseline value. If the element
             // exposes no readable AXValue, `before` is nil and `nil == nil` would falsely fire the
             // paste — double-typing the text. Require a real baseline, and settle the paste too.
-            if canVerify, let baseline = before, element.value == baseline {
+            // `!paste` keeps the retry off the forced-paste path, which has nothing to fall back to.
+            if !paste, canVerify, let baseline = before, element.value == baseline {
                 if let pid = element.pid {
                     _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { type(text, true) })
                 } else {
@@ -684,6 +687,13 @@ public struct TypeTool: Tool {
                                        "focused": focused, "via": usedVia]
             if !focused {
                 base["note"] = "Typed after bringing the app forward, but this element isn't a focusable text field, so input went to the app's current key field (not necessarily this element). Verify via the hierarchy; target an {editable} ref for precise entry."
+            }
+            // ⌘V is fire-and-forget into the key app; when we hold a baseline and the value never
+            // moved, say so rather than reporting silent success. (Pasting text identical to the
+            // existing value also trips this — hence a note, not a failure.) The not-focused note
+            // above is the more actionable diagnosis, so it wins when both apply.
+            if usedVia == "paste", canVerify, let baseline = before, element.value == baseline, base["note"] == nil {
+                base["note"] = "The field's value did not change after the clipboard paste; the ⌘V may not have reached this element. Verify via the hierarchy."
             }
             return actedResponse(registry, ref: ref, deadline: Date().addingTimeInterval(4),
                                  base: base, scope: refreshScope(arguments))

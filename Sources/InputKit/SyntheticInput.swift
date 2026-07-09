@@ -105,9 +105,24 @@ public enum SyntheticInput {
         }
     }
 
-    /// Save clipboard, set text, ⌘V, then restore — the reliable path for surfaces that
-    /// mangle keystrokes. The brief sleep lets the paste read before we restore.
+    /// How long a busy target gets to service the queued ⌘V before the clipboard is restored. 80ms
+    /// proved too short for an app mid-work; 0.6s lets a backlogged event queue drain while keeping
+    /// the paste path (already the slow fallback) far inside the relay's 60s budget.
+    private static let pasteConsumeWindow: TimeInterval = 0.6
+
+    /// Serializes the whole save→restore window. Each XPC connection has its own request lock, so
+    /// without this a second connection's paste could snapshot OUR text as "the user's clipboard"
+    /// and later restore it as if it were theirs. A leaf lock — nothing is acquired while holding it.
+    private static let pasteLock = NSLock()
+
+    /// Save clipboard, set text, ⌘V, then restore — the reliable path for surfaces that mangle
+    /// keystrokes. ⌘V is only QUEUED to the target's run loop, and a read never bumps `changeCount`,
+    /// so the landing can't be observed; we hold the clipboard for a bounded window instead of a
+    /// fixed instant, because restoring before the target reads makes it paste the user's OLD
+    /// clipboard — silent wrong data, strictly worse than holding their clipboard a moment longer.
     public static func paste(_ text: String) {
+        pasteLock.lock()
+        defer { pasteLock.unlock() }
         let pasteboard = NSPasteboard.general
         // Snapshot ALL items + types so rich clipboard content is restored, not just strings.
         // NOTE: `data(forType:)` materializes lazy data providers (those are preserved), but
@@ -124,7 +139,13 @@ public enum SyntheticInput {
         pasteboard.setString(text, forType: .string)
         let stamp = pasteboard.changeCount
         if let chord = KeyMap.parse("cmd+v") { post(chord) }
-        Thread.sleep(forTimeInterval: 0.08)   // let the paste consume the clipboard before restoring
+        // Poll rather than sleep out the whole window: a concurrent writer forfeits the restore
+        // anyway, so stop waiting the moment one appears. This bounds the hold; it cannot detect
+        // the paste landing, because a pasteboard READ leaves changeCount untouched.
+        let deadline = Date().addingTimeInterval(pasteConsumeWindow)
+        while Date() < deadline, pasteboard.changeCount == stamp {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
         // Only restore if nothing else wrote the clipboard in the meantime (⌘V reads, doesn't write).
         if pasteboard.changeCount == stamp {
             pasteboard.clearContents()
