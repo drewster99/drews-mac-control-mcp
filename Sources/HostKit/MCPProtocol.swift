@@ -38,6 +38,14 @@ public protocol MCPHostProtocol {
     /// — no per-client filtering. Replies with the resulting active state. Used by the app's
     /// dedicated debug connection, not by the relay.
     func setDebugMonitoring(enabled: Bool, withReply reply: @escaping (Bool) -> Void)
+
+    /// The host-owned user-activity / idle-defer settings as JSON (see `ActivityConfig.jsonString()`).
+    /// The host is the single owner; the app reads them here rather than from any shared file.
+    func activityConfig(withReply reply: @escaping (String) -> Void)
+
+    /// Replace the user-activity settings from `json` (see `ActivityConfig`). The host clamps,
+    /// persists, and replies with the stored (clamped) config as JSON.
+    func setActivityConfig(_ json: String, withReply reply: @escaping (String) -> Void)
 }
 
 /// Host → app callback for the live debug stream: one JSON event per MCP request/response, shaped

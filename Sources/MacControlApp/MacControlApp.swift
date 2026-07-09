@@ -127,6 +127,14 @@ final class AppModel: ObservableObject {
     /// runs once per mutation instead of on every view update.
     @Published private(set) var visibleDebugEvents: [DebugEvent] = []
 
+    /// The host-owned user-activity / idle-defer settings. Loaded from and saved to the host over
+    /// XPC (the host is the single owner — no shared file).
+    @Published var activityConfig = ActivityConfig.disabled
+    /// Live idle readout, refreshed by a 1s timer. Read directly from this process's `CGEventSource`
+    /// (global OS idle) — no XPC needed, and this app never posts synthetic input.
+    @Published private(set) var liveMouseIdle: TimeInterval = 0
+    @Published private(set) var liveKeyboardIdle: TimeInterval = 0
+
     /// This app's own version — the "client" side of the drift check.
     let clientVersion = BuildInfo.current
 
@@ -196,6 +204,53 @@ final class AppModel: ObservableObject {
                     return
                 }
                 self.settleAgentVersion(self.classify(agent: agent), connection: connection)
+            }
+        }
+    }
+
+    // MARK: - User-activity settings (host-owned, over XPC)
+
+    /// A short-lived, code-signing-pinned connection to the host, torn down by each caller.
+    private func hostConnection() -> NSXPCConnection {
+        let connection = NSXPCConnection(machServiceName: mcpMachServiceName, options: [])
+        connection.remoteObjectInterface = NSXPCInterface(with: MCPHostProtocol.self)
+        connection.setCodeSigningRequirement(mcpHostRequirement)
+        connection.resume()
+        return connection
+    }
+
+    /// Refresh the live idle readout from this process's OS idle counters (no XPC).
+    func refreshIdle() {
+        liveMouseIdle = ActivityMonitor.shared.mouseIdleSeconds()
+        liveKeyboardIdle = ActivityMonitor.shared.keyboardIdleSeconds()
+    }
+
+    /// Ask the host for the current settings (boots it on demand).
+    func loadActivityConfig() {
+        let connection = hostConnection()
+        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+            Task { @MainActor in connection.invalidate() }
+        } as? MCPHostProtocol
+        guard let proxy else { connection.invalidate(); return }
+        proxy.activityConfig { [weak self] json in
+            Task { @MainActor in
+                self?.activityConfig = ActivityConfig.decoded(fromJSON: json)
+                connection.invalidate()
+            }
+        }
+    }
+
+    /// Push the current settings to the host; reflect back the host's clamped value.
+    func saveActivityConfig() {
+        let connection = hostConnection()
+        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+            Task { @MainActor in connection.invalidate() }
+        } as? MCPHostProtocol
+        guard let proxy else { connection.invalidate(); return }
+        proxy.setActivityConfig(activityConfig.jsonString()) { [weak self] json in
+            Task { @MainActor in
+                self?.activityConfig = ActivityConfig.decoded(fromJSON: json)
+                connection.invalidate()
             }
         }
     }
@@ -482,10 +537,65 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            GroupBox("5 · User activity — defer interrupting actions") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(String(format: "Mouse idle %.1fs · Keyboard idle %.1fs",
+                                model.liveMouseIdle, model.liveKeyboardIdle))
+                        .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+
+                    HStack {
+                        Text("Wait for user idle")
+                        Slider(value: Binding(
+                            get: { Double(model.activityConfig.minIdleSeconds) },
+                            set: { model.activityConfig.minIdleSeconds = Int($0) }),
+                            in: 0...Double(ActivityConfig.minIdleCeiling),
+                            onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
+                        Text(model.activityConfig.minIdleSeconds == 0 ? "Off"
+                             : "\(model.activityConfig.minIdleSeconds)s")
+                            .monospacedDigit().frame(width: 48, alignment: .trailing)
+                    }
+
+                    HStack {
+                        Text("Defer up to")
+                        Slider(value: Binding(
+                            get: { Double(model.activityConfig.deferBudgetSeconds) },
+                            set: { model.activityConfig.deferBudgetSeconds = Int($0) }),
+                            in: 0...Double(ActivityConfig.deferBudgetCeiling),
+                            onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
+                        Text("\(model.activityConfig.deferBudgetSeconds)s")
+                            .monospacedDigit().frame(width: 48, alignment: .trailing)
+                    }
+                    .disabled(model.activityConfig.minIdleSeconds == 0)
+
+                    Picker("When defer time is reached", selection: Binding(
+                        get: { model.activityConfig.onDeferTimeout },
+                        set: { model.activityConfig.onDeferTimeout = $0; model.saveActivityConfig() })) {
+                        Text("Execute anyway").tag(OnDeferTimeout.executeAnyway)
+                        Text("Report user busy").tag(OnDeferTimeout.reportBusy)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(model.activityConfig.minIdleSeconds == 0)
+
+                    Toggle("Also defer app-launch / open / focus tools", isOn: Binding(
+                        get: { model.activityConfig.deferFocusTools },
+                        set: { model.activityConfig.deferFocusTools = $0; model.saveActivityConfig() }))
+                        .disabled(model.activityConfig.minIdleSeconds == 0)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             Spacer()
             Button("Refresh") { model.refresh() }
         }
-        .onAppear { model.refresh() }
+        .onAppear {
+            model.refresh()
+            model.loadActivityConfig()
+            model.refreshIdle()
+        }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+            model.refreshIdle()
+        }
     }
 }
 

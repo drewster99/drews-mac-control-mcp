@@ -119,4 +119,13 @@ public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendabl
     public func buildInfo(withReply reply: @escaping (String) -> Void) {
         reply(BuildInfo.current.jsonString())
     }
+
+    public func activityConfig(withReply reply: @escaping (String) -> Void) {
+        reply(ActivityConfigStore.shared.current.jsonString())
+    }
+
+    public func setActivityConfig(_ json: String, withReply reply: @escaping (String) -> Void) {
+        let stored = ActivityConfigStore.shared.update(ActivityConfig.decoded(fromJSON: json))
+        reply(stored.jsonString())
+    }
 }
