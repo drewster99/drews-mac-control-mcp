@@ -55,6 +55,26 @@ See [CONTROL_APP_DESIGN.md](./CONTROL_APP_DESIGN.md) and [MCP_DESIGN.md](./MCP_D
 
 ---
 
+## Security & trust model
+
+- **Confused-deputy: the relay forwards any local process's stdin to the grant-holding host.**
+  (Flagged by external review.) The host holds the Accessibility and Screen Recording grants, and
+  the XPC service pins its caller by code signature (`mcpCallerRequirement`, `MCPProtocol.swift`) —
+  but that only proves *which binary* connected (the signed `MacControlRelay`), not *who is driving
+  it*. The relay is a stdio→XPC proxy that forwards whatever arrives on its stdin without
+  authenticating the stream or checking its parent, so **any** unprivileged local process can spawn
+  the relay and drive the host — read the screen, drive apps — without ever holding those grants
+  itself. This is largely inherent to the MCP-over-stdio design (every MCP client launches the relay
+  and reuses the one grant, by design), so it may be acceptable as-is; documenting it as a conscious
+  posture rather than an oversight. If we ever want to tighten it, the levers are real changes:
+  verify the relay's parent process against an allowlist, require the client to present a
+  capability/token the host checks, or move to a per-client grant model. Each trades away the
+  frictionless any-client story, so this is a deliberate future decision, not a quick fix. Note the
+  baseline: a local process that can already spawn binaries and post synthetic events is in a strong
+  position regardless, which is part of why this is "consider," not "urgent."
+
+---
+
 ## control_app — brevity pass (opt-in, once full output is proven)
 
 The renderer currently hides **nothing structural** (v1 stance, CONTROL_APP_DESIGN §11) so we
