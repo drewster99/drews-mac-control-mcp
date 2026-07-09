@@ -40,6 +40,14 @@ public enum JSONRPC {
     }
 
     static func encode(_ object: [String: Any]) -> Data {
+        // The request `id` is echoed straight back from untrusted input, and JSONSerialization
+        // decodes an out-of-range numeric literal (e.g. -1e400) to Double.infinity — on which
+        // `data(withJSONObject:)` raises an *Objective-C* exception that no Swift `catch` can
+        // intercept, aborting the host. Screen the whole object first and fall back to a valid
+        // id:null error rather than crash.
+        guard JSONSerialization.isValidJSONObject(object) else {
+            return Data(#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"encode failed"}}"#.utf8)
+        }
         do { return try JSONSerialization.data(withJSONObject: object) }
         catch {
             return Data(#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"encode failed"}}"#.utf8)

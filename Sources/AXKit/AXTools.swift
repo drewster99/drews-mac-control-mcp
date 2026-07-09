@@ -776,9 +776,10 @@ public struct KillTool: Tool {
         guard alive() else { return JSONText.from(["success": true, "pid": Int(pid), "note": "not running"]) }
 
         // The target can exit between alive() and kill() — ESRCH there is the goal state, not a
-        // failure. Anything else (in practice EPERM) is surfaced with the OS's own words.
-        func sendFailure(_ label: String) -> String {
-            let code = errno
+        // failure. Anything else (in practice EPERM) is surfaced with the OS's own words. `code` is
+        // captured by the caller at the failing syscall, not read here: errno is thread-local and
+        // reading it across a function-call boundary risks a value clobbered by intervening work.
+        func sendFailure(_ label: String, _ code: Int32) -> String {
             if code == ESRCH {
                 return JSONText.from(["success": true, "pid": Int(pid), "note": "not running"])
             }
@@ -790,7 +791,7 @@ public struct KillTool: Tool {
         }
 
         if let (signal, label) = requestedSignal {
-            guard kill(pid, signal) == 0 else { return sendFailure(label) }
+            guard kill(pid, signal) == 0 else { let code = errno; return sendFailure(label, code) }
             // Signals are async — give the process a moment to actually exit before reporting state.
             let deadline = Date().addingTimeInterval(1.5)
             while alive(), Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
@@ -801,7 +802,7 @@ public struct KillTool: Tool {
         // on the first rung cannot mask a later success — kill() permission depends on the target,
         // not the signal.
         for (signal, label) in [(SIGHUP, "SIGHUP"), (SIGTERM, "SIGTERM"), (SIGKILL, "SIGKILL")] {
-            guard kill(pid, signal) == 0 else { return sendFailure(label) }
+            guard kill(pid, signal) == 0 else { let code = errno; return sendFailure(label, code) }
             let deadline = Date().addingTimeInterval(2)
             while alive(), Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
             if !alive() {

@@ -100,4 +100,14 @@ final class MCPServerTests: XCTestCase {
     func testNotificationMethodWithIdGetsNoResponse() {
         XCTAssertNil(MCPServer().handleLine(#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized"}"#))
     }
+
+    /// An out-of-range numeric id decodes to Double.infinity, which is not JSON-encodable. Echoing it
+    /// back must not crash the host — JSONSerialization.data raises an uncatchable ObjC exception on
+    /// it, so encode() screens with isValidJSONObject and returns a valid id:null error instead.
+    func testNonFiniteRequestIdDoesNotCrashAndReturnsValidJSON() throws {
+        let response = try XCTUnwrap(MCPServer().handleLine(#"{"jsonrpc":"2.0","id":-1e400,"method":"ping"}"#))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
+        XCTAssertEqual(object["jsonrpc"] as? String, "2.0")
+        XCTAssertNotNil(object["error"])
+    }
 }

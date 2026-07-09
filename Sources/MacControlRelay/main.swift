@@ -199,12 +199,16 @@ func runRelay() {
                 "id": requestID(line),
                 "error": ["code": -32000, "message": "host unavailable"]
             ]
-            let fallback: String
-            do {
-                let data = try JSONSerialization.data(withJSONObject: payload)
-                fallback = String(decoding: data, as: UTF8.self)
-            } catch {
-                fallback = #"{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"host unavailable"}}"#
+            // isValidJSONObject screens a non-finite request id (e.g. -1e400 → Double.infinity):
+            // JSONSerialization.data would otherwise raise an uncatchable Objective-C exception and
+            // kill the relay, taking the client's stdio channel with it. On any failure keep the
+            // id:null literal below.
+            var fallback = #"{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"host unavailable"}}"#
+            if JSONSerialization.isValidJSONObject(payload) {
+                do {
+                    let data = try JSONSerialization.data(withJSONObject: payload)
+                    fallback = String(decoding: data, as: UTF8.self)
+                } catch { /* keep the id:null literal above */ }
             }
             do { try stdout.write(contentsOf: Data((fallback + "\n").utf8)) }
             catch { DebugLog.event("disconnect", "stdout write failed: \(error)"); return }

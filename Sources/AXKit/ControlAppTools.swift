@@ -129,6 +129,10 @@ private func launchAndAwait(identity: String, deadline: Date, timing: inout [Str
         targetBundleId = nil
     }
     timing["form"] = openArguments.first ?? "?"
+    // If the deadline is already spent, don't spawn `open` only to reap it immediately — report the
+    // elapsed budget instead. (Unreachable via the sole caller, which passes a fresh 15s; explicit
+    // so a future caller with a nearer deadline doesn't launch a doomed process.)
+    guard deadline.timeIntervalSinceNow > 0 else { timing["error"] = "deadline_elapsed"; return nil }
     let openStart = Date()
     // Bounded run (a wedged `open` under the host request lock must not stall every client) with
     // output discarded — this helper is shared with the relay, whose stdout is the JSON-RPC channel.

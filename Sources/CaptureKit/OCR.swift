@@ -34,7 +34,15 @@ public struct OCRTool: Tool {
         guard let path = arguments["path"] as? String else {
             return JSONText.from(["error": "missing_path"])
         }
-        guard let image = OCRSupport.loadCGImage(path) else {
+        // The host is a LaunchAgent whose working directory is undefined (effectively "/"), and the
+        // client's is unknowable, so a relative path would resolve against the wrong root — mirror
+        // OpenTool and reject it. A screenshot result is already an absolute path.
+        let expanded = (path as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else {
+            return JSONText.from(["error": "relative_path", "path": path,
+                                  "howToFix": "Pass an absolute path (starting with / or ~/). The server's working directory is not yours."])
+        }
+        guard let image = OCRSupport.loadCGImage(expanded) else {
             return JSONText.from(["error": "cannot_load_image", "path": path])
         }
         let lines = OCRSupport.recognizeText(image)
