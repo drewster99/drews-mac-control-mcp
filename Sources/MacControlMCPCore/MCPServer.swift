@@ -14,17 +14,25 @@ public final class MCPServer {
 
     private let tools: [Tool]
 
+    /// Appended to every tool response as a second content block so the driving model always knows
+    /// how idle the user is. Sampled AFTER the tool runs (so it reflects any input the tool just
+    /// posted, flagged via `mayReflectOwnInput`). Injected so it's testable and so the CLI/host can
+    /// wire it to the live `ActivityMonitor`; nil disables the header entirely.
+    private let activityHeader: (@Sendable () -> [String: Any])?
+
     /// The connecting MCP client's self-reported identity ("name version"), captured from the
     /// `initialize` request's `clientInfo` (the protocol hands it to us; we just keep it). Used to
     /// label events in the debug stream. nil until the client initializes.
     public private(set) var clientInfo: String?
 
-    public init(tools: [Tool] = MCPServer.defaultTools()) {
+    public init(tools: [Tool] = MCPServer.defaultTools(),
+                activityHeader: (@Sendable () -> [String: Any])? = nil) {
         self.tools = tools
+        self.activityHeader = activityHeader
     }
 
     public static func defaultTools() -> [Tool] {
-        [ListAppsTool(), ListSimulatorsTool(), SimTool(), OpenTool()]
+        [ListAppsTool(), ListSimulatorsTool(), SimTool(), OpenTool(), CheckUserActivityTool()]
     }
 
     /// Handle one JSON-RPC line. Returns the response bytes to write, or `nil` for
@@ -83,8 +91,12 @@ public final class MCPServer {
             return JSONRPC.errorData(id: request.id, code: -32602, message: "unknown tool: \(name)")
         }
         let text = tool.call(arguments)
-        return JSONRPC.responseData(id: request.id, result: [
-            "content": [["type": "text", "text": text]]
-        ])
+        var content: [[String: Any]] = [["type": "text", "text": text]]
+        // Second block: how idle the user is now. Sampled after the tool ran. Skipped for
+        // check_user_activity (its whole payload IS this) and when no provider is wired.
+        if name != "check_user_activity", let activityHeader {
+            content.append(["type": "text", "text": JSONText.from(["userActivity": activityHeader()])])
+        }
+        return JSONRPC.responseData(id: request.id, result: ["content": content])
     }
 }

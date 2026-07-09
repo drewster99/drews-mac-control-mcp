@@ -46,7 +46,8 @@ public func makeFullServer() -> MCPServer {
         }
         return tool.call(arguments)
     }
-    return MCPServer(tools: baseTools + [BatchTool(dispatch: dispatch)])
+    return MCPServer(tools: baseTools + [BatchTool(dispatch: dispatch)],
+                    activityHeader: { ActivityMonitor.shared.snapshot().dictionary })
 }
 
 public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendable {

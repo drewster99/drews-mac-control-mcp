@@ -10,9 +10,11 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import MacControlMCPCore
 
 public enum SyntheticInput {
     public static func post(_ chord: KeyChord) {
+        defer { ActivityMonitor.shared.noteSyntheticInput() }
         let source = CGEventSource(stateID: .hidSystemState)
         if let down = CGEvent(keyboardEventSource: source, virtualKey: chord.keyCode, keyDown: true) {
             down.flags = chord.flags
@@ -25,6 +27,7 @@ public enum SyntheticInput {
     }
 
     public static func click(x: Double, y: Double, rightButton: Bool, clickCount: Int) {
+        defer { ActivityMonitor.shared.noteSyntheticInput() }
         let source = CGEventSource(stateID: .hidSystemState)
         let point = CGPoint(x: x, y: y)
         let button: CGMouseButton = rightButton ? .right : .left
@@ -45,6 +48,7 @@ public enum SyntheticInput {
     }
 
     public static func scroll(dx: Int, dy: Int) {
+        defer { ActivityMonitor.shared.noteSyntheticInput() }
         let source = CGEventSource(stateID: .hidSystemState)
         // Clamp rather than narrow: an out-of-Int32-range delta would otherwise trap and abort
         // the host. A saturated scroll delta is harmless.
@@ -55,6 +59,7 @@ public enum SyntheticInput {
     }
 
     public static func move(x: Double, y: Double) {
+        defer { ActivityMonitor.shared.noteSyntheticInput() }
         let source = CGEventSource(stateID: .hidSystemState)
         if let event = CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
                                mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left) {
@@ -65,6 +70,7 @@ public enum SyntheticInput {
     /// Press at `from`, interpolate to `to` as a sequence of dragged events, release. In the
     /// simulator a drag is a swipe gesture.
     public static func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, steps: Int = 12) {
+        defer { ActivityMonitor.shared.noteSyntheticInput() }
         let source = CGEventSource(stateID: .hidSystemState)
         let from = CGPoint(x: fromX, y: fromY)
         if let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
@@ -93,6 +99,7 @@ public enum SyntheticInput {
     /// Iterating by Character (grapheme cluster) keeps emoji/combining marks intact; the brief
     /// gap lets the target app's run loop consume each event before the next arrives.
     public static func typeUnicode(_ text: String) {
+        defer { ActivityMonitor.shared.noteSyntheticInput() }
         let source = CGEventSource(stateID: .hidSystemState)
         for character in text {
             let utf16 = Array(String(character).utf16)
