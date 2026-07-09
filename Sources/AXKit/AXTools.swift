@@ -39,11 +39,18 @@ public enum AXTools {
 
 private let permissionError = #"{"error":"accessibility_not_granted","howToFix":"Grant Accessibility to the host in System Settings ‣ Privacy & Security ‣ Accessibility","deepLink":"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"}"#
 
-private func jsonString(_ object: Any) -> String {
-    do {
-        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
-        return String(decoding: data, as: UTF8.self)
-    } catch { return "null" }
+/// Reserve for the search-driven tools (`find_elements`, `press`), holding their timeout ceiling at
+/// 30s (relay budget 60 − safety margin 10 − 20). The BFS deadline check can't preempt an in-flight
+/// AX call, so a search can overshoot its budget; `press` then spends up to ~10s more after the
+/// search (act-and-settle plus a 4s subtree refresh). The generic ~50s ceiling would leave no room
+/// for either and risk blowing the relay's XPC window.
+let searchToolReserveSeconds: TimeInterval = 20
+
+/// The timeout budget for a search-driven tool: a caller value clamped under the relay window, with
+/// a non-positive value treated as "unspecified" (→ `default`) rather than clamped to the floor.
+func searchBudget(_ arguments: [String: Any], default fallback: Double) -> TimeInterval {
+    ToolTimeout.seconds(ToolArguments.double(arguments, for: "timeout").flatMap { $0 > 0 ? $0 : nil },
+                        default: fallback, reserveSeconds: searchToolReserveSeconds)
 }
 
 private func frameValue(_ frame: CGRect?) -> Any {
@@ -60,7 +67,7 @@ private func validPid(_ value: Int) -> pid_t? {
 }
 
 private func matchJSON(_ match: ElementRegistry.Match) -> String {
-    jsonString([
+    JSONText.from([
         "ref": match.ref,
         "role": match.role,
         "title": match.title ?? "",
@@ -87,7 +94,7 @@ private func actResult(
     guard observe == "settle", let pid = element.pid else {
         var result = base
         result["ok"] = perform()
-        return jsonString(result)
+        return JSONText.from(result)
     }
     var ok = false
     let outcome = SettleEngine(session: session).actAndSettle(pid: pid) { ok = perform() }
@@ -100,7 +107,7 @@ private func actResult(
         "removed": outcome.diff.removed,
         "changed": outcome.diff.changed.map { ["ref": $0.ref, "was": $0.was, "now": $0.now] }
     ]
-    return jsonString(result)
+    return JSONText.from(result)
 }
 
 /// Resolve a ref to a live element, or an error-JSON string (stale_ref, with candidates
@@ -110,10 +117,10 @@ private func resolvedElement(_ session: ElementRegistry, _ ref: String) -> Eleme
     case .resolved(let element):
         return .element(element)
     case .ambiguous(let candidates):
-        return .errorJSON(jsonString(["error": "stale_ref", "ref": ref, "candidates": candidates,
+        return .errorJSON(JSONText.from(["error": "stale_ref", "ref": ref, "candidates": candidates,
                                       "howToFix": "The element was rebuilt; disambiguate among the candidate refs."]))
     case .stale, .unknown:
-        return .errorJSON(jsonString(["error": "stale_ref", "ref": ref,
+        return .errorJSON(JSONText.from(["error": "stale_ref", "ref": ref,
                                       "howToFix": "Re-run ui_snapshot/find_elements to refresh refs."]))
     }
 }
@@ -156,8 +163,7 @@ public struct FindElementsTool: Tool {
         }
         guard let pid = validPid(pidValue) else { return #"{"error":"invalid_pid"}"# }
         let limit = (arguments["limit"] as? Int) ?? 20
-        let requested = (arguments["timeout"] as? Double) ?? Double(arguments["timeout"] as? Int ?? 0)
-        let budget = requested > 0 ? min(max(requested, 0.5), 30) : 5
+        let budget = searchBudget(arguments, default: 5)
 
         let outcome = session.search(
             pid: pid,
@@ -185,7 +191,7 @@ public struct FindElementsTool: Tool {
             return row
         }
         let diagnostics = findDiagnostics(outcome.diagnostics, hadMatches: !rows.isEmpty)
-        return jsonString(["matches": rows, "count": rows.count, "diagnostics": diagnostics])
+        return JSONText.from(["matches": rows, "count": rows.count, "diagnostics": diagnostics])
     }
 
     /// Surface why the search stopped — so an empty result isn't read as "definitively absent" — and
@@ -242,10 +248,10 @@ public struct ElementDetailTool: Tool {
         case .resolved(let resolved):
             element = resolved
         case .ambiguous(let candidates):
-            return jsonString(["error": "stale_ref", "ref": ref, "candidates": candidates,
+            return JSONText.from(["error": "stale_ref", "ref": ref, "candidates": candidates,
                                "howToFix": "The element was rebuilt; disambiguate among the candidate refs."])
         case .stale, .unknown:
-            return jsonString(["error": "stale_ref", "ref": ref,
+            return JSONText.from(["error": "stale_ref", "ref": ref,
                                "howToFix": "Re-run ui_snapshot/find_elements to refresh refs."])
         }
         let detail: [String: Any] = [
@@ -262,7 +268,7 @@ public struct ElementDetailTool: Tool {
             "attributeNames": element.attributeNames,
             "parameterizedAttributes": element.parameterizedAttributeNames
         ]
-        return jsonString(detail)
+        return JSONText.from(detail)
     }
 }
 
@@ -515,7 +521,7 @@ public struct WaitForTool: Tool {
         } else {
             result["matchRef"] = NSNull()
         }
-        return jsonString(result)
+        return JSONText.from(result)
     }
 }
 
@@ -615,13 +621,13 @@ public struct OpenMenuTool: Tool {
         guard let pid = validPid(pidValue) else { return #"{"error":"invalid_pid"}"# }
         guard arguments["observe"] as? String == "settle" else {
             let result = session.openMenu(pid: pid, path: path)
-            return jsonString(["ok": result.ok, "message": result.message])
+            return JSONText.from(["ok": result.ok, "message": result.message])
         }
         var result: (ok: Bool, message: String) = (false, "")
         let outcome = SettleEngine(session: session).actAndSettle(pid: pid) {
             result = session.openMenu(pid: pid, path: path)
         }
-        return jsonString([
+        return JSONText.from([
             "ok": result.ok,
             "message": result.message,
             "quiesced": outcome.quiesced,
@@ -664,7 +670,7 @@ public struct GetChangesTool: Tool {
         guard let pid = validPid(pidValue) else { return #"{"error":"invalid_pid"}"# }
         let depth = (arguments["depth"] as? Int) ?? 4
         let diff = session.getChanges(pid: pid, maxDepth: depth)
-        return jsonString([
+        return JSONText.from([
             "added": diff.added,
             "removed": diff.removed,
             "changed": diff.changed.map { ["ref": $0.ref, "was": $0.was, "now": $0.now] }
@@ -716,14 +722,14 @@ public struct KillTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard let identity = (arguments["identity"] as? String), !identity.isEmpty else {
-            return jsonString(["success": false, "error": "missing_identity"])
+            return JSONText.from(["success": false, "error": "missing_identity"])
         }
         let pid: pid_t
         if identity.allSatisfy({ $0.isWholeNumber }), let parsed = Int32(identity) {
             // Reject pid <= 0: kill(0, …) signals the host's own process group, so the
             // graceful escalation below would terminate this very server (self-DoS).
             guard parsed > 0 else {
-                return jsonString(["success": false, "error": "invalid_pid", "identity": identity])
+                return JSONText.from(["success": false, "error": "invalid_pid", "identity": identity])
             }
             pid = parsed
         } else {
@@ -731,10 +737,10 @@ public struct KillTool: Tool {
             case .app(let resolved, _, _):
                 pid = resolved
             case .ambiguous(let candidates):
-                return jsonString(["success": false, "error": "ambiguous",
+                return JSONText.from(["success": false, "error": "ambiguous",
                                    "candidates": candidates.map { ["pid": Int($0.pid), "name": $0.name, "bundleId": $0.bundleId] }])
             case .noMatch:
-                return jsonString(["success": false, "error": "no_match", "identity": identity])
+                return JSONText.from(["success": false, "error": "no_match", "identity": identity])
             }
         }
 
@@ -742,7 +748,7 @@ public struct KillTool: Tool {
         // reach this process (it runs as an .accessory app, so it is in runningApplications).
         // getpid() protects whichever process is serving — the shared host or the stdio server.
         guard pid != getpid() else {
-            return jsonString([
+            return JSONText.from([
                 "success": false, "error": "cannot_kill_self", "pid": Int(pid),
                 "howToFix": "This pid is the MacControl server itself. To restart it, run: launchctl kickstart -k gui/$UID/com.nuclearcyborg.maccontrol.host"
             ])
@@ -753,7 +759,7 @@ public struct KillTool: Tool {
         var requestedSignal: (value: Int32, label: String)?
         if let signalArg = (arguments["signal"] as? String), !signalArg.isEmpty {
             guard let signal = parseSignal(signalArg) else {
-                return jsonString([
+                return JSONText.from([
                     "success": false, "error": "unknown_signal", "signal": signalArg,
                     "howToFix": "Use SIGHUP/SIGINT/SIGQUIT/SIGTERM/SIGKILL or a number 1-31. Signal 0 only probes existence — use list_running_apps to check liveness."
                 ])
@@ -767,16 +773,16 @@ public struct KillTool: Tool {
             if kill(pid, 0) == 0 { return true }
             return errno == EPERM
         }
-        guard alive() else { return jsonString(["success": true, "pid": Int(pid), "note": "not running"]) }
+        guard alive() else { return JSONText.from(["success": true, "pid": Int(pid), "note": "not running"]) }
 
         // The target can exit between alive() and kill() — ESRCH there is the goal state, not a
         // failure. Anything else (in practice EPERM) is surfaced with the OS's own words.
         func sendFailure(_ label: String) -> String {
             let code = errno
             if code == ESRCH {
-                return jsonString(["success": true, "pid": Int(pid), "note": "not running"])
+                return JSONText.from(["success": true, "pid": Int(pid), "note": "not running"])
             }
-            return jsonString([
+            return JSONText.from([
                 "success": false, "error": "kill_failed", "pid": Int(pid),
                 "signal": label, "reason": errnoDescription(code),
                 "howToFix": "\"Operation not permitted\" means the process belongs to another user or is SIP-protected; this server cannot signal it."
@@ -788,7 +794,7 @@ public struct KillTool: Tool {
             // Signals are async — give the process a moment to actually exit before reporting state.
             let deadline = Date().addingTimeInterval(1.5)
             while alive(), Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
-            return jsonString(["success": true, "pid": Int(pid), "signal": label, "stillRunning": alive()])
+            return JSONText.from(["success": true, "pid": Int(pid), "signal": label, "stillRunning": alive()])
         }
 
         // Graceful escalation: each rung gets up to 2s to take effect before the next. Failing fast
@@ -799,9 +805,9 @@ public struct KillTool: Tool {
             let deadline = Date().addingTimeInterval(2)
             while alive(), Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
             if !alive() {
-                return jsonString(["success": true, "pid": Int(pid), "terminatedWith": label])
+                return JSONText.from(["success": true, "pid": Int(pid), "terminatedWith": label])
             }
         }
-        return jsonString(["success": !alive(), "pid": Int(pid), "stillRunning": alive()])
+        return JSONText.from(["success": !alive(), "pid": Int(pid), "stillRunning": alive()])
     }
 }

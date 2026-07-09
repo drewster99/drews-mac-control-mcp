@@ -17,18 +17,39 @@ public protocol Tool {
     func call(_ arguments: [String: Any]) -> String
 }
 
-/// JSON helpers that avoid `try?` — failures degrade to a benign literal.
-enum JSONText {
-    static func from(_ object: Any) -> String {
+/// The one encoding for tool result payloads: pretty-printed with sorted keys, so output is
+/// deterministic across runs and readable in transcripts. Avoids `try?` — an encode failure (only
+/// possible for a non-JSON-safe value) degrades to the benign JSON literal `null`.
+public enum JSONText {
+    /// Encodes a JSON-safe object graph to a JSON string, or `"null"` when it can't be encoded.
+    ///
+    /// The `isValidJSONObject` pre-check is load-bearing, not belt-and-braces: on a non-finite
+    /// Double (infinity/NaN) `JSONSerialization.data` raises an *Objective-C* exception, which a
+    /// Swift `catch` cannot intercept — the privileged host would abort. Those values do reach us:
+    /// a misbehaving app can report an infinite `AXMinValue`, which `change_value` echoes into its
+    /// `out_of_range` payload. The check turns that abort into the benign `null` fallback.
+    public static func from(_ object: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(object) else { return "null" }
         do {
             let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
             return String(decoding: data, as: UTF8.self)
         } catch { return "null" }
     }
 
-    static func object(_ data: Data) -> Any? {
+    /// Decodes JSON bytes to a Foundation object graph, or nil when parsing fails.
+    public static func object(_ data: Data) -> Any? {
         do { return try JSONSerialization.jsonObject(with: data) }
         catch { return nil }
+    }
+}
+
+/// Readers for the loosely-typed `[String: Any]` a tool receives from JSON-RPC.
+public enum ToolArguments {
+    /// Reads a numeric tool argument. JSON delivers numbers as `NSNumber` whose concrete type
+    /// (Int vs Double) depends on how the caller wrote the literal, so a plain `as? Double` at each
+    /// call site is a repeated trap; `NSNumber` absorbs both.
+    public static func double(_ arguments: [String: Any], for key: String) -> Double? {
+        (arguments[key] as? NSNumber)?.doubleValue
     }
 }
 

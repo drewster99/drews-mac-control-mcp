@@ -19,17 +19,6 @@ private let controlPermissionError = #"{"error":"accessibility_not_granted","how
 /// Synthetic input (click/type) needs post-event access, a separate preflight from AX trust.
 private let controlPostEventError = #"{"success":false,"error":"post_event_access_denied","howToFix":"Grant Accessibility (post-event access) to the host in System Settings ‣ Privacy & Security ‣ Accessibility"}"#
 
-private func controlJSON(_ object: Any) -> String {
-    do {
-        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
-        return String(decoding: data, as: UTF8.self)
-    } catch { return "null" }
-}
-
-private func doubleArg(_ arguments: [String: Any], _ key: String) -> Double? {
-    (arguments[key] as? NSNumber)?.doubleValue
-}
-
 private enum ResolvedRef {
     case element(AXElement)
     case error(String)
@@ -42,7 +31,7 @@ private enum ResolvedRef {
 /// loud `stale_ref` — you can't act on an element that's gone.
 private func resolveRef(_ registry: ElementRegistry, _ ref: String) -> ResolvedRef {
     guard let element = registry.element(for: ref), element.isAlive else {
-        return .error(controlJSON(["success": false, "error": "stale_ref", "ref": ref,
+        return .error(JSONText.from(["success": false, "error": "stale_ref", "ref": ref,
                                    "howToFix": "Re-run control_app to refresh refs."]))
     }
     return .element(element)
@@ -71,12 +60,12 @@ private func refreshSubtree(_ registry: ElementRegistry, ref: String, deadline: 
 /// `expand`/`refresh` reporting: a fresh subtree, or a loud `stale_ref` when nothing live remains.
 private func subtreeResponse(_ registry: ElementRegistry, ref: String, deadline: Date) -> String {
     guard let (hierarchy, usedRef) = refreshSubtree(registry, ref: ref, deadline: deadline) else {
-        return controlJSON(["success": false, "error": "stale_ref", "ref": ref,
+        return JSONText.from(["success": false, "error": "stale_ref", "ref": ref,
                             "howToFix": "Re-run control_app to refresh refs."])
     }
     var obj: [String: Any] = ["success": true, "ref": ref, "hierarchy": hierarchy]
     if usedRef != ref { obj["resolvedFrom"] = usedRef }
-    return controlJSON(obj)
+    return JSONText.from(obj)
 }
 
 /// Mutating-verb reporting: the action's own `ok` is authoritative for `success`; we append the
@@ -85,7 +74,7 @@ private func subtreeResponse(_ registry: ElementRegistry, ref: String, deadline:
 private func actedResponse(_ registry: ElementRegistry, ref: String, deadline: Date, base: [String: Any],
                            scope: String = "parent") -> String {
     var obj = base
-    if scope == "none" { return controlJSON(obj) }   // fire-and-forget
+    if scope == "none" { return JSONText.from(obj) }   // fire-and-forget
     let from: String
     if scope == "window", let window = registry.windowAncestor(of: ref) {
         from = window                                  // after navigation, reflect the whole window
@@ -96,7 +85,7 @@ private func actedResponse(_ registry: ElementRegistry, ref: String, deadline: D
         obj["hierarchy"] = hierarchy
         if usedRef != from { obj["resolvedFrom"] = usedRef }
     }
-    return controlJSON(obj)
+    return JSONText.from(obj)
 }
 
 /// JSON-schema property for the optional post-action refresh scope, shared by the mutating verbs.
@@ -223,12 +212,12 @@ public struct ControlAppTool: Tool {
         guard isTrusted() else { return controlPermissionError }
         registry.evictDeadApps()
         guard let identity = (arguments["identity"] as? String), !identity.isEmpty else {
-            return controlJSON(["success": false, "error": "missing_identity"])
+            return JSONText.from(["success": false, "error": "missing_identity"])
         }
         let windowArg = (arguments["window"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         // Reserve the fixed 15s launch step so resolve-then-launch-then-walk stays under the relay
         // budget (control_app is non-mutating and gets re-run by the relay on a 60s timeout).
-        let timeout = ToolTimeout.seconds(doubleArg(arguments, "timeout"), default: 10, reserveSeconds: 15)
+        let timeout = ToolTimeout.seconds(ToolArguments.double(arguments, for: "timeout"), default: 10, reserveSeconds: 15)
 
         func walkAndRespond(pid: pid_t, bundleId: String, name: String, launched: Bool, timing: [String: Any]?) -> String {
             let walkStart = Date()
@@ -244,12 +233,12 @@ public struct ControlAppTool: Tool {
                 timing["walkMs"] = Int(Date().timeIntervalSince(walkStart) * 1000)
                 obj["_timing"] = timing
             }
-            return controlJSON(obj)
+            return JSONText.from(obj)
         }
 
         func appCase(_ pid: pid_t, _ bundleId: String, _ name: String) -> String {
             if let windowArg, !AppResolver.hasWindow(pid: pid, title: windowArg) {
-                return controlJSON(["success": false, "error": "window_not_found"])
+                return JSONText.from(["success": false, "error": "window_not_found"])
             }
             return walkAndRespond(pid: pid, bundleId: bundleId, name: name, launched: false, timing: nil)
         }
@@ -259,7 +248,7 @@ public struct ControlAppTool: Tool {
         case .app(let pid, let bundleId, let name):
             return appCase(pid, bundleId, name)
         case .ambiguous(let candidates):
-            return controlJSON(["success": false, "error": "ambiguous",
+            return JSONText.from(["success": false, "error": "ambiguous",
                                 "candidates": candidates.map {
                                     ["pid": Int($0.pid), "name": $0.name, "bundleId": $0.bundleId, "windowTitles": $0.windowTitles]
                                 }])
@@ -281,7 +270,7 @@ public struct ControlAppTool: Tool {
         if case .app(let pid, let bundleId, let name) = AppResolver.resolve(identity: identity, includeWindowTitle: true) {
             return appCase(pid, bundleId, name)
         }
-        return controlJSON(["success": false, "error": "no_match", "_timing": timing,
+        return JSONText.from(["success": false, "error": "no_match", "_timing": timing,
                             "howToFix": "No running app matched, and launching \"\(identity)\" failed — check the app name, bundle id, or path."])
     }
 }
@@ -318,7 +307,7 @@ public struct ControlActionTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return controlPermissionError }
         guard let ref = arguments["ref"] as? String, let action = arguments["action"] as? String else {
-            return controlJSON(["success": false, "error": "missing_ref_or_action"])
+            return JSONText.from(["success": false, "error": "missing_ref_or_action"])
         }
         switch resolveRef(registry, ref) {
         case .error(let json):
@@ -326,7 +315,7 @@ public struct ControlActionTool: Tool {
         case .element(let element):
             let isDisclosure = (action == "disclose" || action == "collapse")
             if !isDisclosure, !element.rawActionNames.contains(where: { ActionVocab.matches(input: action, rawName: $0) }) {
-                return controlJSON(["success": false, "error": "no_such_action", "ref": ref,
+                return JSONText.from(["success": false, "error": "no_such_action", "ref": ref,
                                     "valid": element.rawActionNames.map { ActionVocab.displayLabel(forRaw: $0) }])
             }
             var ok = false
@@ -377,14 +366,14 @@ public struct ChangeTextTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return controlPermissionError }
         guard let ref = arguments["ref"] as? String, let value = arguments["value"] as? String else {
-            return controlJSON(["success": false, "error": "missing_ref_or_value"])
+            return JSONText.from(["success": false, "error": "missing_ref_or_value"])
         }
         switch resolveRef(registry, ref) {
         case .error(let json):
             return json
         case .element(let element):
             guard element.isValueSettable else {
-                return controlJSON(["success": false, "error": "not_settable", "ref": ref])
+                return JSONText.from(["success": false, "error": "not_settable", "ref": ref])
             }
             var ok = false
             let perform: () -> Void = { ok = element.setValue(value) }
@@ -427,24 +416,24 @@ public struct ChangeValueTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return controlPermissionError }
-        guard let ref = arguments["ref"] as? String, let value = doubleArg(arguments, "value") else {
-            return controlJSON(["success": false, "error": "missing_ref_or_value"])
+        guard let ref = arguments["ref"] as? String, let value = ToolArguments.double(arguments, for: "value") else {
+            return JSONText.from(["success": false, "error": "missing_ref_or_value"])
         }
         switch resolveRef(registry, ref) {
         case .error(let json):
             return json
         case .element(let element):
             guard element.isValueSettable else {
-                return controlJSON(["success": false, "error": "not_settable", "ref": ref])
+                return JSONText.from(["success": false, "error": "not_settable", "ref": ref])
             }
             guard element.valueIsNumeric else {
-                return controlJSON(["success": false, "error": "not_numeric", "ref": ref])
+                return JSONText.from(["success": false, "error": "not_numeric", "ref": ref])
             }
             if let lo = element.minValue, value < lo {
-                return controlJSON(["success": false, "error": "out_of_range", "given": value, "min": lo, "max": element.maxValue ?? lo])
+                return JSONText.from(["success": false, "error": "out_of_range", "given": value, "min": lo, "max": element.maxValue ?? lo])
             }
             if let hi = element.maxValue, value > hi {
-                return controlJSON(["success": false, "error": "out_of_range", "given": value, "min": element.minValue ?? hi, "max": hi])
+                return JSONText.from(["success": false, "error": "out_of_range", "given": value, "min": element.minValue ?? hi, "max": hi])
             }
             var ok = false
             let perform: () -> Void = { ok = element.setValue(number: value) }
@@ -504,7 +493,7 @@ public struct ClickRefTool: Tool {
         guard isTrusted() else { return controlPermissionError }
         guard CGPreflightPostEventAccess() else { return controlPostEventError }
         guard let ref = arguments["ref"] as? String else {
-            return controlJSON(["success": false, "error": "missing_ref"])
+            return JSONText.from(["success": false, "error": "missing_ref"])
         }
         switch resolveRef(registry, ref) {
         case .error(let json):
@@ -512,7 +501,7 @@ public struct ClickRefTool: Tool {
         case .element(let element):
             // AXActivationPoint is the canonical spot; fall back to the frame center.
             guard let point = element.activationPoint ?? element.frame.map({ CGPoint(x: $0.midX, y: $0.midY) }) else {
-                return controlJSON(["success": false, "error": "no_activation_point", "ref": ref])
+                return JSONText.from(["success": false, "error": "no_activation_point", "ref": ref])
             }
             let pid = element.pid
             // Bring the target app frontmost first: a synthetic click on an inactive app is
@@ -611,13 +600,13 @@ public struct TypeTool: Tool {
         guard isTrusted() else { return controlPermissionError }
         guard CGPreflightPostEventAccess() else { return controlPostEventError }
         guard let text = arguments["text"] as? String else {
-            return controlJSON(["success": false, "error": "missing_text"])
+            return JSONText.from(["success": false, "error": "missing_text"])
         }
         let paste = (arguments["via"] as? String) == "paste"
         guard let ref = arguments["ref"] as? String else {
             // No target: type into whatever is currently focused.
             type(text, paste)
-            return controlJSON(["success": true, "chars": text.count])
+            return JSONText.from(["success": true, "chars": text.count])
         }
         switch resolveRef(registry, ref) {
         case .error(let json):
@@ -732,16 +721,16 @@ public struct ExpandTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return controlPermissionError }
         guard let ref = arguments["ref"] as? String else {
-            return controlJSON(["success": false, "error": "missing_ref"])
+            return JSONText.from(["success": false, "error": "missing_ref"])
         }
-        let deadline = Date().addingTimeInterval(ToolTimeout.seconds(doubleArg(arguments, "timeout"), default: 5))
+        let deadline = Date().addingTimeInterval(ToolTimeout.seconds(ToolArguments.double(arguments, for: "timeout"), default: 5))
         // Incremental when we have a stored node and the element is alive; else fall back to a
         // full refresh (e.g. a ref from find_elements, or a node that died → parent-climb).
         if let stored = registry.controlNode(for: ref),
            let element = registry.element(for: ref), element.isAlive {
             let expanded = ControlSession.incrementalExpand(stored, registry: registry, deadline: deadline)
             registry.updateControlTree(ref: ref, subtree: expanded)
-            return controlJSON(["success": true, "ref": ref,
+            return JSONText.from(["success": true, "ref": ref,
                                 "hierarchy": ControlRenderer.render(expanded, includeLegend: false)])
         }
         return subtreeResponse(registry, ref: ref, deadline: deadline)
@@ -777,9 +766,9 @@ public struct RefreshTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return controlPermissionError }
         guard let ref = arguments["ref"] as? String else {
-            return controlJSON(["success": false, "error": "missing_ref"])
+            return JSONText.from(["success": false, "error": "missing_ref"])
         }
-        return subtreeResponse(registry, ref: ref, deadline: Date().addingTimeInterval(ToolTimeout.seconds(doubleArg(arguments, "timeout"), default: 7)))
+        return subtreeResponse(registry, ref: ref, deadline: Date().addingTimeInterval(ToolTimeout.seconds(ToolArguments.double(arguments, for: "timeout"), default: 7)))
     }
 }
 
@@ -829,13 +818,13 @@ public struct LaunchAppTool: Tool {
         registry.evictDeadApps()
 
         guard let appArg = (arguments["app"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) else {
-            return controlJSON(["success": false, "error": "missing_app",
+            return JSONText.from(["success": false, "error": "missing_app",
                                 "howToFix": "Provide app: a .app path or a bundle id."])
         }
         let activate = (arguments["activate"] as? Bool) ?? true
         // launch_app consumes `timeout` twice (openApplication wait + readiness poll) and then a
         // fixed 10s walk, so reserve heavily to keep 2×timeout + walk under the relay budget.
-        let timeout = ToolTimeout.seconds(doubleArg(arguments, "timeout"), default: 15, reserveSeconds: 32)
+        let timeout = ToolTimeout.seconds(ToolArguments.double(arguments, for: "timeout"), default: 15, reserveSeconds: 32)
 
         // A bundle id never contains a slash; a .app path always does. (`~` is expanded.)
         let isPath = appArg.contains("/") || appArg.hasPrefix("~")
@@ -843,13 +832,13 @@ public struct LaunchAppTool: Tool {
         if isPath {
             let candidate = URL(fileURLWithPath: (appArg as NSString).expandingTildeInPath)
             guard FileManager.default.fileExists(atPath: candidate.path) else {
-                return controlJSON(["success": false, "error": "app_not_found",
+                return JSONText.from(["success": false, "error": "app_not_found",
                                     "howToFix": "No file at \(appArg).", "app": appArg])
             }
             url = candidate
         } else {
             guard let resolved = NSWorkspace.shared.urlForApplication(withBundleIdentifier: appArg) else {
-                return controlJSON(["success": false, "error": "app_not_found",
+                return JSONText.from(["success": false, "error": "app_not_found",
                                     "howToFix": "No installed app with bundle id \(appArg).", "app": appArg])
             }
             url = resolved
@@ -878,14 +867,14 @@ public struct LaunchAppTool: Tool {
             semaphore.signal()
         }
         if semaphore.wait(timeout: .now() + timeout) == .timedOut {
-            return controlJSON(["success": false, "error": "launch_timeout",
+            return JSONText.from(["success": false, "error": "launch_timeout",
                                 "howToFix": "App did not start within \(Int(timeout))s."])
         }
         if let launchError = box.error {
-            return controlJSON(["success": false, "error": "launch_failed", "message": launchError.localizedDescription])
+            return JSONText.from(["success": false, "error": "launch_failed", "message": launchError.localizedDescription])
         }
         guard let launchedApp = box.app else {
-            return controlJSON(["success": false, "error": "launch_failed"])
+            return JSONText.from(["success": false, "error": "launch_failed"])
         }
 
         return buildAndStore(pid: launchedApp.processIdentifier,
@@ -919,7 +908,7 @@ public struct LaunchAppTool: Tool {
         let tree = ControlWalker.build(root: app, registry: registry, pid: pid,
                                        deadline: Date().addingTimeInterval(10))
         registry.storeControlTree(tree, pid: pid)
-        return controlJSON(["success": true, "pid": Int(pid), "bundleId": bundleId, "name": name,
+        return JSONText.from(["success": true, "pid": Int(pid), "bundleId": bundleId, "name": name,
                             "launched": launched, "ready": ready,
                             "hierarchy": ControlRenderer.render(tree, includeLegend: true)])
     }
@@ -991,13 +980,12 @@ public struct PressByNameTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return controlPermissionError }
         guard let pidValue = arguments["pid"] as? Int, let pid = pid_t(exactly: pidValue) else {
-            return controlJSON(["success": false, "error": "missing_or_invalid_pid"])
+            return JSONText.from(["success": false, "error": "missing_or_invalid_pid"])
         }
         guard let name = (arguments["name"] as? String), !name.isEmpty else {
-            return controlJSON(["success": false, "error": "missing_name"])
+            return JSONText.from(["success": false, "error": "missing_name"])
         }
-        let requested = (arguments["timeout"] as? Double) ?? Double(arguments["timeout"] as? Int ?? 0)
-        let budget = requested > 0 ? min(max(requested, 0.5), 30) : 5
+        let budget = searchBudget(arguments, default: 5)
 
         // Search by LABEL (titleContains matches title∪description∪help — exactly what `select`
         // ranks on), not the broad cross-field `query`: otherwise 50 elements matching `name` only
@@ -1014,10 +1002,10 @@ public struct PressByNameTool: Tool {
 
         switch PressByNameTool.select(candidates, name: name) {
         case .noMatch:
-            return controlJSON(["success": false, "error": "no_enabled_match", "name": name,
+            return JSONText.from(["success": false, "error": "no_enabled_match", "name": name,
                                 "howToFix": "No enabled, pressable element's label matched. Inspect with find_elements(query:…), or press a ref directly via action(ref,\"press\")."])
         case .ambiguous(let winners):
-            return controlJSON(["success": false, "error": "ambiguous", "name": name,
+            return JSONText.from(["success": false, "error": "ambiguous", "name": name,
                                 "candidates": winners.map { ["ref": $0.ref, "label": $0.label, "role": $0.role] },
                                 "howToFix": "Several enabled matches share the best label rank — press one with action(ref,\"press\"), or pass a more exact name."])
         case .press(let winner):
@@ -1079,11 +1067,11 @@ public struct AppTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return controlPermissionError }
         guard let identity = (arguments["identity"] as? String), !identity.isEmpty else {
-            return controlJSON(["success": false, "error": "missing_identity"])
+            return JSONText.from(["success": false, "error": "missing_identity"])
         }
         let windowArgument = (arguments["window"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let activate = (arguments["activate"] as? Bool) ?? true
-        let timeout = ToolTimeout.seconds(doubleArg(arguments, "timeout"), default: 10, reserveSeconds: 2)
+        let timeout = ToolTimeout.seconds(ToolArguments.double(arguments, for: "timeout"), default: 10, reserveSeconds: 2)
 
         // Resolve fast first (pid/bundle/name). Only if that misses, retry with the slow
         // window-title tier — and when THAT matches, use the identity as the active-window hint so
@@ -1097,10 +1085,10 @@ public struct AppTool: Tool {
 
         switch resolution {
         case .noMatch:
-            return controlJSON(["success": false, "error": "no_match", "identity": identity,
+            return JSONText.from(["success": false, "error": "no_match", "identity": identity,
                                 "howToFix": "Launch it first with launch_app, or pass a running app's name/bundle id/pid."])
         case .ambiguous(let candidates):
-            return controlJSON(["success": false, "error": "ambiguous",
+            return JSONText.from(["success": false, "error": "ambiguous",
                                 "candidates": candidates.map { ["pid": Int($0.pid), "name": $0.name, "bundleId": $0.bundleId] }])
         case .app(let pid, let bundleId, let name):
             if activate { NSRunningApplication(processIdentifier: pid)?.activate() }
@@ -1112,7 +1100,7 @@ public struct AppTool: Tool {
             let activeHint = windowArgument ?? (matchedByWindowTitle ? identity : nil)
             let summary = AppProjection.project(tree: tree, name: name, pid: Int(pid), bundleId: bundleId,
                                                 activeWindowTitle: activeHint)
-            return controlJSON(["success": true, "pid": Int(pid), "name": name, "bundleId": bundleId,
+            return JSONText.from(["success": true, "pid": Int(pid), "name": name, "bundleId": bundleId,
                                 "summary": AppRenderer.render(summary)])
         }
     }

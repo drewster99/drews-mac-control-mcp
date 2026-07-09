@@ -32,13 +32,13 @@ public struct OCRTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard let path = arguments["path"] as? String else {
-            return OCRSupport.json(["error": "missing_path"])
+            return JSONText.from(["error": "missing_path"])
         }
         guard let image = OCRSupport.loadCGImage(path) else {
-            return OCRSupport.json(["error": "cannot_load_image", "path": path])
+            return JSONText.from(["error": "cannot_load_image", "path": path])
         }
         let lines = OCRSupport.recognizeText(image)
-        return OCRSupport.json(["text": lines.joined(separator: "\n"), "lines": lines])
+        return JSONText.from(["text": lines.joined(separator: "\n"), "lines": lines])
     }
 }
 
@@ -62,10 +62,4 @@ enum OCRSupport {
         return results.compactMap { $0.topCandidates(1).first?.string }
     }
 
-    static func json(_ object: Any) -> String {
-        do {
-            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-            return String(decoding: data, as: UTF8.self)
-        } catch { return "null" }
-    }
 }

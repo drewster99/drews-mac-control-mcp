@@ -78,9 +78,9 @@ public struct ScreenshotTool: Tool {
             let image = try CaptureSupport.captureMainDisplay(maxDimension: maxDimension)
             let path = CaptureSupport.screenshotPath(prefix: "screen")
             try CaptureSupport.writePNG(image, to: path)
-            return CaptureSupport.json(["path": path, "width": image.width, "height": image.height])
+            return JSONText.from(["path": path, "width": image.width, "height": image.height])
         } catch {
-            return CaptureSupport.json(["error": "capture_failed", "detail": "\(error)"])
+            return JSONText.from(["error": "capture_failed", "detail": "\(error)"])
         }
     }
 
@@ -99,9 +99,9 @@ public struct ScreenshotTool: Tool {
         let path = CaptureSupport.screenshotPath(prefix: "simulator")
         let status = CaptureSupport.runProcessStatus("/usr/bin/xcrun", ["simctl", "io", udid, "screenshot", path])
         if status == 0, FileManager.default.fileExists(atPath: path) {
-            return CaptureSupport.json(["path": path, "udid": udid])
+            return JSONText.from(["path": path, "udid": udid])
         }
-        return CaptureSupport.json(["error": "simulator_capture_failed", "udid": udid])
+        return JSONText.from(["error": "simulator_capture_failed", "udid": udid])
     }
 }
 
@@ -163,7 +163,7 @@ enum CaptureSupport {
     static func firstBootedSimulatorUDID() -> String? {
         let output = shellOutput("/usr/bin/xcrun", ["simctl", "list", "devices", "booted", "-j"])
         guard let data = output.data(using: .utf8),
-              let root = jsonObject(data) as? [String: Any],
+              let root = JSONText.object(data) as? [String: Any],
               let devices = root["devices"] as? [String: Any] else { return nil }
         for (_, value) in devices {
             if let list = value as? [[String: Any]], let udid = list.first?["udid"] as? String {
@@ -171,18 +171,6 @@ enum CaptureSupport {
             }
         }
         return nil
-    }
-
-    static func json(_ object: Any) -> String {
-        do {
-            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-            return String(decoding: data, as: UTF8.self)
-        } catch { return "null" }
-    }
-
-    static func jsonObject(_ data: Data) -> Any? {
-        do { return try JSONSerialization.jsonObject(with: data) }
-        catch { return nil }
     }
 
     private final class DataBox: @unchecked Sendable { var data = Data() }

@@ -42,10 +42,7 @@ private func pidProp() -> [String: Any] {
 private func okJSON(_ extra: [String: Any]) -> String {
     var dict: [String: Any] = ["ok": true]
     for (key, value) in extra { dict[key] = value }
-    do {
-        let data = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
-        return String(decoding: data, as: UTF8.self)
-    } catch { return #"{"ok":true}"# }
+    return JSONText.from(dict)
 }
 
 /// Posts an event, optionally wrapping it in act-and-settle (§6) when the caller passes
@@ -71,10 +68,7 @@ private func settledResult(_ settle: ActAndSettle?, _ arguments: [String: Any],
         "removed": outcome.diff.removed,
         "changed": outcome.diff.changed.map { ["ref": $0.ref, "was": $0.was, "now": $0.now] }
     ]
-    do {
-        let data = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
-        return String(decoding: data, as: UTF8.self)
-    } catch { return okJSON(base) }
+    return JSONText.from(dict)
 }
 
 public struct ClickTool: Tool {
