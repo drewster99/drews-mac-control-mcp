@@ -93,10 +93,25 @@ struct DebugEvent: Identifiable {
 }
 
 /// Receives the host's live debug events on an XPC background queue and forwards them on (the
-/// handler hops to the main actor). `onEvent` is set once before the connection resumes.
+/// handler hops to the main actor). `onEvent` is assigned on the main actor before the connection
+/// resumes, but `debugEvent` reads it on XPC's background queue — a lock guards that cross-thread
+/// handoff explicitly rather than relying on the resume() ordering. The handler is copied out under
+/// the lock and invoked *outside* it, so a handler that ever touched the sink can't deadlock.
 final class DebugSink: NSObject, MCPDebugSink, @unchecked Sendable {
-    var onEvent: ((String) -> Void)?
-    func debugEvent(_ json: String) { onEvent?(json) }
+    private let lock = NSLock()
+    private var handler: ((String) -> Void)?
+
+    var onEvent: ((String) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return handler }
+        set { lock.lock(); defer { lock.unlock() }; handler = newValue }
+    }
+
+    func debugEvent(_ json: String) {
+        lock.lock()
+        let handler = self.handler
+        lock.unlock()
+        handler?(json)
+    }
 }
 
 @MainActor
