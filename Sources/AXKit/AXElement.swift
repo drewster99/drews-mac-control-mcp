@@ -391,9 +391,30 @@ public extension AXElement {
 
     /// Every boolean-typed attribute, name → value. The generic state source (§8); the
     /// renderer surfaces the true ones (with AXEnabled inverted to `disabled`).
+    ///
+    /// Read in ONE bulk `AXUIElementCopyMultipleAttributeValues` rather than one cross-process call
+    /// per attribute name — this runs for every node of the control_app walk, whose budget is
+    /// wall-clock-bound, so the ~15-40 round trips it used to cost directly reduced how much of an
+    /// app's UI fit in that budget. The payload is unchanged (the per-attribute loop already copied
+    /// each of those values); only the number of round trips drops.
     var booleanAttributes: [String: Bool] {
+        let names = attributeNames
+        guard !names.isEmpty else { return [:] }
         var result: [String: Bool] = [:]
-        for name in attributeNames {
+
+        var out: CFArray?
+        let err = AXUIElementCopyMultipleAttributeValues(raw, names as CFArray, AXCopyMultipleAttributeOptions(), &out)
+        if err == .success, let values = out as? [AnyObject], values.count == names.count {
+            // A failed slot comes back as an AXValue of type .axError (or kCFNull); neither is a
+            // CFBoolean, so the type check below skips it exactly as a failed single read did.
+            for (index, name) in names.enumerated() where CFGetTypeID(values[index]) == CFBooleanGetTypeID() {
+                result[name] = CFBooleanGetValue(unsafeDowncast(values[index], to: CFBoolean.self))
+            }
+            return result
+        }
+
+        // Bulk read unsupported/failed — fall back to per-attribute reads (unchanged semantics).
+        for name in names {
             guard let value = copyAttribute(name), CFGetTypeID(value) == CFBooleanGetTypeID() else { continue }
             result[name] = CFBooleanGetValue(unsafeDowncast(value, to: CFBoolean.self))
         }

@@ -53,10 +53,14 @@ public enum AppResolver {
         return app.windows.contains { $0.title == title }
     }
 
-    private static func candidate(_ app: NSRunningApplication) -> Candidate {
+    /// `windowTitles` is injected rather than fetched here because every caller has already paid (or
+    /// is deliberately paying exactly once) the slow per-app AX read — up to a 2s messaging timeout
+    /// each. Re-fetching inside this helper would double that cost, and the second read could even
+    /// disagree with the titles that made the app a candidate in the first place.
+    private static func candidate(_ app: NSRunningApplication, windowTitles: [String]) -> Candidate {
         Candidate(pid: app.processIdentifier, name: app.localizedName ?? "(unknown)",
                   bundleId: app.bundleIdentifier ?? "",
-                  windowTitles: windowTitles(pid: app.processIdentifier))
+                  windowTitles: windowTitles)
     }
 
     private static func resolved(_ app: NSRunningApplication) -> Resolution {
@@ -92,7 +96,9 @@ public enum AppResolver {
         let regular = named.filter { $0.activationPolicy == .regular }
         let preferred = regular.isEmpty ? named : regular
         if preferred.count == 1 { return resolved(preferred[0]) }
-        if preferred.count > 1 { return .ambiguous(preferred.map(candidate)) }
+        if preferred.count > 1 {
+            return .ambiguous(preferred.map { candidate($0, windowTitles: windowTitles(pid: $0.processIdentifier)) })
+        }
 
         // 4. window-title fallback — case-insensitive substring (>1 → ambiguous). Restrict the
         // per-app AX scan to apps that actually own an on-screen window (cheap CGWindowList
@@ -100,12 +106,17 @@ public enum AppResolver {
         guard includeWindowTitle else { return .noMatch }
         let needle = identity.lowercased()
         let onScreenPIDs = onScreenWindowOwnerPIDs()
-        let matched = apps.filter { app in
-            onScreenPIDs.contains(app.processIdentifier) &&
-            windowTitles(pid: app.processIdentifier).contains { $0.lowercased().contains(needle) }
+        // Keep each app's titles alongside the match: the ambiguous branch reports them, and
+        // re-reading titles per candidate would repeat the slow AX scan we just performed.
+        var matched: [(app: NSRunningApplication, titles: [String])] = []
+        for app in apps where onScreenPIDs.contains(app.processIdentifier) {
+            let titles = windowTitles(pid: app.processIdentifier)
+            if titles.contains(where: { $0.lowercased().contains(needle) }) {
+                matched.append((app: app, titles: titles))
+            }
         }
-        if matched.count == 1 { return resolved(matched[0]) }
-        if matched.count > 1 { return .ambiguous(matched.map(candidate)) }
+        if matched.count == 1 { return resolved(matched[0].app) }
+        if matched.count > 1 { return .ambiguous(matched.map { candidate($0.app, windowTitles: $0.titles) }) }
 
         return .noMatch
     }
