@@ -52,7 +52,15 @@ public func makeFullServer() -> MCPServer {
     // The control_app `click`/`type` verbs reach the synthetic-input layer (InputKit) via injected
     // closures, so AXKit stays input-free.
     let click: ControlClick = { x, y, count in SyntheticInput.click(x: x, y: y, rightButton: false, clickCount: count) }
-    let type: ControlType = { text, paste in paste ? SyntheticInput.paste(text) : SyntheticInput.typeUnicode(text) }
+    let type: ControlType = { text, paste, consumed in
+        if paste {
+            let outcome = SyntheticInput.paste(text, consumed: consumed)
+            return TypeOutcome(posted: outcome.posted, typedCharacters: nil, paste: outcome)
+        } else {
+            let typed = SyntheticInput.typeUnicode(text)
+            return TypeOutcome(posted: typed == text.count, typedCharacters: typed, paste: nil)
+        }
+    }
     let baseTools = MCPServer.defaultTools()
         + AXTools.all(session: session, click: click, type: type)
         + [ScreenshotTool(), OCRTool()]
@@ -83,7 +91,10 @@ public func makeFullServer() -> MCPServer {
 
 public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendable {
     private let server: MCPServer
-    private let lock = NSLock()
+    /// Per-connection FIFO for tool calls. MCPServer/ElementRegistry hold mutable state, so requests
+    /// on one connection must run one at a time — but cross-connection input exclusion is the
+    /// GlobalInputGate's job, not this queue's.
+    private let requestQueue = DispatchQueue(label: "com.nuclearcyborg.MacControlHost.requests")
     /// Identifies this connection (one per MCP client) in the debug stream. The relay's pid gives
     /// cross-reconnect continuity; this distinguishes concurrent clients within a host run.
     private let sessionId = UUID().uuidString
@@ -92,22 +103,42 @@ public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendabl
         self.server = server
     }
 
-    public func handle(line: String, withReply reply: @escaping (String?) -> Void) {
-        DebugLog.request(line)
-        lock.lock()
-        let response = server.handleLine(line).map { String(decoding: $0, as: UTF8.self) }
-        let client = server.clientInfo
-        lock.unlock()
-        DebugLog.response(response)
-        if DebugMonitor.shared.isActive {
-            DebugMonitor.shared.emit(sessionId: sessionId, client: client, call: line, response: response)
-        }
-        reply(response)
+    /// Carries the XPC reply block across the @Sendable async boundary. Safe: XPC reply blocks may
+    /// be invoked once from any thread, the compiler just can't see that through the ObjC protocol.
+    private struct ReplyBox: @unchecked Sendable {
+        let reply: (String?) -> Void
     }
 
-    /// Carries this activation's token to the (later-firing) connection error handler, so a stale
-    /// connection's failure only clears the monitor if its sink is still the current one.
-    private final class TokenBox: @unchecked Sendable { var value = 0 }
+    public func handle(line: String, withReply reply: @escaping (String?) -> Void) {
+        DebugLog.request(line)
+        // Hop off the XPC delivery queue so a parked defer doesn't stall this connection's
+        // metadata calls (permissions/buildInfo/activityConfig); NSXPC retains the reply
+        // block, so replying after handle() returns is fully supported. Tool calls stay
+        // FIFO on the serial queue — the same ordering the lock provided.
+        let replyBox = ReplyBox(reply: reply)
+        requestQueue.async { [self] in
+            let response = server.handleLine(line).map { String(decoding: $0, as: UTF8.self) }
+            let client = server.clientInfo
+            DebugLog.response(response)
+            if DebugMonitor.shared.isActive {
+                DebugMonitor.shared.emit(sessionId: sessionId, client: client, call: line, response: response)
+            }
+            replyBox.reply(response)
+        }
+    }
+
+    /// Carries this activation's token to the (later-firing) connection error/invalidation
+    /// handlers, so a stale connection's failure only clears the monitor if its sink is still the
+    /// current one. Lock-guarded: the token is written on the XPC request thread but read from
+    /// handlers that fire on XPC's own queues.
+    private final class TokenBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage = 0
+        var value: Int {
+            get { lock.lock(); defer { lock.unlock() }; return storage }
+            set { lock.lock(); storage = newValue; lock.unlock() }
+        }
+    }
 
     public func setDebugMonitoring(enabled: Bool, withReply reply: @escaping (Bool) -> Void) {
         guard enabled, let connection = NSXPCConnection.current() else {
@@ -125,6 +156,20 @@ public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendabl
             DebugMonitor.shared.deactivate()
             reply(false)
             return
+        }
+        // Also deactivate when the connection dies with no traffic in flight — the proxy error
+        // handler above only fires on a failed send, so app death would otherwise leave the dead
+        // sink active forever. CHAIN the handlers (never replace blindly): the host's main.swift
+        // owns them for live-connection counting, and that decrement must keep running.
+        let previousInvalidation = connection.invalidationHandler
+        connection.invalidationHandler = {
+            previousInvalidation?()
+            DebugMonitor.shared.deactivate(ifCurrent: tokenBox.value)
+        }
+        let previousInterruption = connection.interruptionHandler
+        connection.interruptionHandler = {
+            previousInterruption?()
+            DebugMonitor.shared.deactivate(ifCurrent: tokenBox.value)
         }
         tokenBox.value = DebugMonitor.shared.activate(sink)
         reply(true)

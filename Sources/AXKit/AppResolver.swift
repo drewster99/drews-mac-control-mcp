@@ -81,10 +81,14 @@ public enum AppResolver {
             return resolved(app)
         }
 
-        // 2. bundle id — exact, then case-insensitive (treated unique: first wins)
-        if let app = apps.first(where: { $0.bundleIdentifier == identity })
-            ?? apps.first(where: { $0.bundleIdentifier?.lowercased() == identity.lowercased() }) {
-            return resolved(app)
+        // 2. bundle id — exact, then case-insensitive (>1 → ambiguous)
+        var byBundle = apps.filter { $0.bundleIdentifier == identity }
+        if byBundle.isEmpty { byBundle = apps.filter { $0.bundleIdentifier?.lowercased() == identity.lowercased() } }
+        if byBundle.count == 1 { return resolved(byBundle[0]) }
+        if byBundle.count > 1 {
+            // Duplicate instances via `open -n` are a real ambiguity: silently picking the first
+            // could drive the wrong window. Report candidates like the name/window tiers do.
+            return .ambiguous(byBundle.map { candidate($0, windowTitles: windowTitles(pid: $0.processIdentifier)) })
         }
 
         // 3. app name — exact, then case-insensitive (>1 → ambiguous)

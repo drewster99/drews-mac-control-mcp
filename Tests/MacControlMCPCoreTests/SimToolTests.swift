@@ -30,6 +30,16 @@ final class SimToolTests: XCTestCase {
         XCTAssertTrue(out.contains("false") || out.contains("\"error\""), "expected a clean failure, got: \(out)")
     }
 
+    /// Operand validation rejects option-shaped arguments before simctl runs, so a `-`-prefixed
+    /// value can never be parsed as a simctl option (issue #22).
+    func testOptionShapedArgumentsAreRejected() {
+        XCTAssertTrue(SimTool().call(["action": "pbpaste", "udid": "-j"]).contains("invalid_udid"))
+        XCTAssertTrue(SimTool().call(["action": "launch", "bundleId": "--console"]).contains("invalid_bundleId"))
+        XCTAssertTrue(SimTool().call(["action": "openurl", "url": "-x"]).contains("invalid_url"))
+        XCTAssertTrue(SimTool().call(["action": "openurl", "url": "//example.com"]).contains("invalid_url"))
+        XCTAssertTrue(SimTool().call(["action": "appearance", "value": "--watch"]).contains("invalid_value"))
+    }
+
     func testSimToolIsRegistered() {
         let names = MCPServer.defaultTools().map(\.name)
         XCTAssertTrue(names.contains("sim"))

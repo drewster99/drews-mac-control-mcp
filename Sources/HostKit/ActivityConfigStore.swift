@@ -17,6 +17,9 @@ public final class ActivityConfigStore: @unchecked Sendable {
     private let lock = NSLock()
     private var value: ActivityConfig
     private let fileURL: URL
+    /// Serializes writes so two racing updates can't interleave their file replacements — the last
+    /// enqueued value is the last on disk, matching the last in-memory value.
+    private let persistQueue = DispatchQueue(label: "com.nuclearcyborg.MacControlHost.activity-config-persist")
 
     public init(fileURL: URL? = nil) {
         self.fileURL = fileURL ?? ActivityConfigStore.defaultFileURL
@@ -33,10 +36,16 @@ public final class ActivityConfigStore: @unchecked Sendable {
     @discardableResult
     public func update(_ config: ActivityConfig) -> ActivityConfig {
         let clamped = config.clamped()
+        let fileURL = self.fileURL
         lock.lock()
         value = clamped
+        // Enqueued while holding the lock so the on-disk write order matches the in-memory update
+        // order; the write itself runs off-lock on the serial queue.
+        persistQueue.async { ActivityConfigStore.persist(clamped, to: fileURL) }
         lock.unlock()
-        persist(clamped)
+        // Drain the queue before returning so the value is durable by the time the XPC reply
+        // confirms it — a host crash right after this call can't silently drop the setting.
+        persistQueue.sync {}
         return clamped
     }
 
@@ -50,24 +59,47 @@ public final class ActivityConfigStore: @unchecked Sendable {
     }
 
     private static func load(from url: URL) -> ActivityConfig {
+        let data: Data
         do {
-            let data = try Data(contentsOf: url)
-            return ActivityConfig.decoded(fromJSON: String(decoding: data, as: UTF8.self))
+            data = try Data(contentsOf: url)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            // First run — nothing persisted yet; silently default to off.
+            return .disabled
         } catch {
-            // Absent or unreadable → feature off.
+            DebugLog.event("ACTIVITY_CONFIG", "unreadable at \(url.path): \(error)")
+            setAsideCorruptFile(at: url)
+            return .disabled
+        }
+        do {
+            return try JSONDecoder().decode(ActivityConfig.self, from: data).clamped()
+        } catch {
+            DebugLog.event("ACTIVITY_CONFIG", "malformed at \(url.path): \(error)")
+            setAsideCorruptFile(at: url)
             return .disabled
         }
     }
 
-    private func persist(_ config: ActivityConfig) {
+    /// Rename a bad config to `.corrupt` so the evidence survives for diagnosis and the next save
+    /// starts clean instead of fighting the same bad bytes on every load.
+    private static func setAsideCorruptFile(at url: URL) {
+        let corrupt = url.appendingPathExtension("corrupt")
+        try? FileManager.default.removeItem(at: corrupt)
+        try? FileManager.default.moveItem(at: url, to: corrupt)
+    }
+
+    private static func persist(_ config: ActivityConfig, to fileURL: URL) {
         do {
             try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
             let data = Data(config.jsonString().utf8)
             try data.write(to: fileURL, options: .atomic)
+            // Settings only, but they gate when synthetic input fires — keep them owner-only.
+            // Set AFTER the write: the atomic replacement file carries default permissions.
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         } catch {
-            // A persistence failure must not break request handling; the in-memory value still applies
-            // for this host's lifetime.
+            // A persistence failure must not break request handling; the in-memory value still
+            // applies for this host's lifetime.
+            DebugLog.event("ACTIVITY_CONFIG", "persist failed at \(fileURL.path): \(error)")
         }
     }
 }

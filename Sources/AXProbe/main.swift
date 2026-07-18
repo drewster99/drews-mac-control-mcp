@@ -324,10 +324,11 @@ func windowPosition(_ window: AXUIElement) -> CGPoint? {
     return point
 }
 
-func setWindowPosition(_ window: AXUIElement, _ point: CGPoint) {
+@discardableResult
+func setWindowPosition(_ window: AXUIElement, _ point: CGPoint) -> AXError {
     var mutablePoint = point
-    guard let value = AXValueCreate(.cgPoint, &mutablePoint) else { return }
-    AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
+    guard let value = AXValueCreate(.cgPoint, &mutablePoint) else { return .failure }
+    return AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
 }
 
 func resolveOrLaunch(_ query: String) -> NSRunningApplication? {
@@ -380,6 +381,25 @@ func selftest(appQuery: String, iterations: Int) {
     }
     setWindowPosition(window, origin)
     Probe.shared.awaiting = nil
+
+    // Verify the restore actually landed — the test must leave the user's window where it found
+    // it. Retry once, then warn loudly so a stuck window doesn't go unnoticed.
+    func restoredWithinOnePoint() -> Bool {
+        guard let current = windowPosition(window) else { return false }
+        return abs(current.x - origin.x) <= 1 && abs(current.y - origin.y) <= 1
+    }
+    if !restoredWithinOnePoint() {
+        setWindowPosition(window, origin)
+        Thread.sleep(forTimeInterval: 0.05)
+        if !restoredWithinOnePoint() {
+            let current = windowPosition(window).map { "(\($0.x), \($0.y))" } ?? "(unreadable)"
+            FileHandle.standardError.write(Data("""
+            WARNING: could not restore the window to its original position \
+            (\(origin.x), \(origin.y)) — it is now at \(current).
+
+            """.utf8))
+        }
+    }
 
     if latencies.isEmpty {
         print("  no kAXWindowMoved notifications delivered — this app may not post them.")
@@ -659,7 +679,11 @@ func rolesMode(appQuery: String, maxNodes: Int, deadlineSeconds: Double) {
 
 requireAccessibility()
 _ = NSWorkspace.shared   // touch so launch/terminate observers attach
-let arguments = Array(CommandLine.arguments.dropFirst())
+// Strip the flag globally BEFORE dispatch so positional argument parsing is unaffected by
+// where the caller placed it.
+let rawArguments = Array(CommandLine.arguments.dropFirst())
+let allowWindowMove = rawArguments.contains("--allow-window-move")
+let arguments = rawArguments.filter { $0 != "--allow-window-move" }
 let maxNodes = 30_000
 
 if arguments.first == "watch" {
@@ -667,6 +691,14 @@ if arguments.first == "watch" {
     let seconds = arguments.count > 2 ? (Double(arguments[2]) ?? 30) : 30
     watch(appQuery: query, seconds: seconds, maxNodes: maxNodes)
 } else if arguments.first == "selftest" {
+    if !allowWindowMove {
+        FileHandle.standardError.write(Data("""
+        selftest repeatedly moves a real window of the target app, which disturbs the live
+        desktop. Re-run with --allow-window-move to confirm that's OK.
+
+        """.utf8))
+        exit(2)
+    }
     let query = arguments.count > 1 ? arguments[1] : "Calculator"
     let iterations = arguments.count > 2 ? (Int(arguments[2]) ?? 10) : 10
     selftest(appQuery: query, iterations: iterations)

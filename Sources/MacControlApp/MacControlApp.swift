@@ -40,9 +40,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Unsigned/dev builds (or not in /Applications) can't register; the UI surfaces this.
             // Nothing actionable headlessly.
         }
-        HostLifecycle.terminateStaleHost()
+        let stale = HostLifecycle.terminateStaleHostsReturningThem()
         if CommandLine.arguments.contains("--register-and-exit") {
-            NSApp.terminate(nil)
+            // Wait for the stale hosts to actually die before quitting, so the relay's bootstrap
+            // reconnect can't race a zombie still holding the Mach service. exit(0) rather than
+            // NSApp.terminate: terminate would run AppKit shutdown this headless path doesn't need.
+            HostLifecycle.waitForExit(of: stale, deadline: 3.0)
+            exit(0)
         }
     }
 }
@@ -54,13 +58,49 @@ enum HostLifecycle {
     /// Terminate any host running from a DIFFERENT bundle than this app's (a leftover from a prior
     /// install/location) so the current binary launches on the next on-demand connection. A host
     /// from the *current* bundle is left running — don't disrupt an in-flight session. (Same-path
-    /// in-place updates self-heal: an idle on-demand host exits and launchd starts the new binary.)
+    /// in-place updates self-heal: the host genuinely retires itself when its on-disk binary
+    /// changes or it sits idle, and launchd starts the new binary on the next lookup.)
     static func terminateStaleHost() {
+        _ = terminateStaleHostsReturningThem()
+    }
+
+    /// Same as `terminateStaleHost`, returning the hosts that were asked to terminate so a caller
+    /// can wait for them to actually exit.
+    static func terminateStaleHostsReturningThem() -> [NSRunningApplication] {
         let current = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Helpers/MacControlHost.app").standardizedFileURL
+        var terminated: [NSRunningApplication] = []
         for app in NSRunningApplication.runningApplications(withBundleIdentifier: hostBundleID)
         where app.bundleURL?.standardizedFileURL != current {
             app.terminate()
+            terminated.append(app)
+        }
+        return terminated
+    }
+
+    /// Block until every process in `apps` has exited, force-terminating survivors halfway through
+    /// the deadline. Polls kill(pid, 0) for ESRCH instead of NSRunningApplication.isTerminated —
+    /// that flag only updates via run-loop-delivered notifications, and this runs headlessly with
+    /// no run loop spinning.
+    static func waitForExit(of apps: [NSRunningApplication], deadline: TimeInterval) {
+        // Capture pids up front: once a process dies its NSRunningApplication stops being useful,
+        // and a recycled-pid race in this narrow window is acceptable for a best-effort wait.
+        let pids = apps.map(\.processIdentifier)
+        guard !pids.isEmpty else { return }
+        let start = Date()
+        var forced = false
+        func allGone() -> Bool {
+            pids.allSatisfy { kill($0, 0) == -1 && errno == ESRCH }
+        }
+        while Date().timeIntervalSince(start) < deadline {
+            if allGone() { return }
+            if !forced, Date().timeIntervalSince(start) >= deadline / 2 {
+                forced = true
+                for app in apps where !(kill(app.processIdentifier, 0) == -1 && errno == ESRCH) {
+                    app.forceTerminate()
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.1)
         }
     }
 }
@@ -114,6 +154,52 @@ final class DebugSink: NSObject, MCPDebugSink, @unchecked Sendable {
     }
 }
 
+/// Why a host XPC round-trip failed to produce a reply.
+enum HostCallError: Error {
+    case transport(String)
+    case timedOut
+}
+
+/// What the activity-settings UI should surface, and what Retry should do.
+enum ActivityConfigFailure: Equatable {
+    case loadFailed(String)
+    case saveFailed(String)
+
+    var message: String {
+        switch self {
+        case .loadFailed(let reason):
+            return "Couldn't load settings from the host (\(reason))."
+        case .saveFailed(let reason):
+            return "Settings NOT saved — the host didn't get the change (\(reason))."
+        }
+    }
+}
+
+/// Owns one short-lived host connection and guarantees exactly one outcome: every path
+/// (reply, transport error, timeout) funnels into `settle`, which tears the connection
+/// down and delivers the completion once. The connection→error-handler→settler→connection
+/// retain cycle is deliberate — it keeps the call alive untracked by AppModel — and is
+/// broken on settle; the timeout task bounds its lifetime unconditionally.
+@MainActor
+private final class HostCallSettler {
+    private var connection: NSXPCConnection?
+    private var completion: (@MainActor (Result<String, HostCallError>) -> Void)?
+
+    init(connection: NSXPCConnection,
+         completion: @escaping @MainActor (Result<String, HostCallError>) -> Void) {
+        self.connection = connection
+        self.completion = completion
+    }
+
+    func settle(_ result: Result<String, HostCallError>) {
+        connection?.invalidate()
+        connection = nil
+        let completion = self.completion
+        self.completion = nil
+        completion?(result)
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var agentStatus = "—"
@@ -130,6 +216,11 @@ final class AppModel: ObservableObject {
     /// The host-owned user-activity / idle-defer settings. Loaded from and saved to the host over
     /// XPC (the host is the single owner — no shared file).
     @Published var activityConfig = ActivityConfig.disabled
+    /// The failure the activity-settings UI should surface (with a Retry), or `nil` when healthy.
+    @Published private(set) var activityConfigFailure: ActivityConfigFailure?
+    /// False until the host's real settings have arrived once; the controls stay disabled
+    /// until then so a save can never push the placeholder default over the host's config.
+    @Published private(set) var activityConfigLoaded = false
     /// Live idle readout, refreshed by a 1s timer. Read directly from this process's `CGEventSource`
     /// (global OS idle) — no XPC needed, and this app never posts synthetic input.
     @Published private(set) var liveMouseIdle: TimeInterval = 0
@@ -219,39 +310,101 @@ final class AppModel: ObservableObject {
         return connection
     }
 
+    /// Run one host round-trip with a bounded lifetime: `start` receives the proxy and the
+    /// reply block; the first of reply / transport error / timeout wins.
+    private func callHost(
+        timeout: TimeInterval = 8,
+        start: (MCPHostProtocol, @escaping @Sendable (String) -> Void) -> Void,
+        completion: @escaping @MainActor (Result<String, HostCallError>) -> Void
+    ) {
+        let connection = hostConnection()
+        let settler = HostCallSettler(connection: connection, completion: completion)
+        let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+            let reason = error.localizedDescription
+            Task { @MainActor in settler.settle(.failure(.transport(reason))) }
+        } as? MCPHostProtocol
+        guard let proxy else {
+            settler.settle(.failure(.transport("could not create host proxy")))
+            return
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(timeout))
+            settler.settle(.failure(.timedOut))
+        }
+        start(proxy, { json in
+            Task { @MainActor in settler.settle(.success(json)) }
+        })
+    }
+
     /// Refresh the live idle readout from this process's OS idle counters (no XPC).
     func refreshIdle() {
         liveMouseIdle = ActivityMonitor.shared.mouseIdleSeconds()
         liveKeyboardIdle = ActivityMonitor.shared.keyboardIdleSeconds()
     }
 
+    /// Drives the live idle readout at 1 Hz for as long as the owning view is on screen.
+    /// Structured via `.task` so the loop's lifetime is tied to the view — no timer to
+    /// rebuild on body re-evaluation and no cancellable to manage.
+    func runIdleRefreshLoop() async {
+        while !Task.isCancelled {
+            refreshIdle()
+            try? await Task.sleep(for: .seconds(1))
+        }
+    }
+
     /// Ask the host for the current settings (boots it on demand).
     func loadActivityConfig() {
-        let connection = hostConnection()
-        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
-            Task { @MainActor in connection.invalidate() }
-        } as? MCPHostProtocol
-        guard let proxy else { connection.invalidate(); return }
-        proxy.activityConfig { [weak self] json in
-            Task { @MainActor in
-                self?.activityConfig = ActivityConfig.decoded(fromJSON: json)
-                connection.invalidate()
-            }
-        }
+        callHost(
+            start: { proxy, reply in proxy.activityConfig(withReply: reply) },
+            completion: { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success(let json):
+                    self.activityConfig = ActivityConfig.decoded(fromJSON: json)
+                    self.activityConfigLoaded = true
+                    self.activityConfigFailure = nil
+                case .failure(let error):
+                    self.activityConfigFailure = .loadFailed(Self.describe(error))
+                }
+            })
     }
 
     /// Push the current settings to the host; reflect back the host's clamped value.
     func saveActivityConfig() {
-        let connection = hostConnection()
-        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
-            Task { @MainActor in connection.invalidate() }
-        } as? MCPHostProtocol
-        guard let proxy else { connection.invalidate(); return }
-        proxy.setActivityConfig(activityConfig.jsonString()) { [weak self] json in
-            Task { @MainActor in
-                self?.activityConfig = ActivityConfig.decoded(fromJSON: json)
-                connection.invalidate()
-            }
+        // Never save before the first successful load — the in-memory value would be the
+        // placeholder default, and saving it would silently erase the host's real settings.
+        guard activityConfigLoaded else { return }
+        let pending = activityConfig
+        callHost(
+            start: { proxy, reply in proxy.setActivityConfig(pending.jsonString(), withReply: reply) },
+            completion: { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success(let json):
+                    self.activityConfig = ActivityConfig.decoded(fromJSON: json)
+                    self.activityConfigFailure = nil
+                case .failure(let error):
+                    // Keep the user's edits on screen; the banner says the host doesn't have them.
+                    self.activityConfigFailure = .saveFailed(Self.describe(error))
+                }
+            })
+    }
+
+    /// Retry does the thing that failed: reload after a failed load, but RE-SAVE after a
+    /// failed save — reloading there would overwrite the user's kept-but-unsaved edits.
+    func retryActivityConfig() {
+        switch activityConfigFailure {
+        case .saveFailed:
+            saveActivityConfig()
+        case .loadFailed, nil:
+            loadActivityConfig()
+        }
+    }
+
+    private static func describe(_ error: HostCallError) -> String {
+        switch error {
+        case .transport(let reason): return reason
+        case .timedOut: return "no response from the host"
         }
     }
 
@@ -346,6 +499,14 @@ final class AppModel: ObservableObject {
     /// Open a dedicated debug connection: it exports our sink (host → app event stream) and turns
     /// the host's global monitor on. Separate from the short-lived version-check connection.
     private func startDebugMonitoring() {
+        // Replace, don't leak, any prior connection — and detach its invalidation handler
+        // first so its deferred `debugMonitoring = false` can't land after (and undo) the
+        // new connection's `true` reply.
+        if let old = debugConnection {
+            old.invalidationHandler = nil
+            old.invalidate()
+            debugConnection = nil
+        }
         debugSink.onEvent = { [weak self] json in
             Task { @MainActor in self?.appendDebugEvent(json) }
         }
@@ -358,12 +519,17 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.debugMonitoring = false }
         }
         connection.resume()
-        debugConnection = connection
 
-        let proxy = connection.remoteObjectProxyWithErrorHandler { [weak self] _ in
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ [weak self] _ in
             Task { @MainActor in self?.debugMonitoring = false }
-        } as? MCPHostProtocol
-        proxy?.setDebugMonitoring(enabled: true) { [weak self] active in
+        }) as? MCPHostProtocol else {
+            connection.invalidationHandler = nil
+            connection.invalidate()
+            debugMonitoring = false
+            return
+        }
+        debugConnection = connection
+        proxy.setDebugMonitoring(enabled: true) { [weak self] active in
             Task { @MainActor in self?.debugMonitoring = active }
         }
     }
@@ -543,43 +709,55 @@ struct ContentView: View {
                                 model.liveMouseIdle, model.liveKeyboardIdle))
                         .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
 
-                    HStack {
-                        Text("Wait for user idle")
-                        Slider(value: Binding(
-                            get: { Double(model.activityConfig.minIdleSeconds) },
-                            set: { model.activityConfig.minIdleSeconds = Int($0) }),
-                            in: 0...Double(ActivityConfig.minIdleCeiling),
-                            onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
-                        Text(model.activityConfig.minIdleSeconds == 0 ? "Off"
-                             : "\(model.activityConfig.minIdleSeconds)s")
-                            .monospacedDigit().frame(width: 48, alignment: .trailing)
+                    if let failure = model.activityConfigFailure {
+                        HStack(spacing: 8) {
+                            Text(failure.message).font(.callout).foregroundStyle(.red)
+                            Button("Retry") { model.retryActivityConfig() }
+                        }
                     }
 
-                    HStack {
-                        Text("Defer up to")
-                        Slider(value: Binding(
-                            get: { Double(model.activityConfig.deferBudgetSeconds) },
-                            set: { model.activityConfig.deferBudgetSeconds = Int($0) }),
-                            in: 0...Double(ActivityConfig.deferBudgetCeiling),
-                            onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
-                        Text("\(model.activityConfig.deferBudgetSeconds)s")
-                            .monospacedDigit().frame(width: 48, alignment: .trailing)
-                    }
-                    .disabled(model.activityConfig.minIdleSeconds == 0)
+                    Group {
+                        HStack {
+                            Text("Wait for user idle")
+                            Slider(value: Binding(
+                                get: { Double(model.activityConfig.minIdleSeconds) },
+                                set: { model.activityConfig.minIdleSeconds = Int($0) }),
+                                in: 0...Double(ActivityConfig.minIdleCeiling),
+                                onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
+                            Text(model.activityConfig.minIdleSeconds == 0 ? "Off"
+                                 : "\(model.activityConfig.minIdleSeconds)s")
+                                .monospacedDigit().frame(width: 48, alignment: .trailing)
+                        }
 
-                    Picker("When defer time is reached", selection: Binding(
-                        get: { model.activityConfig.onDeferTimeout },
-                        set: { model.activityConfig.onDeferTimeout = $0; model.saveActivityConfig() })) {
-                        Text("Execute anyway").tag(OnDeferTimeout.executeAnyway)
-                        Text("Report user busy").tag(OnDeferTimeout.reportBusy)
-                    }
-                    .pickerStyle(.segmented)
-                    .disabled(model.activityConfig.minIdleSeconds == 0)
-
-                    Toggle("Also defer app-launch / open / focus tools", isOn: Binding(
-                        get: { model.activityConfig.deferFocusTools },
-                        set: { model.activityConfig.deferFocusTools = $0; model.saveActivityConfig() }))
+                        HStack {
+                            Text("Defer up to")
+                            Slider(value: Binding(
+                                get: { Double(model.activityConfig.deferBudgetSeconds) },
+                                set: { model.activityConfig.deferBudgetSeconds = Int($0) }),
+                                in: 0...Double(ActivityConfig.deferBudgetCeiling),
+                                onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
+                            Text("\(model.activityConfig.deferBudgetSeconds)s")
+                                .monospacedDigit().frame(width: 48, alignment: .trailing)
+                        }
                         .disabled(model.activityConfig.minIdleSeconds == 0)
+
+                        Picker("When defer time is reached", selection: Binding(
+                            get: { model.activityConfig.onDeferTimeout },
+                            set: { model.activityConfig.onDeferTimeout = $0; model.saveActivityConfig() })) {
+                            Text("Execute anyway").tag(OnDeferTimeout.executeAnyway)
+                            Text("Report user busy").tag(OnDeferTimeout.reportBusy)
+                        }
+                        .pickerStyle(.segmented)
+                        .disabled(model.activityConfig.minIdleSeconds == 0)
+
+                        Toggle("Also defer app-launch / open / focus tools", isOn: Binding(
+                            get: { model.activityConfig.deferFocusTools },
+                            set: { model.activityConfig.deferFocusTools = $0; model.saveActivityConfig() }))
+                            .disabled(model.activityConfig.minIdleSeconds == 0)
+                    }
+                    // Editing is meaningless until the host's real settings have arrived — and
+                    // saving before then could clobber them with the placeholder default.
+                    .disabled(!model.activityConfigLoaded)
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -591,11 +769,8 @@ struct ContentView: View {
         .onAppear {
             model.refresh()
             model.loadActivityConfig()
-            model.refreshIdle()
         }
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
-            model.refreshIdle()
-        }
+        .task { await model.runIdleRefreshLoop() }
     }
 }
 

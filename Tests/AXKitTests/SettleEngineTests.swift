@@ -32,8 +32,8 @@ final class SettleEngineTests: XCTestCase {
         }
         let session = ElementRegistry()
         let pid = finder.processIdentifier
-        let before = session.snapshot(pid: pid, maxDepth: 1)
-        let after = session.snapshot(pid: pid, maxDepth: 1)
+        let before = session.snapshot(pid: pid, maxDepth: 1).root
+        let after = session.snapshot(pid: pid, maxDepth: 1).root
         let diff = Diff.compute(old: before, new: after)
         XCTAssertTrue(diff.isEmpty, "stable refs + no change must yield an empty diff, got \(diff)")
     }
@@ -45,8 +45,8 @@ final class SettleEngineTests: XCTestCase {
         }
         let session = ElementRegistry()
         let pid = finder.processIdentifier
-        XCTAssertTrue(session.getChanges(pid: pid, maxDepth: 1).isEmpty, "first call is the baseline → empty")
-        XCTAssertTrue(session.getChanges(pid: pid, maxDepth: 1).isEmpty, "no change → empty diff")
+        XCTAssertTrue(session.getChanges(pid: pid, maxDepth: 1).diff.isEmpty, "first call is the baseline → empty")
+        XCTAssertTrue(session.getChanges(pid: pid, maxDepth: 1).diff.isEmpty, "no change → empty diff")
     }
 
     /// A small custom config bounds the total wait. For a no-op (no change ever observed),

@@ -10,6 +10,7 @@
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import MacControlMCPCore
 
 public struct AXElement: @unchecked Sendable {
     public let raw: AXUIElement
@@ -193,6 +194,11 @@ public struct AXElement: @unchecked Sendable {
         public var rowCount: Int? = nil
         public var columnCount: Int? = nil
         public var columnTitles: [String]? = nil
+        /// Whether the `AXChildren` slot was actually present in the read. An empty `children`
+        /// array is ambiguous on its own — genuinely childless vs. a failed slot — and this flag
+        /// is what lets ControlWalker's frontier tell `.none` from `.unknown` without paying a
+        /// second cross-process child-count probe.
+        public var childrenSlotPresent: Bool = false
     }
 
     /// Read role/subrole/identifier/title/value/frame/children in a single
@@ -212,13 +218,16 @@ public struct AXElement: @unchecked Sendable {
         let err = AXUIElementCopyMultipleAttributeValues(raw, names as CFArray, AXCopyMultipleAttributeOptions(), &out)
         guard err == .success, let values = out as? [AnyObject], values.count == names.count else {
             // Bulk read unsupported/failed — fall back to per-attribute reads (unchanged semantics).
+            let childrenValue = copyAttribute(kAXChildrenAttribute)
             return SnapshotAttributes(role: role, subrole: subrole, identifier: identifier,
-                                      title: title, value: value, frame: frame, children: children,
+                                      title: title, value: value, frame: frame,
+                                      children: ((childrenValue as? [AXUIElement]) ?? []).map(AXElement.init),
                                       axDescription: axDescription, help: help,
                                       valueDescription: valueDescription, placeholder: placeholderValue, url: url,
                                       numericValue: numericValue, minValue: minValue, maxValue: maxValue,
                                       disclosureLevel: disclosureLevel, isDisclosing: isDisclosing,
-                                      rowCount: rowCount, columnCount: columnCount, columnTitles: columnTitles)
+                                      rowCount: rowCount, columnCount: columnCount, columnTitles: columnTitles,
+                                      childrenSlotPresent: childrenValue != nil)
         }
 
         // A failed attribute comes back as an AXValue of type .axError (or kCFNull); treat as absent.
@@ -272,10 +281,55 @@ public struct AXElement: @unchecked Sendable {
                                   valueDescription: string(10), placeholder: string(11), url: decodedURL,
                                   numericValue: decodedNumericValue,
                                   minValue: number(13), maxValue: number(14),
-                                  disclosureLevel: number(15).map { Int($0) }, isDisclosing: boolean(16),
-                                  rowCount: number(17).map { Int($0) },
-                                  columnCount: number(18).map { Int($0) },
-                                  columnTitles: present(19) as? [String])
+                                  // Guarded conversion: these doubles crossed a process boundary,
+                                  // and plain Int(_:) traps on NaN/±inf/out-of-range.
+                                  disclosureLevel: number(15).flatMap(UntrustedNumeric.int), isDisclosing: boolean(16),
+                                  rowCount: number(17).flatMap(UntrustedNumeric.int),
+                                  columnCount: number(18).flatMap(UntrustedNumeric.int),
+                                  columnTitles: present(19) as? [String],
+                                  childrenSlotPresent: present(7) != nil)
+    }
+
+    /// The three fields the settle/idle signature walks hash, read in ONE bulk IPC call.
+    public struct SignatureAttributes {
+        public var role: String?
+        public var value: String?
+        public var children: [AXElement]
+    }
+
+    /// Read role/value/children in a single `AXUIElementCopyMultipleAttributeValues` call — the
+    /// signature walks run this for every node on every poll, so collapsing three round-trips to
+    /// one directly bounds each poll's IPC cost. Per-slot errors decode as absent (same logic as
+    /// the per-attribute accessors), and a failed bulk call falls back to those accessors.
+    public func signatureAttributes() -> SignatureAttributes {
+        let names: [String] = [
+            kAXRoleAttribute as String, kAXValueAttribute as String, kAXChildrenAttribute as String
+        ]
+        var out: CFArray?
+        let err = AXUIElementCopyMultipleAttributeValues(raw, names as CFArray, AXCopyMultipleAttributeOptions(), &out)
+        guard err == .success, let values = out as? [AnyObject], values.count == names.count else {
+            return SignatureAttributes(role: role, value: value, children: children)
+        }
+
+        // A failed attribute comes back as an AXValue of type .axError (or kCFNull); treat as absent.
+        func present(_ index: Int) -> AnyObject? {
+            let candidate = values[index]
+            if CFGetTypeID(candidate) == AXValueGetTypeID(),
+               AXValueGetType(unsafeDowncast(candidate, to: AXValue.self)) == .axError { return nil }
+            if CFGetTypeID(candidate) == CFNullGetTypeID() { return nil }
+            return candidate
+        }
+        var decodedValue: String? {
+            guard let raw = present(1) else { return nil }
+            if let string = raw as? String { return string }
+            if let number = raw as? NSNumber { return number.stringValue }
+            return nil
+        }
+        var decodedChildren: [AXElement] {
+            guard let raw = present(2), let array = raw as? [AXUIElement] else { return [] }
+            return array.map(AXElement.init)
+        }
+        return SignatureAttributes(role: present(0) as? String, value: decodedValue, children: decodedChildren)
     }
 
     /// The element this (system-wide or app) element reports as focused.
@@ -473,8 +527,9 @@ public extension AXElement {
         return array.count
     }
 
-    // Disclosure (outline rows)
-    var disclosureLevel: Int? { numberAttribute("AXDisclosureLevel").map { Int($0) } }
+    // Disclosure (outline rows). Guarded conversion — plain Int(_:) traps on a NaN/±inf/huge
+    // double reported by a misbehaving app.
+    var disclosureLevel: Int? { numberAttribute("AXDisclosureLevel").flatMap(UntrustedNumeric.int) }
     var isDisclosing: Bool? {
         guard let value = copyAttribute("AXDisclosing"), CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
         return CFBooleanGetValue(unsafeDowncast(value, to: CFBoolean.self))
@@ -488,9 +543,10 @@ public extension AXElement {
         AXUIElementSetAttributeValue(raw, "AXDisclosing" as CFString, flag ? kCFBooleanTrue : kCFBooleanFalse) == .success
     }
 
-    // Collections (table/grid/outline) — efficient subset attributes (§10)
-    var rowCount: Int? { numberAttribute("AXRowCount").map { Int($0) } }
-    var columnCount: Int? { numberAttribute("AXColumnCount").map { Int($0) } }
+    // Collections (table/grid/outline) — efficient subset attributes (§10). Same guarded
+    // conversion as disclosureLevel: these counts come from another process.
+    var rowCount: Int? { numberAttribute("AXRowCount").flatMap(UntrustedNumeric.int) }
+    var columnCount: Int? { numberAttribute("AXColumnCount").flatMap(UntrustedNumeric.int) }
     var columnTitles: [String]? { copyAttribute("AXColumnTitles") as? [String] }
     var visibleRows: [AXElement]? { elementArrayAttribute("AXVisibleRows") }
     var selectedRows: [AXElement]? { elementArrayAttribute("AXSelectedRows") }

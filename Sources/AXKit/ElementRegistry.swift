@@ -20,10 +20,17 @@ public final class ElementRegistry {
         var pid: pid_t?
     }
 
+    private struct SnapshotBaseline {
+        /// Flat ref → node map: survives partial snapshots via merge instead of replace.
+        var nodesByRef: [String: ElementNode]
+        /// Start time of the pid this baseline was captured from — a bare pid can be recycled.
+        var processStartTime: UInt64?
+    }
+
     private let allocator = RefAllocator()
     private var storage: [String: Stored] = [:]
     private var elementToRef: [AXElement: String] = [:]
-    private var lastSnapshots: [pid_t: ElementNode] = [:]
+    private var lastSnapshots: [pid_t: SnapshotBaseline] = [:]
 
     // control_app state (§ tree persistence): the last walked tree per app, and child→parent
     // ref links that power parent-climb stale recovery and incremental expand.
@@ -38,6 +45,24 @@ public final class ElementRegistry {
     private var lastPruneAt = Date.distantPast
 
     public init() {}
+
+    /// Whether `pid` names a live process. kill(pid, 0) fails with EPERM for a live process we
+    /// may not signal (root-owned or SIP-protected); that must read as alive, or its state would
+    /// be evicted while the app still runs. Mirrors KillTool's alive() (AXTools.swift).
+    private static func processIsAlive(_ pid: pid_t) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    /// Incarnation stamp for a pid: process start time in microseconds since the epoch, nil when
+    /// the process is gone or unreadable. Distinguishes a reused pid from a continuing process.
+    private static func processStartTime(of pid: pid_t) -> UInt64? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
+    }
 
     public struct Match: Sendable {
         public let ref: String
@@ -70,6 +95,13 @@ public final class ElementRegistry {
         /// Nodes enqueued but never visited because the budget ran out — the part of the tree the
         /// search didn't reach (so an empty result isn't mistaken for "definitively absent").
         public var unexploredFrontier: Int
+        /// True when the walk hit `maxDepth` at a node that still had children — a depth-truncated
+        /// search can miss deeper matches even when its budget and frontier look clean.
+        public var depthLimited: Bool
+        /// Whether the search provably visited every reachable node: nothing timed out, nothing was
+        /// left on the frontier, and no subtree was cut off by the depth cap. Only an exhaustive
+        /// empty result is evidence of absence (what wait_for's `disappears` needs).
+        public var searchWasExhaustive: Bool { !budgetExhausted && unexploredFrontier == 0 && !depthLimited }
     }
 
     public enum RefResolution {
@@ -110,8 +142,11 @@ public final class ElementRegistry {
         // so we don't immediately re-pay it, and the next window resumes pruning.
         let sweepDeadline = Date().addingTimeInterval(0.5)
         var dead: [(ref: String, element: AXElement)] = []
+        var probed = 0
+        var sweepCompleted = true
         for (ref, stored) in storage {
-            if Date() >= sweepDeadline { break }
+            if Date() >= sweepDeadline { sweepCompleted = false; break }
+            probed += 1
             // A short per-probe messaging timeout so one hung element can't consume the whole
             // budget — a wall-clock check between probes can't preempt a single in-flight AX call.
             stored.element.setMessagingTimeout(1)
@@ -126,11 +161,14 @@ public final class ElementRegistry {
             controlParents[ref] = nil
             storage[ref] = nil
         }
-        // If the sweep reclaimed less than 10%, the table is mostly live — back off so the next
-        // snapshot doesn't immediately re-pay the full cross-process scan.
-        if storage.count > before - (before / 10) { pruneThreshold = storage.count + 1000 }
-        lastSnapshots = lastSnapshots.filter { kill($0.key, 0) == 0 }
-        controlTrees = controlTrees.filter { kill($0.key, 0) == 0 }
+        // Back off only on a statistically meaningful sample: a full sweep, or at least half the
+        // table. A deadline-truncated sliver finding little dead says nothing about the whole
+        // table, and ratcheting on it would raise the threshold permanently on every slow target.
+        if sweepCompleted || probed >= before / 2, probed > 0, dead.count < probed / 10 {
+            pruneThreshold = storage.count + 1000
+        }
+        lastSnapshots = lastSnapshots.filter { Self.processIsAlive($0.key) }
+        controlTrees = controlTrees.filter { Self.processIsAlive($0.key) }
     }
 
     private func match(_ ref: String, _ element: AXElement) -> Match {
@@ -194,25 +232,48 @@ public final class ElementRegistry {
     }
 
     /// Snapshot an app subtree with identity-stable refs, then attach each ref's locator.
-    public func snapshot(pid: pid_t, maxDepth: Int) -> ElementNode {
+    /// The walk is bounded by `budget` (wall clock); `partial` is true when it was cut short —
+    /// a partial tree is a prefix, so callers must not treat absence from it as removal.
+    public func snapshot(pid: pid_t, maxDepth: Int, budget: TimeInterval = 10) -> (root: ElementNode, partial: Bool) {
         pruneDeadHandlesIfLarge()
         let app = AXElement.application(pid: pid)
         app.setMessagingTimeout(5)
-        let node = AXSnapshot.build(app, maxDepth: maxDepth) { self.ref(for: $0, pid: pid) }
-        for (ref, locator) in LocatorCapture.all(in: node) where storage[ref] != nil {
+        let result = AXSnapshot.build(app, maxDepth: maxDepth,
+                                      deadline: Date().addingTimeInterval(budget)) { self.ref(for: $0, pid: pid) }
+        for (ref, locator) in LocatorCapture.all(in: result.root) where storage[ref] != nil {
             storage[ref]?.locator = locator
         }
-        return node
+        return (result.root, result.truncated)
     }
 
     /// Poll-based change feed: diff a fresh snapshot against the last one this session
     /// returned for the pid. The first call establishes the baseline (empty diff). Works
     /// without AX notifications, and the stable refs make the diff meaningful (§6).
-    public func getChanges(pid: pid_t, maxDepth: Int) -> ElementDiff {
-        let fresh = snapshot(pid: pid, maxDepth: maxDepth)
-        let diff = lastSnapshots[pid].map { Diff.compute(old: $0, new: fresh) } ?? ElementDiff()
-        lastSnapshots[pid] = fresh
-        return diff
+    /// When the fresh snapshot is partial, removals are suppressed (absence from a truncated
+    /// walk proves nothing) and the baseline is merged rather than replaced.
+    public func getChanges(pid: pid_t, maxDepth: Int) -> (diff: ElementDiff, partial: Bool) {
+        let startTime = Self.processStartTime(of: pid)
+        let (fresh, partial) = snapshot(pid: pid, maxDepth: maxDepth)
+        let freshMap = Diff.flatten(fresh)
+        let baseline = lastSnapshots[pid]
+        let sameIncarnation: Bool = {
+            guard let old = baseline?.processStartTime, let new = startTime else { return true }
+            return old == new
+        }()
+        guard sameIncarnation, let oldMap = baseline?.nodesByRef else {
+            lastSnapshots[pid] = SnapshotBaseline(nodesByRef: freshMap, processStartTime: startTime)
+            return (ElementDiff(), partial)
+        }
+        let diff = Diff.compute(oldMap: oldMap, newMap: freshMap, suppressRemovals: partial)
+        if partial {
+            // A truncated walk proves presence/changes but not absence: merge over the baseline so
+            // unreached refs aren't reported removed on the next full snapshot's diff.
+            lastSnapshots[pid]?.nodesByRef.merge(freshMap) { _, new in new }
+            lastSnapshots[pid]?.processStartTime = startTime ?? baseline?.processStartTime
+        } else {
+            lastSnapshots[pid] = SnapshotBaseline(nodesByRef: freshMap, processStartTime: startTime)
+        }
+        return (diff, partial)
     }
 
     /// Register a single element (find/focused/at), identity-stable.
@@ -294,7 +355,7 @@ public final class ElementRegistry {
 
     /// Evict trees/handles for apps that have exited — junk data once the pid is gone.
     public func evictDeadApps() {
-        let deadPids = Set(controlTrees.keys.filter { kill($0, 0) != 0 })
+        let deadPids = Set(controlTrees.keys.filter { !Self.processIsAlive($0) })
         guard !deadPids.isEmpty else { return }
         for pid in deadPids {
             controlTrees[pid] = nil
@@ -318,21 +379,26 @@ public final class ElementRegistry {
         let app = AXElement.application(pid: pid)
         app.setMessagingTimeout(5)
         var fresh: [String: AXElement] = [:]
-        let freshTree = AXSnapshot.build(app, maxDepth: 8) { element in
+        // A ~5s budget bounds the rebuild (fail-loud): a truncated rebuild can report .stale for
+        // an element that lives beyond the cut, but an unbounded walk of a huge/wedged app would
+        // stall the whole connection instead.
+        let freshTree = AXSnapshot.build(app, maxDepth: 8, deadline: Date().addingTimeInterval(5)) { element in
             let tempRef = "t\(fresh.count)"
             fresh[tempRef] = element
             return tempRef
-        }
+        }.root
         switch LocatorMatcher.resolve(locator, in: freshTree) {
         case .resolved(let tempRef):
             guard let element = fresh[tempRef] else { return .stale }
             // Re-bind the ORIGINAL ref to the live element so future calls hit the cache,
-            // instead of allocating a fresh ref and re-resolving (slow) on every call. Drop the
-            // dead element's identity-map entry first, or it leaks (it's no longer in storage,
-            // so neither prune sweep can ever reach it).
-            elementToRef[stored.element] = nil
+            // instead of allocating a fresh ref and re-resolving (slow) on every call.
+            // Drop the dead element's identity entry only if THIS ref owns it — an alias must not
+            // evict the canonical owner's mapping. (If unowned by us, the owner's own reap removes it.)
+            if elementToRef[stored.element] == ref { elementToRef[stored.element] = nil }
             storage[ref] = Stored(element: element, locator: locator, pid: pid)
-            elementToRef[element] = ref
+            // Claim identity only if unowned: a prior canonical ref stays canonical; this ref remains
+            // a working alias through its storage entry.
+            if elementToRef[element] == nil { elementToRef[element] = ref }
             return .resolved(element)
         case .ambiguous(let tempRefs):
             let candidates = tempRefs.compactMap { fresh[$0] }.map { register($0).ref }
@@ -358,7 +424,8 @@ public final class ElementRegistry {
         // walk so we never append a match the cap should have excluded (the old DFS checked first).
         guard limit > 0 else {
             return ([], FindDiagnostics(scanned: 0, elapsedMs: 0, budgetExhausted: false,
-                                        truncatedByLimit: false, unexploredFrontier: 0))
+                                        truncatedByLimit: false, unexploredFrontier: 0,
+                                        depthLimited: false))
         }
         let app = AXElement.application(pid: pid)
         app.setMessagingTimeout(5)
@@ -374,12 +441,18 @@ public final class ElementRegistry {
         var scanned = 0
         var budgetExhausted = false
         var truncated = false
+        var depthLimited = false
 
         while index < queue.count {
             if Date() >= deadline { budgetExhausted = true; break }
             let (element, depth) = queue[index]
             index += 1
             scanned += 1
+            // Short per-node messaging timeout (reverted to 0 after this node's last read): the
+            // deadline check above can't preempt an in-flight AX call, and the app element's
+            // timeout doesn't apply to children — see setMessagingTimeout's contract. Reverting
+            // matters because the registry stores this exact instance for later actions.
+            element.setMessagingTimeout(1)
             // One bulk IPC read per node (role/subrole/label-fields/value/frame/children). `actions`
             // uses a different AX API, so it's read only for a node that already passed the cheap
             // criteria (and only then gated by `actionable`).
@@ -391,25 +464,27 @@ public final class ElementRegistry {
                 url: attrs.url, actions: [], query: needle, roleFilter: roleFilter,
                 titleContains: titleNeedle, identifierFilter: identifierFilter,
                 valueContains: valueNeedle, actionable: nil)
-            if preActionPass {
-                let actions = ElementRegistry.displayActions(element)
-                if actionable != true || !actions.isEmpty {
-                    results.append(ElementRegistry.makeMatch(ref: ref(for: element, pid: pid),
-                                                             attrs: attrs, actions: actions))
-                    if results.count >= limit { truncated = true; break }
-                }
+            let actions: [String]? = preActionPass ? ElementRegistry.displayActions(element) : nil
+            element.setMessagingTimeout(0)
+            if let actions, actionable != true || !actions.isEmpty {
+                results.append(ElementRegistry.makeMatch(ref: ref(for: element, pid: pid),
+                                                         attrs: attrs, actions: actions))
+                if results.count >= limit { truncated = true; break }
             }
             if depth < maxDepth {
                 for child in attrs.children where visited.insert(child).inserted {
                     queue.append((child, depth + 1))
                 }
+            } else if !attrs.children.isEmpty {
+                depthLimited = true
             }
         }
 
         let diagnostics = FindDiagnostics(
             scanned: scanned, elapsedMs: Int(Date().timeIntervalSince(started) * 1000),
             budgetExhausted: budgetExhausted, truncatedByLimit: truncated,
-            unexploredFrontier: max(0, queue.count - index))
+            unexploredFrontier: max(0, queue.count - index),
+            depthLimited: depthLimited)
         return (results, diagnostics)
     }
 
@@ -455,21 +530,58 @@ public final class ElementRegistry {
     }
 
     /// Drive an app's menu bar by title path ("File" → "Export…" → "PDF…"), pressing each
-    /// level so lazy submenus populate before descending.
+    /// level so lazy submenus populate before descending. A mid-path failure best-effort
+    /// closes the menu it opened, so the target app isn't left with a dangling open menu.
     public func openMenu(pid: pid_t, path: [String]) -> (ok: Bool, message: String) {
         let app = AXElement.application(pid: pid)
         app.setMessagingTimeout(5)
         guard let menuBar = app.menuBar else { return (false, "no menu bar") }
         var current = menuBar
+        var openedTopLevelItem: AXElement?
         for title in path {
-            guard let match = Self.findMenuChild(in: current, title: title) else {
+            guard let match = Self.pollForMenuChild(in: current, title: title) else {
+                Self.closeDanglingMenu(from: openedTopLevelItem)
                 return (false, "menu item not found: \(title)")
             }
-            if !match.perform("AXPress") { return (false, "AXPress failed on: \(title)") }
-            Thread.sleep(forTimeInterval: 0.15)
+            if !match.perform("AXPress") {
+                Self.closeDanglingMenu(from: openedTopLevelItem)
+                return (false, "AXPress failed on: \(title)")
+            }
+            // Bounds this element's children reads on the next iteration; the per-element
+            // timeout does not extend to child references (see setMessagingTimeout contract).
+            match.setMessagingTimeout(5)
+            if openedTopLevelItem == nil { openedTopLevelItem = match }
             current = match
         }
         return (true, "opened: \(path.joined(separator: " > "))")
+    }
+
+    /// Polls for a menu child because submenus populate lazily after AXPress — a fixed
+    /// wait either wastes time on fast apps or reports spurious not-found on slow ones.
+    /// First probe runs immediately, so already-populated levels (the menu bar) pay nothing.
+    private static func pollForMenuChild(in element: AXElement, title: String,
+                                         timeout: TimeInterval = 1.0,
+                                         interval: TimeInterval = 0.05) -> AXElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if let match = findMenuChild(in: element, title: title) { return match }
+            guard Date() < deadline else { return nil }
+            Thread.sleep(forTimeInterval: interval)
+        }
+    }
+
+    /// Best-effort dismissal of a menu left open by a mid-path failure. Never alters the
+    /// error being returned to the caller.
+    private static func closeDanglingMenu(from openedTopLevelItem: AXElement?) {
+        guard let item = openedTopLevelItem else { return }
+        if let menu = item.children.first(where: { $0.role == "AXMenu" }),
+           menu.perform("AXCancel") { return }
+        if item.perform("AXCancel") { return }
+        // Press-to-toggle only while the item still reports its menu open — pressing a
+        // closed menubar item would RE-open the menu this is trying to dismiss.
+        if (item.copyAttribute(kAXSelectedAttribute) as? NSNumber)?.boolValue == true {
+            item.perform("AXPress")
+        }
     }
 
     /// Finds a child menu item by title — handles both the menu bar (AXMenuBarItem children)

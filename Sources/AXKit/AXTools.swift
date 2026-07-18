@@ -17,8 +17,8 @@ public enum AXTools {
     public static func all(
         session: ElementRegistry,
         isTrusted: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
-        click: @escaping ControlClick = { _, _, _ in },
-        type: @escaping ControlType = { _, _ in }
+        click: @escaping ControlClick,
+        type: @escaping ControlType
     ) -> [Tool] {
         [
             FindElementsTool(session: session, isTrusted: isTrusted),
@@ -53,9 +53,23 @@ func searchBudget(_ arguments: [String: Any], default fallback: Double) -> TimeI
                         default: fallback, reserveSeconds: searchToolReserveSeconds)
 }
 
+/// JSON form of a cross-process rect. NSNull when absent OR when any component is non-finite —
+/// a misbehaving app can report NaN/±inf, and plain `Int(_:)` would trap the privileged host.
 private func frameValue(_ frame: CGRect?) -> Any {
-    guard let frame else { return NSNull() }
-    return ["x": Int(frame.origin.x), "y": Int(frame.origin.y), "w": Int(frame.width), "h": Int(frame.height)]
+    guard let frame,
+          let x = UntrustedNumeric.int(frame.origin.x),
+          let y = UntrustedNumeric.int(frame.origin.y),
+          let w = UntrustedNumeric.int(frame.width),
+          let h = UntrustedNumeric.int(frame.height) else { return NSNull() }
+    return ["x": x, "y": y, "w": w, "h": h]
+}
+
+/// JSON form of a cross-process point — same non-finite screening as `frameValue`.
+private func pointValue(_ point: CGPoint?) -> Any {
+    guard let point,
+          let x = UntrustedNumeric.int(point.x),
+          let y = UntrustedNumeric.int(point.y) else { return NSNull() }
+    return ["x": x, "y": y]
 }
 
 /// Validate an untrusted JSON integer as a usable pid. `pid_t` is `Int32`, so the plain
@@ -102,6 +116,7 @@ private func actResult(
     result["ok"] = ok
     result["quiesced"] = outcome.quiesced
     result["settledAfterMs"] = outcome.settledAfterMs
+    result["diffPartial"] = outcome.diffPartial
     result["diff"] = [
         "added": outcome.diff.added,
         "removed": outcome.diff.removed,
@@ -185,7 +200,13 @@ public struct FindElementsTool: Tool {
                 "actions": match.actions,
                 "frame": frameValue(match.frame)
             ]
-            if let value = match.value, !value.isEmpty { row["value"] = value }
+            if let value = match.value, !value.isEmpty {
+                // Cap row values — a giant document body in one match would blow the payload.
+                // element_detail (with maxValueLength) is the read-more path.
+                let (capped, wasTruncated) = TextDisplay.truncated(value, limit: TextDisplay.valueLimit)
+                row["value"] = capped
+                if wasTruncated { row["valueTruncated"] = true }
+            }
             if let valueDescription = match.valueDescription, !valueDescription.isEmpty { row["valueDescription"] = valueDescription }
             if let url = match.url, !url.isEmpty { row["url"] = url }
             return row
@@ -232,7 +253,10 @@ public struct ElementDetailTool: Tool {
             "description": "Full attributes/actions/parameterized-attributes for a ref from a prior snapshot or find. Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
-                "properties": ["ref": ["type": "string"]],
+                "properties": [
+                    "ref": ["type": "string"],
+                    "maxValueLength": ["type": "integer", "description": "Cap on the returned `value` in characters (default 5000, max 100000). When the value is truncated the response carries valueTruncated/valueLength — re-call with a larger cap to read more."]
+                ],
                 "required": ["ref"]
             ]
         ]
@@ -254,20 +278,28 @@ public struct ElementDetailTool: Tool {
             return JSONText.from(["error": "stale_ref", "ref": ref,
                                "howToFix": "Re-run ui_snapshot/find_elements to refresh refs."])
         }
-        let detail: [String: Any] = [
+        let maxValueLength = min(max((arguments["maxValueLength"] as? Int) ?? 5000, 1), 100_000)
+        let rawValue = element.value ?? ""
+        let (value, valueTruncated) = TextDisplay.truncated(rawValue, limit: maxValueLength)
+        var detail: [String: Any] = [
             "ref": ref,
             "role": element.role ?? "",
             "subrole": element.subrole ?? "",
             "identifier": element.identifier ?? "",
             "title": element.title ?? "",
-            "value": element.value ?? "",
+            "value": value,
             "settable": element.isValueSettable,
             "actions": element.actions,
             "frame": frameValue(element.frame),
-            "activationPoint": element.activationPoint.map { ["x": Int($0.x), "y": Int($0.y)] } ?? NSNull(),
+            "activationPoint": pointValue(element.activationPoint),
             "attributeNames": element.attributeNames,
             "parameterizedAttributes": element.parameterizedAttributeNames
         ]
+        if valueTruncated {
+            detail["valueTruncated"] = true
+            detail["valueLength"] = rawValue.count
+            detail["howToReadMore"] = "Re-call element_detail with a larger maxValueLength (up to 100000)."
+        }
         return JSONText.from(detail)
     }
 }
@@ -323,7 +355,8 @@ public struct ElementAtTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return permissionError }
-        guard let x = arguments["x"] as? NSNumber, let y = arguments["y"] as? NSNumber else {
+        guard let x = ToolArguments.strictNumber(arguments, for: "x"),
+              let y = ToolArguments.strictNumber(arguments, for: "y") else {
             return #"{"error":"missing_coordinates"}"#
         }
         guard let match = session.elementAt(x: x.floatValue, y: y.floatValue) else {
@@ -521,6 +554,9 @@ public struct WaitForTool: Tool {
         } else {
             result["matchRef"] = NSNull()
         }
+        if outcome.lastSearchInconclusive {
+            result["hint"] = "Timed out UNCONFIRMED: the last poll could not exhaustively walk the tree, so the element may merely be unreached rather than absent."
+        }
         return JSONText.from(result)
     }
 }
@@ -632,6 +668,7 @@ public struct OpenMenuTool: Tool {
             "message": result.message,
             "quiesced": outcome.quiesced,
             "settledAfterMs": outcome.settledAfterMs,
+            "diffPartial": outcome.diffPartial,
             "diff": [
                 "added": outcome.diff.added,
                 "removed": outcome.diff.removed,
@@ -655,7 +692,7 @@ public struct GetChangesTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Diff the app's UI against the last get_changes/snapshot (added/removed/changed by ref). First call is the baseline. Requires Accessibility.",
+            "description": "Diff the app's UI against the last get_changes/snapshot (added/removed/changed by ref). First call is the baseline. `partial: true` means the walk hit its time budget: removals are suppressed (unreached ≠ removed) and unreached elements may be missing. Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
                 "properties": ["pid": ["type": "integer"], "depth": ["type": "integer"]],
@@ -669,12 +706,17 @@ public struct GetChangesTool: Tool {
         guard let pidValue = arguments["pid"] as? Int else { return #"{"error":"missing_pid"}"# }
         guard let pid = validPid(pidValue) else { return #"{"error":"invalid_pid"}"# }
         let depth = (arguments["depth"] as? Int) ?? 4
-        let diff = session.getChanges(pid: pid, maxDepth: depth)
-        return JSONText.from([
+        let (diff, partial) = session.getChanges(pid: pid, maxDepth: depth)
+        var result: [String: Any] = [
             "added": diff.added,
             "removed": diff.removed,
-            "changed": diff.changed.map { ["ref": $0.ref, "was": $0.was, "now": $0.now] }
-        ])
+            "changed": diff.changed.map { ["ref": $0.ref, "was": $0.was, "now": $0.now] },
+            "partial": partial
+        ]
+        if partial {
+            result["hint"] = "partial snapshot: removals suppressed; unreached elements may be missing — narrow with control_app or retry"
+        }
+        return JSONText.from(result)
     }
 }
 
@@ -795,7 +837,10 @@ public struct KillTool: Tool {
             // Signals are async — give the process a moment to actually exit before reporting state.
             let deadline = Date().addingTimeInterval(1.5)
             while alive(), Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
-            return JSONText.from(["success": true, "pid": Int(pid), "signal": label, "stillRunning": alive()])
+            // ONE liveness read for the whole report — two reads can straddle the exit and
+            // produce a self-contradictory payload (success:true + stillRunning:true).
+            let stillRunning = alive()
+            return JSONText.from(["success": !stillRunning, "pid": Int(pid), "signal": label, "stillRunning": stillRunning])
         }
 
         // Graceful escalation: each rung gets up to 2s to take effect before the next. Failing fast
@@ -809,6 +854,9 @@ public struct KillTool: Tool {
                 return JSONText.from(["success": true, "pid": Int(pid), "terminatedWith": label])
             }
         }
-        return JSONText.from(["success": !alive(), "pid": Int(pid), "stillRunning": alive()])
+        // ONE liveness read for the whole report — two reads can straddle the exit and produce
+        // a self-contradictory payload (success:true + stillRunning:true).
+        let stillRunning = alive()
+        return JSONText.from(["success": !stillRunning, "pid": Int(pid), "stillRunning": stillRunning])
     }
 }

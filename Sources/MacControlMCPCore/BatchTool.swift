@@ -21,6 +21,10 @@ public struct BatchTool: Tool {
     /// wedge the transport; on overrun the batch stops and reports what completed.
     private let overallBudget: TimeInterval
 
+    /// A step admitted with less than this much budget left would be clamped to a useless sliver;
+    /// report batch_timeout instead so the caller sees an honest partial result.
+    private static let minimumStepSeconds: TimeInterval = 1
+
     public init(overallBudget: TimeInterval = 45,
                 dispatch: @escaping (String, [String: Any]) -> String) {
         self.overallBudget = overallBudget
@@ -60,14 +64,19 @@ public struct BatchTool: Tool {
         }
         let stopOnError = (arguments["stopOnError"] as? Bool) ?? true
         let pauseMs = max(0, (arguments["pauseMs"] as? Int) ?? 0)
-        let deadline = Date().addingTimeInterval(overallBudget)
+        // `timeout` is the work budget DeferringTool injected after splitting off the defer wait
+        // (or the caller's own total when the batch didn't defer) — the batch must fit inside it.
+        let callerBudget = ToolArguments.double(arguments, for: "timeout")
+        let budget = min(overallBudget, callerBudget ?? overallBudget)
+        let deadline = Date().addingTimeInterval(budget)
 
         var results: [[String: Any]] = []
         var failedAt: Int?
         var aborted = false
 
         for (index, step) in steps.enumerated() {
-            if Date() >= deadline {
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining < Self.minimumStepSeconds {
                 results.append(["step": index, "ok": false, "error": "batch_timeout"])
                 failedAt = failedAt ?? index
                 aborted = true
@@ -87,7 +96,9 @@ public struct BatchTool: Tool {
             }
 
             let stepArguments = (step["arguments"] as? [String: Any]) ?? [:]
-            let raw = dispatch(toolName, stepArguments)
+            // Scope-ceiling the step so its own clamped timeout can never exceed what's left of
+            // the batch's budget.
+            let raw = ToolTimeout.withScopeCeiling(remaining) { dispatch(toolName, stepArguments) }
             let failed = BatchTool.stepFailed(raw)
             results.append(["step": index, "tool": toolName, "ok": !failed, "result": BatchTool.parse(raw)])
             if failed {

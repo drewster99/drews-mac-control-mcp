@@ -14,7 +14,7 @@ import ApplicationServices
 import Foundation
 import MacControlMCPCore
 
-private let controlPermissionError = #"{"error":"accessibility_not_granted","howToFix":"Grant Accessibility to the host in System Settings ‣ Privacy & Security ‣ Accessibility","deepLink":"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"}"#
+private let controlPermissionError = #"{"success":false,"error":"accessibility_not_granted","howToFix":"Grant Accessibility to the host in System Settings ‣ Privacy & Security ‣ Accessibility","deepLink":"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"}"#
 
 /// Synthetic input (click/type) needs post-event access, a separate preflight from AX trust.
 private let controlPostEventError = #"{"success":false,"error":"post_event_access_denied","howToFix":"Grant Accessibility (post-event access) to the host in System Settings ‣ Privacy & Security ‣ Accessibility"}"#
@@ -96,7 +96,18 @@ private func refreshScopeProp() -> [String: Any] {
         "description": "Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · none (just {ok})."
     ]
 }
-private func refreshScope(_ arguments: [String: Any]) -> String { (arguments["refresh"] as? String) ?? "parent" }
+/// The requested post-action refresh scope: absent → "parent" (the default); present but not one
+/// of parent/window/none → nil, so the verb can reject the request BEFORE acting — a typo like
+/// refresh:"widnow" must not silently perform the action with the default scope.
+private func refreshScope(_ arguments: [String: Any]) -> String? {
+    guard let raw = arguments["refresh"] as? String else { return "parent" }
+    return ["parent", "window", "none"].contains(raw) ? raw : nil
+}
+
+/// The shared rejection for a `refresh` value outside parent/window/none.
+private func invalidRefreshScopeError() -> String {
+    JSONText.from(["success": false, "error": "invalid_refresh_scope", "valid": ["parent", "window", "none"]])
+}
 
 /// Best-effort launch for control_app's auto-launch: open `identity` (a bundle id, app name, or
 /// .app path) via `/usr/bin/open`, then wait until it resolves to a running app with a window (or
@@ -313,6 +324,8 @@ public struct ControlActionTool: Tool {
         guard let ref = arguments["ref"] as? String, let action = arguments["action"] as? String else {
             return JSONText.from(["success": false, "error": "missing_ref_or_action"])
         }
+        // Validate-before-act: a malformed refresh scope must fail here, not after the action fired.
+        guard let scope = refreshScope(arguments) else { return invalidRefreshScopeError() }
         switch resolveRef(registry, ref) {
         case .error(let json):
             return json
@@ -337,7 +350,7 @@ public struct ControlActionTool: Tool {
             }
             return actedResponse(registry, ref: ref, deadline: Date().addingTimeInterval(4),
                                  base: ["success": ok, "ok": ok, "ref": ref, "action": action],
-                                 scope: refreshScope(arguments))
+                                 scope: scope)
         }
     }
 }
@@ -372,6 +385,8 @@ public struct ChangeTextTool: Tool {
         guard let ref = arguments["ref"] as? String, let value = arguments["value"] as? String else {
             return JSONText.from(["success": false, "error": "missing_ref_or_value"])
         }
+        // Validate-before-act: a malformed refresh scope must fail here, not after the write.
+        guard let scope = refreshScope(arguments) else { return invalidRefreshScopeError() }
         switch resolveRef(registry, ref) {
         case .error(let json):
             return json
@@ -388,7 +403,7 @@ public struct ChangeTextTool: Tool {
             }
             return actedResponse(registry, ref: ref, deadline: Date().addingTimeInterval(4),
                                  base: ["success": ok, "ok": ok, "ref": ref],
-                                 scope: refreshScope(arguments))
+                                 scope: scope)
         }
     }
 }
@@ -423,6 +438,8 @@ public struct ChangeValueTool: Tool {
         guard let ref = arguments["ref"] as? String, let value = ToolArguments.double(arguments, for: "value") else {
             return JSONText.from(["success": false, "error": "missing_ref_or_value"])
         }
+        // Validate-before-act: a malformed refresh scope must fail here, not after the write.
+        guard let scope = refreshScope(arguments) else { return invalidRefreshScopeError() }
         switch resolveRef(registry, ref) {
         case .error(let json):
             return json
@@ -448,7 +465,7 @@ public struct ChangeValueTool: Tool {
             }
             return actedResponse(registry, ref: ref, deadline: Date().addingTimeInterval(4),
                                  base: ["success": ok, "ok": ok, "ref": ref, "value": value],
-                                 scope: refreshScope(arguments))
+                                 scope: scope)
         }
     }
 }
@@ -456,12 +473,31 @@ public struct ChangeValueTool: Tool {
 // MARK: - click (real synthetic click by ref — for surfaces where AXPress misbehaves)
 
 /// A synthetic left-click at top-left screen coordinates (`count`: 1=single, 2=double, 3=triple).
-/// Injected from HostKit (which owns InputKit) so AXKit stays free of the synthetic-input layer.
-public typealias ControlClick = @Sendable (_ x: Double, _ y: Double, _ count: Int) -> Void
+/// Returns whether every click event was created and posted. Injected from HostKit (which owns
+/// InputKit) so AXKit stays free of the synthetic-input layer.
+public typealias ControlClick = @Sendable (_ x: Double, _ y: Double, _ count: Int) -> Bool
+
+/// Outcome of one synthetic text entry through the injected seam.
+public struct TypeOutcome: Sendable {
+    /// Every CGEvent was created and posted (keys: all characters; paste: the ⌘V chord).
+    public let posted: Bool
+    /// Keystroke path: characters actually posted (nil on the paste path).
+    public let typedCharacters: Int?
+    /// Paste path details; nil on the keystroke path.
+    public let paste: PasteOutcome?
+
+    public init(posted: Bool, typedCharacters: Int?, paste: PasteOutcome?) {
+        self.posted = posted
+        self.typedCharacters = typedCharacters
+        self.paste = paste
+    }
+}
 
 /// Synthetic text entry — real keystrokes (`paste == false`) or clipboard ⌘V (`paste == true`).
-/// Injected from HostKit so AXKit stays free of the synthetic-input layer.
-public typealias ControlType = @Sendable (_ text: String, _ paste: Bool) -> Void
+/// `consumed` (paste only): a lock-free probe returning true once the target visibly received
+/// the text, letting the clipboard be restored early. Injected from HostKit so AXKit stays free
+/// of the synthetic-input layer.
+public typealias ControlType = @Sendable (_ text: String, _ paste: Bool, _ consumed: (@Sendable () -> Bool)?) -> TypeOutcome
 
 public struct ClickRefTool: Tool {
     private let registry: ElementRegistry
@@ -469,7 +505,7 @@ public struct ClickRefTool: Tool {
     private let click: ControlClick
 
     public init(registry: ElementRegistry, isTrusted: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
-                click: @escaping ControlClick = { _, _, _ in }) {
+                click: @escaping ControlClick) {
         self.registry = registry
         self.isTrusted = isTrusted
         self.click = click
@@ -499,12 +535,18 @@ public struct ClickRefTool: Tool {
         guard let ref = arguments["ref"] as? String else {
             return JSONText.from(["success": false, "error": "missing_ref"])
         }
+        // Validate-before-act: a malformed refresh scope must fail here, not after the click posted.
+        guard let scope = refreshScope(arguments) else { return invalidRefreshScopeError() }
         switch resolveRef(registry, ref) {
         case .error(let json):
             return json
         case .element(let element):
-            // AXActivationPoint is the canonical spot; fall back to the frame center.
-            guard let point = element.activationPoint ?? element.frame.map({ CGPoint(x: $0.midX, y: $0.midY) }) else {
+            // AXActivationPoint is the canonical spot; fall back to the frame center. The guarded
+            // conversions double as a screen: never synthesize a click from NaN/±inf coordinates a
+            // misbehaving app reported.
+            guard let point = element.activationPoint ?? element.frame.map({ CGPoint(x: $0.midX, y: $0.midY) }),
+                  let reportedX = UntrustedNumeric.int(point.x),
+                  let reportedY = UntrustedNumeric.int(point.y) else {
                 return JSONText.from(["success": false, "error": "no_activation_point", "ref": ref])
             }
             let pid = element.pid
@@ -518,19 +560,24 @@ public struct ClickRefTool: Tool {
             // Clamp to the documented 1...3 range (like click_point) so a bad argument can't
             // post millions of real clicks and wedge the host.
             let count = min(3, max(1, (arguments["count"] as? Int) ?? 1))
-            let perform: () -> Void = { click(Double(point.x), Double(point.y), count) }
+            // SettleEngine.actAndSettle runs the action synchronously, so the capture is safe.
+            var clicked = false
+            let perform: () -> Void = { clicked = click(Double(point.x), Double(point.y), count) }
             if let pid {
                 _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: perform)
             } else {
                 perform()
             }
+            guard clicked else {
+                return JSONText.from(["success": false, "error": "event_creation_failed", "ref": ref])
+            }
             // `success` here means the click was POSTED — synthetic input returns no acknowledgment,
             // so it can't confirm the click landed (it may be consumed by activation or miss an
             // off-screen target). The caller should verify the effect in the returned hierarchy.
             return actedResponse(registry, ref: ref, deadline: Date().addingTimeInterval(4),
-                                 base: ["success": true, "ref": ref, "x": Int(point.x), "y": Int(point.y),
+                                 base: ["success": true, "ref": ref, "x": reportedX, "y": reportedY,
                                         "note": "Click posted at the activation point; synthetic clicks aren't acknowledged — verify the effect in the returned hierarchy."],
-                                 scope: refreshScope(arguments))
+                                 scope: scope)
         }
     }
 }
@@ -567,6 +614,22 @@ private func axInsertText(_ element: AXElement, _ text: String) -> Bool {
     return true
 }
 
+/// True the moment the element's AXValue differs from `baseline`, polling every 0.1s up to
+/// `window`. The settle signature is depth-limited, so a deep field's late-draining keystrokes
+/// are invisible to it — this re-polls the element itself before the paste retry declares the
+/// keys a no-op. A nil re-read (element died or AX errored) counts as moved: the likeliest
+/// cause is that the keys landed and changed the UI, and a blind global ⌘V retry would paste
+/// into whatever now has focus.
+private func valueMoved(_ element: AXElement, from baseline: String, within window: TimeInterval) -> Bool {
+    let deadline = Date().addingTimeInterval(window)
+    while true {
+        guard let current = element.value else { return true }
+        if current != baseline { return true }
+        if Date() >= deadline { return false }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+}
+
 public struct TypeTool: Tool {
     private let registry: ElementRegistry
     private let isTrusted: @Sendable () -> Bool
@@ -574,7 +637,7 @@ public struct TypeTool: Tool {
     private let click: ControlClick
 
     public init(registry: ElementRegistry, isTrusted: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
-                type: @escaping ControlType = { _, _ in }, click: @escaping ControlClick = { _, _, _ in }) {
+                type: @escaping ControlType, click: @escaping ControlClick) {
         self.registry = registry
         self.isTrusted = isTrusted
         self.type = type
@@ -586,7 +649,7 @@ public struct TypeTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Enter text into a field. With `ref`: first tries a direct Accessibility insert (replaces the selection / inserts at the caret — no click, no clipboard); if the element doesn't support that, it clicks the field to focus it (so don't point it at buttons — a click would press them) and types keystrokes, falling back to clipboard paste if the keystrokes don't register (AppKit text views). The response's `via` says which path ran: \"ax\" (Accessibility insert), \"keys\" (synthetic keystrokes), or \"paste\" (clipboard ⌘V); `focused` reports whether the element held focus on the keystroke path. Without `ref`: types into whatever is currently focused. via=paste forces the clipboard path. Requires Accessibility.",
+            "description": "Enter text into a field. With `ref`: first tries a direct Accessibility insert (replaces the selection / inserts at the caret — no click, no clipboard); if the element doesn't support that, it clicks the field to focus it (so don't point it at buttons — a click would press them) and types keystrokes, falling back to clipboard paste if the keystrokes don't register (AppKit text views). The response's `via` says which path ran: \"ax\" (Accessibility insert), \"keys\" (synthetic keystrokes), \"paste\" (clipboard ⌘V), or \"paste_retry\" (the keystrokes read as a no-op, so the clipboard ⌘V fallback fired); `focused` reports whether the element held focus on the keystroke path. Without `ref`: types into whatever is currently focused. via=paste forces the clipboard path. Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -606,11 +669,22 @@ public struct TypeTool: Tool {
         guard let text = arguments["text"] as? String else {
             return JSONText.from(["success": false, "error": "missing_text"])
         }
+        // Validate-before-act: a malformed refresh scope must fail here, not after text was typed.
+        guard let scope = refreshScope(arguments) else { return invalidRefreshScopeError() }
         let paste = (arguments["via"] as? String) == "paste"
-        guard let ref = arguments["ref"] as? String else {
+        guard let refArgument = arguments["ref"] else {
             // No target: type into whatever is currently focused.
-            type(text, paste)
-            return JSONText.from(["success": true, "chars": text.count])
+            let outcome = type(text, paste, nil)
+            var result: [String: Any] = ["success": outcome.posted,
+                                         "chars": outcome.typedCharacters ?? text.count]
+            if !outcome.posted { result["error"] = "event_creation_failed" }
+            return JSONText.from(result)
+        }
+        guard let ref = refArgument as? String else {
+            // A present-but-non-string ref (including NSNull) must not degrade to the no-ref
+            // path: typing into whatever holds global focus would be silent misdirected input.
+            return JSONText.from(["success": false, "error": "invalid_ref_type",
+                                "howToFix": "`ref` must be a string from a prior snapshot/find; omit it entirely to type into the current focus."])
         }
         switch resolveRef(registry, ref) {
         case .error(let json):
@@ -630,7 +704,7 @@ public struct TypeTool: Tool {
                 if acted {
                     return actedResponse(registry, ref: ref, deadline: Date().addingTimeInterval(4),
                                          base: ["success": true, "ref": ref, "chars": text.count, "via": "ax"],
-                                         scope: refreshScope(arguments))
+                                         scope: scope)
                 }
             }
             // FALLBACK — synthetic keys only reach the KEY app, and macOS 14 won't let a background
@@ -644,7 +718,7 @@ public struct TypeTool: Tool {
             let clickable = element.activationPoint
             let safeToClick = isTextInput(element) || element.actions.isEmpty
             if let point = clickable, safeToClick {
-                click(Double(point.x), Double(point.y), 1)     // raises app to key + focuses a field
+                _ = click(Double(point.x), Double(point.y), 1) // raises app to key + focuses a field
                 Thread.sleep(forTimeInterval: 0.25)
             } else {
                 element.window?.perform("AXRaise")             // make the window key for setFocused
@@ -658,25 +732,41 @@ public struct TypeTool: Tool {
             // that visibly never landed can be reported rather than passed off as a silent success.
             let canVerify = isTextInput(element) || element.isValueSettable
             let before = canVerify ? element.value : nil
+            // Paste-consumption probe: the moment the element's value moves off the baseline, the
+            // clipboard can be restored early. Must stay a bare AX read — it runs under pasteLock.
+            var consumedProbe: (@Sendable () -> Bool)?
+            if canVerify, before != nil {
+                consumedProbe = { @Sendable in element.value != before }
+            }
+            // Assignment inside the actAndSettle action closure is fine — it runs synchronously.
+            var typeOutcome: TypeOutcome?
             if let pid = element.pid {
-                _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { type(text, paste) })
+                _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { typeOutcome = type(text, paste, consumedProbe) })
             } else {
-                type(text, paste)
+                typeOutcome = type(text, paste, consumedProbe)
             }
             var usedVia = paste ? "paste" : "keys"
             // Only treat keys as a no-op when we actually READ a baseline value. If the element
             // exposes no readable AXValue, `before` is nil and `nil == nil` would falsely fire the
             // paste — double-typing the text. Require a real baseline, and settle the paste too.
             // `!paste` keeps the retry off the forced-paste path, which has nothing to fall back to.
-            if !paste, canVerify, let baseline = before, element.value == baseline {
+            // valueMoved re-polls the element itself (up to 0.8s) because the settle signature is
+            // depth-limited and can close before slow keystrokes finish draining — retrying then
+            // would double-type. Secure fields are excluded by SUBROLE (their role is a plain
+            // AXTextField): their AXValue is redacted, so "unchanged" is meaningless and a blind
+            // ⌘V retry would double-enter the secret.
+            if !paste, canVerify, element.subrole != "AXSecureTextField", let baseline = before,
+               !valueMoved(element, from: baseline, within: 0.8) {
                 if let pid = element.pid {
-                    _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { type(text, true) })
+                    _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { typeOutcome = type(text, true, consumedProbe) })
                 } else {
-                    type(text, true)
+                    typeOutcome = type(text, true, consumedProbe)
                 }
-                usedVia = "paste"
+                usedVia = "paste_retry"
             }
-            var base: [String: Any] = ["success": true, "ref": ref, "chars": text.count,
+            let pasted = usedVia == "paste" || usedVia == "paste_retry"
+            var base: [String: Any] = ["success": typeOutcome?.posted ?? false, "ref": ref,
+                                       "chars": typeOutcome?.typedCharacters ?? text.count,
                                        "focused": focused, "via": usedVia]
             if !focused {
                 base["note"] = "Typed after bringing the app forward, but this element isn't a focusable text field, so input went to the app's current key field (not necessarily this element). Verify via the hierarchy; target an {editable} ref for precise entry."
@@ -685,11 +775,22 @@ public struct TypeTool: Tool {
             // moved, say so rather than reporting silent success. (Pasting text identical to the
             // existing value also trips this — hence a note, not a failure.) The not-focused note
             // above is the more actionable diagnosis, so it wins when both apply.
-            if usedVia == "paste", canVerify, let baseline = before, element.value == baseline, base["note"] == nil {
+            if pasted, canVerify, let baseline = before, element.value == baseline, base["note"] == nil {
                 base["note"] = "The field's value did not change after the clipboard paste; the ⌘V may not have reached this element. Verify via the hierarchy."
             }
+            if usedVia == "paste_retry", base["note"] == nil, let baseline = before,
+               let after = element.value, after == baseline + text + text {
+                base["note"] = "The keystrokes appear to have landed late and the paste retry landed too — the text appears twice. Use change_text to repair."
+            }
+            if let pasteDetails = typeOutcome?.paste {
+                base["clipboardRestore"] = pasteDetails.clipboardRestore.rawValue
+                base["clipboardHeldMs"] = pasteDetails.heldMs
+                if pasteDetails.clipboardRestore == .failed {
+                    base["clipboardWarning"] = "The user's previous clipboard contents could not be restored and were lost."
+                }
+            }
             return actedResponse(registry, ref: ref, deadline: Date().addingTimeInterval(4),
-                                 base: base, scope: refreshScope(arguments))
+                                 base: base, scope: scope)
         }
     }
 }
@@ -1114,8 +1215,8 @@ public enum ControlAppTools {
     public static func all(
         registry: ElementRegistry,
         isTrusted: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
-        click: @escaping ControlClick = { _, _, _ in },
-        type: @escaping ControlType = { _, _ in }
+        click: @escaping ControlClick,
+        type: @escaping ControlType
     ) -> [Tool] {
         [
             AppTool(registry: registry, isTrusted: isTrusted),

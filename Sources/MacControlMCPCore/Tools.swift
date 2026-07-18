@@ -51,6 +51,15 @@ public enum ToolArguments {
     public static func double(_ arguments: [String: Any], for key: String) -> Double? {
         (arguments[key] as? NSNumber)?.doubleValue
     }
+
+    /// Strict JSON-number extraction. JSONSerialization bridges JSON true/false to NSNumber 0/1,
+    /// so without the CFBoolean check {"x": true} would click at x=1 (`as? Bool` can't detect
+    /// this either — numeric 0/1 NSNumbers bridge to Bool too).
+    public static func strictNumber(_ arguments: [String: Any], for key: String) -> NSNumber? {
+        guard let number = arguments[key] as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        return number
+    }
 }
 
 /// Carries captured subprocess bytes back from the background read queue. Safe because all access
@@ -59,15 +68,19 @@ private final class DataBox: @unchecked Sendable { var data = Data() }
 
 /// Minimal hardened subprocess runner (simctl, /usr/bin/open): every variant enforces a hard deadline
 /// so a wedged child can never block a caller — or, in the host, hold the request lock — forever.
-/// Public so AXKit/relay callers share one runner instead of growing bare `Process` uses.
+/// `runDiscardingOutput` is public so AXKit/relay callers share one hardened runner instead of
+/// growing bare `Process` uses; `run`/`runFull` stay internal — they capture output, which host-side
+/// tools need but out-of-process callers must never inherit.
 public enum Shell {
     /// Default hard timeout for a child process. A wedged `simctl` (a real CoreSimulator failure
     /// mode) must not block the caller — and, in the host, must not hold the request lock — forever.
     static let defaultTimeout: TimeInterval = 30
 
-    static func run(_ launchPath: String, _ arguments: [String]) -> String {
-        let (_, data) = runWithTimeout(launchPath, arguments, captureStderr: false, timeout: defaultTimeout)
-        return String(decoding: data, as: UTF8.self)
+    /// Runs a subprocess, returning exit status and captured stdout. Status -1 means the child was
+    /// never spawned, so callers can distinguish "tool absent" from "empty result".
+    static func run(_ launchPath: String, _ arguments: [String]) -> (status: Int32, output: String) {
+        let (status, data) = runWithTimeout(launchPath, arguments, captureStderr: false, timeout: defaultTimeout)
+        return (status, String(decoding: data, as: UTF8.self))
     }
 
     /// Runs a subprocess, returning exit status and combined stdout+stderr.
@@ -110,7 +123,10 @@ public enum Shell {
         if exited.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
             if exited.wait(timeout: .now() + 2) == .timedOut {
-                kill(process.processIdentifier, SIGKILL)
+                // Guard the SIGKILL on liveness: until Foundation reaps the child its pid is
+                // zombie-reserved, and isRunning flips false at that reap — this closes the
+                // pid-reuse window down to the instructions between the read and the kill.
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
                 exited.wait()
             }
         }
@@ -159,7 +175,10 @@ public enum Shell {
             // succeeded it consumed the semaphore's single signal, and a further wait would block
             // forever. SIGKILL can't be caught, so this wait is bounded in practice.
             if exited.wait(timeout: .now() + 2) == .timedOut {
-                kill(process.processIdentifier, SIGKILL)
+                // Guard the SIGKILL on liveness: until Foundation reaps the child its pid is
+                // zombie-reserved, and isRunning flips false at that reap — this closes the
+                // pid-reuse window down to the instructions between the read and the kill.
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
                 exited.wait()
             }
             return .timedOut
@@ -207,10 +226,15 @@ public struct ListSimulatorsTool: Tool {
     }
 
     public func call(_ arguments: [String: Any]) -> String {
-        let output = Shell.run("/usr/bin/xcrun", ["simctl", "list", "devices", "booted", "-j"])
+        let (status, output) = Shell.run("/usr/bin/xcrun", ["simctl", "list", "devices", "booted", "-j"])
+        guard status == 0 else {
+            return JSONText.from(["error": "simctl failed (status \(status)); is Xcode installed?"])
+        }
         guard let data = output.data(using: .utf8),
               let root = JSONText.object(data) as? [String: Any],
-              let devices = root["devices"] as? [String: Any] else { return "[]" }
+              let devices = root["devices"] as? [String: Any] else {
+            return JSONText.from(["error": "unparseable simctl output"])
+        }
 
         var rows: [[String: Any]] = []
         for (runtime, value) in devices {
@@ -319,7 +343,7 @@ public struct OpenTool: Tool {
         // URLs are exempt: `https://…` contains slashes, so isPath is true, yet it is not a
         // filesystem path. The with-application form passes the target straight through as an operand
         // without invocation()'s URL check, so the exemption has to live here too.
-        if !looksLikeURL(target), isRelativePath(target) {
+        if !OperandSyntax.looksLikeURL(target), isRelativePath(target) {
             return JSONText.from([
                 "ok": false, "target": target, "error": "relative_path",
                 "howToFix": "Pass an absolute path (starting with / or ~/). The server runs with its own working directory and cannot resolve paths relative to yours."
@@ -343,7 +367,7 @@ public struct OpenTool: Tool {
             return Invocation(form: "with-application", arguments: arguments)
         }
         // URL before path: an `http://…` target contains slashes but must open as a URL, not a file.
-        if looksLikeURL(target) {
+        if OperandSyntax.looksLikeURL(target) {
             arguments += ["-u", target]   // `-u` opens it as a URL even if it also matches a filepath.
             return Invocation(form: "url", arguments: arguments)
         }
@@ -388,10 +412,14 @@ public struct OpenTool: Tool {
         path.hasPrefix("~") ? (path as NSString).expandingTildeInPath : path
     }
 
-    /// True when `string` begins with a URL scheme (`scheme:` where scheme is a letter followed by
-    /// letters/digits/`+`/`.`/`-`). Paths are classified first, so a path containing a colon never
-    /// reaches here.
-    private func looksLikeURL(_ string: String) -> Bool {
+}
+
+/// Shared operand-syntax checks used to keep caller-supplied strings from being
+/// parsed as subprocess options (a leading `-` can never satisfy these grammars).
+enum OperandSyntax {
+    /// True when `string` begins with a URL scheme (`scheme:` where scheme is a letter
+    /// followed by letters/digits/`+`/`.`/`-`).
+    static func looksLikeURL(_ string: String) -> Bool {
         guard let colon = string.firstIndex(of: ":") else { return false }
         let scheme = string[string.startIndex..<colon]
         guard let first = scheme.first, first.isLetter else { return false }

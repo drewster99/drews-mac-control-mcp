@@ -28,7 +28,6 @@ public struct AppSummary: Equatable, Sendable {
     public let pid: Int
     public let bundleId: String
     public let windows: [String]
-    public let otherWindowCount: Int
     public let menus: [String]          // top-level menu titles only; items load when a menu is opened
     public let activeWindow: Window?
 }
@@ -55,11 +54,8 @@ public enum AppProjection {
         let activeWindow = active.map {
             AppSummary.Window(title: oneLine($0.label ?? "(untitled)"), groups: groups(in: $0))
         }
-        let shownWindows = active.flatMap { $0.label }.map { [$0] } ?? Array(windowTitles.prefix(1))
-        let remaining = max(0, windowTitles.count - shownWindows.count)
-
         return AppSummary(name: name, pid: pid, bundleId: bundleId,
-                          windows: windowTitles.map { oneLine($0) }, otherWindowCount: remaining,
+                          windows: windowTitles.map { oneLine($0) },
                           menus: menuTitles(in: tree), activeWindow: activeWindow)
     }
 

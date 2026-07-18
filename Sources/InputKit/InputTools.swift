@@ -28,6 +28,10 @@ public enum InputTools {
 
 private let postEventError = #"{"error":"post_event_access_denied","howToFix":"Grant Accessibility to the host in System Settings ‣ Privacy & Security ‣ Accessibility (synthetic input rides this grant).","deepLink":"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"}"#
 
+/// CGEvent creation returned nil, so nothing was posted — reported loudly instead of pretending
+/// the input landed.
+private let postFailure = #"{"ok":false,"error":"event_creation_failed","howToFix":"CGEvent creation returned nil; the event was not posted. Retry; if it persists, the host may be resource-starved."}"#
+
 /// Schema fragments shared by every input tool so a caller can opt into act-and-settle (§6).
 /// Functions (not global lets) to stay clear of Swift 6's shared-mutable-global rule for the
 /// non-Sendable [String: Any] dictionaries.
@@ -49,16 +53,28 @@ private func okJSON(_ extra: [String: Any]) -> String {
 /// observe:"settle" + a target `pid` and the host injected a settle engine — returning the
 /// post-action diff, mirroring the AX act verbs. Otherwise it's post-and-return (unchanged).
 private func settledResult(_ settle: ActAndSettle?, _ arguments: [String: Any],
-                           base: [String: Any], post: () -> Void) -> String {
-    guard (arguments["observe"] as? String) == "settle",
-          let settle, let pidValue = arguments["pid"] as? Int,
-          let pid = pid_t(exactly: pidValue), pid > 0 else {
-        // No settle requested, or an out-of-range pid (which would trap on Int32 narrowing):
-        // degrade to post-and-return rather than aborting the host.
-        post()
+                           base: [String: Any], post: () -> Bool) -> String {
+    guard (arguments["observe"] as? String) == "settle" else {
+        guard post() else { return postFailure }
         return okJSON(base)
     }
-    let outcome = settle(pid) { post() }
+    // Settle was requested: validate the whole request BEFORE posting — a bad request must
+    // never half-execute (post the event, then error about the settle it skipped).
+    guard let settle else {
+        return #"{"ok":false,"error":"settle_unavailable","howToFix":"This host was built without a settle engine. Retry with observe:\"none\" (or omit observe)."}"#
+    }
+    guard let pidValue = arguments["pid"] as? Int else {
+        return #"{"ok":false,"error":"observe_settle_requires_pid"}"#
+    }
+    // pid_t is Int32; the plain conversion would trap on an out-of-range value and abort the host.
+    guard let pid = pid_t(exactly: pidValue), pid > 0 else {
+        return #"{"ok":false,"error":"invalid_pid"}"#
+    }
+    // Tri-state on purpose: an injected fake settle engine may never run the action, leaving
+    // `posted` nil — only a CONFIRMED false (the action ran and event creation failed) is an error.
+    var posted: Bool?
+    let outcome = settle(pid) { posted = post() }
+    if posted == false { return postFailure }
     var dict: [String: Any] = ["ok": true]
     for (key, value) in base { dict[key] = value }
     dict["quiesced"] = outcome.quiesced
@@ -101,7 +117,8 @@ public struct ClickTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard canPostEvents() else { return postEventError }
-        guard let x = arguments["x"] as? NSNumber, let y = arguments["y"] as? NSNumber else {
+        guard let x = ToolArguments.strictNumber(arguments, for: "x"),
+              let y = ToolArguments.strictNumber(arguments, for: "y") else {
             return #"{"error":"missing_coordinates"}"#
         }
         let rightButton = (arguments["button"] as? String) == "right"
@@ -142,8 +159,10 @@ public struct ScrollTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard canPostEvents() else { return postEventError }
-        guard let dy = arguments["dy"] as? Int else { return #"{"error":"missing_dy"}"# }
-        let dx = (arguments["dx"] as? Int) ?? 0
+        guard let dy = ToolArguments.strictNumber(arguments, for: "dy")?.intValue else {
+            return #"{"error":"missing_dy"}"#
+        }
+        let dx = ToolArguments.strictNumber(arguments, for: "dx")?.intValue ?? 0
         return settledResult(settle, arguments, base: ["dx": dx, "dy": dy], post: {
             SyntheticInput.scroll(dx: dx, dy: dy)
         })
@@ -180,7 +199,9 @@ public struct KeyTool: Tool {
         guard canPostEvents() else { return postEventError }
         guard let keys = arguments["keys"] as? String else { return #"{"error":"missing_keys"}"# }
         guard let chord = KeyMap.parse(keys) else {
-            return okJSON(["ok": false, "error": "unknown_key_combo", "keys": keys])
+            // Not okJSON — this is a failure envelope, and okJSON's ok:true default only worked
+            // here by being overwritten.
+            return JSONText.from(["ok": false, "error": "unknown_key_combo", "keys": keys])
         }
         return settledResult(settle, arguments, base: ["keys": keys], post: {
             SyntheticInput.post(chord)
@@ -216,7 +237,8 @@ public struct HoverTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard canPostEvents() else { return postEventError }
-        guard let x = arguments["x"] as? NSNumber, let y = arguments["y"] as? NSNumber else {
+        guard let x = ToolArguments.strictNumber(arguments, for: "x"),
+              let y = ToolArguments.strictNumber(arguments, for: "y") else {
             return #"{"error":"missing_coordinates"}"#
         }
         return settledResult(settle, arguments, base: ["x": x.intValue, "y": y.intValue], post: {
@@ -254,8 +276,10 @@ public struct DragTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard canPostEvents() else { return postEventError }
-        guard let fromX = arguments["fromX"] as? NSNumber, let fromY = arguments["fromY"] as? NSNumber,
-              let toX = arguments["toX"] as? NSNumber, let toY = arguments["toY"] as? NSNumber else {
+        guard let fromX = ToolArguments.strictNumber(arguments, for: "fromX"),
+              let fromY = ToolArguments.strictNumber(arguments, for: "fromY"),
+              let toX = ToolArguments.strictNumber(arguments, for: "toX"),
+              let toY = ToolArguments.strictNumber(arguments, for: "toY") else {
             return #"{"error":"missing_coordinates"}"#
         }
         return settledResult(settle, arguments, base: [:], post: {

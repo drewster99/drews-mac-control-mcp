@@ -6,6 +6,9 @@
 //  SMAppService (§2). Run once after install; `--unregister` to remove. LSUIElement so it
 //  doesn't show a Dock icon.
 //
+//  Exit codes (scriptable): 0 = success; 1 = register/unregister threw; 2 = registered but the
+//  agent requires the user's approval in System Settings ▸ General ▸ Login Items.
+//
 
 import Foundation
 import ServiceManagement
@@ -20,6 +23,10 @@ func statusName(_ status: SMAppService.Status) -> String {
     }
 }
 
+func printError(_ message: String) {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
 let agent = SMAppService.agent(plistName: "com.nuclearcyborg.maccontrol.host.plist")
 print("agent status: \(statusName(agent.status))")
 
@@ -28,7 +35,8 @@ if CommandLine.arguments.dropFirst().contains("--unregister") {
         try agent.unregister()
         print("unregistered")
     } catch {
-        print("unregister failed: \(error)")
+        printError("unregister failed: \(error)")
+        exit(1)
     }
 } else {
     do {
@@ -37,8 +45,10 @@ if CommandLine.arguments.dropFirst().contains("--unregister") {
         if agent.status == .requiresApproval {
             print(">> Approve in System Settings ▸ General ▸ Login Items.")
             SMAppService.openSystemSettingsLoginItems()
+            exit(2)
         }
     } catch {
-        print("register failed: \(error)")
+        printError("register failed: \(error)")
+        exit(1)
     }
 }

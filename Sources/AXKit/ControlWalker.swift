@@ -39,6 +39,10 @@ public enum ControlWalker {
         /// The element's `AXChildren` as captured by `draft`'s bulk read, so neither the expansion
         /// step nor the frontier's hidden-count has to pay a second cross-process read for them.
         let childElements: [AXElement]
+        /// Whether the bulk read actually delivered the `AXChildren` slot — this is what lets an
+        /// empty `childElements` distinguish "genuinely childless" from "failed read" without
+        /// paying a second cross-process probe.
+        let childrenSlotPresent: Bool
         var children: [Build] = []
         var hidden: HiddenCount = .none
 
@@ -46,7 +50,8 @@ public enum ControlWalker {
              identifier: String?, textValue: String?, numericValue: Double?, minValue: Double?,
              maxValue: Double?, valueDescription: String?, url: String?, placeholder: String?,
              states: [String], actions: [String], disclosureLevel: Int?,
-             rowCount: Int?, columnCount: Int?, columnTitles: [String]?, childElements: [AXElement]) {
+             rowCount: Int?, columnCount: Int?, columnTitles: [String]?, childElements: [AXElement],
+             childrenSlotPresent: Bool) {
             self.element = element; self.ref = ref; self.role = role; self.subrole = subrole
             self.label = label; self.identifier = identifier; self.textValue = textValue
             self.numericValue = numericValue; self.minValue = minValue; self.maxValue = maxValue
@@ -54,6 +59,7 @@ public enum ControlWalker {
             self.states = states; self.actions = actions; self.disclosureLevel = disclosureLevel
             self.rowCount = rowCount; self.columnCount = columnCount; self.columnTitles = columnTitles
             self.childElements = childElements
+            self.childrenSlotPresent = childrenSlotPresent
         }
     }
 
@@ -63,6 +69,12 @@ public enum ControlWalker {
     /// needs the element's own attribute-name list, and the disclosure-settability probe is asked
     /// for solely on the handful of rows that already advertise `AXDisclosing`.
     private static func draft(_ element: AXElement, registry: ElementRegistry, pid: pid_t?) -> Build {
+        // Short per-node messaging timeout for all of this node's reads (reverted to 0 after the
+        // last one): the walk's deadline check between nodes can't preempt an in-flight AX call,
+        // and the app element's timeout doesn't apply to children (setMessagingTimeout contract).
+        // Reverting matters because the registry stores this exact instance for later actions.
+        element.setMessagingTimeout(1)
+        defer { element.setMessagingTimeout(0) }
         let attributes = element.snapshotAttributes()
         let role = attributes.role ?? "AXUnknown"
         let subrole = attributes.subrole
@@ -115,17 +127,26 @@ public enum ControlWalker {
             rowCount: isCollection ? attributes.rowCount : nil,
             columnCount: isCollection ? attributes.columnCount : nil,
             columnTitles: isCollection ? attributes.columnTitles : nil,
-            childElements: attributes.children
+            childElements: attributes.children,
+            childrenSlotPresent: attributes.childrenSlotPresent
         )
     }
 
-    /// Hidden-count for a node we didn't expand. The draft-time children are authoritative when
-    /// non-empty; an empty capture is ambiguous (genuinely childless, or a failed bulk slot), so
-    /// that case still pays the cheap child-count read to tell `.none` from `.unknown` (§5).
+    /// Hidden-count for a node we didn't expand — zero IPC (§5). The draft-time children are
+    /// authoritative when non-empty; for an empty capture, the bulk read's slot-present flag tells
+    /// "genuinely childless" (`.none`) from "failed slot" (`.unknown`) without a post-deadline
+    /// cross-process probe.
     private static func frontierHidden(_ node: Build) -> HiddenCount {
         if !node.childElements.isEmpty { return .known(node.childElements.count) }
-        guard let count = node.element.childCount else { return .unknown }
-        return count > 0 ? .known(count) : .none
+        return node.childrenSlotPresent ? .none : .unknown
+    }
+
+    /// Deduplicated union of a collection's visible and selected members, visible-first.
+    /// Returns nil when the union is empty so the caller can fall through to the next source.
+    private static func visibleSelectedUnion(_ visible: [AXElement]?, _ selected: [AXElement]?) -> [AXElement]? {
+        var seen = Set<AXElement>()
+        let union = ((visible ?? []) + (selected ?? [])).filter { seen.insert($0).inserted }
+        return union.isEmpty ? nil : union
     }
 
     /// The children to actually walk, plus the hidden-count this node should advertise.
@@ -136,22 +157,25 @@ public enum ControlWalker {
     ) -> ([AXElement], HiddenCount) {
         let element = node.element
         if collectionRoles.contains(node.role) {
-            let visible = element.visibleRows ?? element.visibleCells ?? []
-            let selected = element.selectedRows ?? element.selectedCells ?? []
             // `node.rowCount` was captured by draft under this same collection-role predicate, so it
             // is populated here — and reusing it keeps the hidden count consistent with the
             // `[N rows × M cols]` the renderer prints from the same value.
-            if !visible.isEmpty || !selected.isEmpty || node.rowCount != nil {
-                var seen = Set<AXElement>()
-                let union = (visible + selected).filter { seen.insert($0).inserted }
+            if let rows = visibleSelectedUnion(element.visibleRows, element.selectedRows) {
                 let hidden: HiddenCount
                 if let total = node.rowCount {
-                    let remaining = total - union.count
+                    let remaining = total - rows.count
                     hidden = remaining > 0 ? .known(remaining) : .none
                 } else {
                     hidden = .unknown
                 }
-                return (union, hidden)
+                return (rows, hidden)
+            }
+            if let cells = visibleSelectedUnion(element.visibleCells, element.selectedCells) {
+                // Cells are a different unit than rowCount, so the remainder is uncountable.
+                return (cells, .unknown)
+            }
+            if let total = node.rowCount {
+                return ([], total > 0 ? .known(total) : .none)
             }
             // No row/cell info — treat as an ordinary container.
         }
@@ -207,10 +231,20 @@ public enum ControlWalker {
             for (offset, childElement) in childElements.enumerated() {
                 // Re-check the budget between a node's child reads — `draft` is the heavy per-node
                 // AX cost, so a wide node dequeued just before the deadline could otherwise overrun
-                // it by its whole fan-out. Advertise the children we didn't reach as hidden.
+                // it by its whole fan-out. Advertise the children we didn't reach as hidden,
+                // ADDING to (never clobbering) a collection remainder already recorded above.
                 if Date() >= deadline {
-                    let remaining = childElements.count - offset
-                    if remaining > 0 { node.hidden = .known(remaining) }
+                    // Only children we never drafted are hidden; already-visited duplicates would
+                    // have been skipped anyway, so they must not inflate the count.
+                    let unvisited = childElements[offset...].count(where: { !visited.contains($0) })
+                    switch node.hidden {
+                    case .unknown:
+                        break
+                    case .known(let collectionRemainder):
+                        node.hidden = .known(collectionRemainder + unvisited)
+                    case .none:
+                        node.hidden = unvisited > 0 ? .known(unvisited) : .none
+                    }
                     break
                 }
                 guard visited.insert(childElement).inserted else { continue }

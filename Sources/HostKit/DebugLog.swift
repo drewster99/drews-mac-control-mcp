@@ -97,6 +97,9 @@ public enum DebugLog {
         if lockFD >= 0 { return lockFD }
         let lockPath = fileURL.appendingPathExtension("lock").path
         lockFD = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        // Re-tighten on every open: open()'s mode only applies at creation, so a pre-existing
+        // lock file keeps whatever permissions it was created with unless fixed here.
+        if lockFD >= 0 { fchmod(lockFD, 0o600) }
         return lockFD
     }
 
@@ -108,8 +111,19 @@ public enum DebugLog {
             try fileManager.createDirectory(at: fileURL.deletingLastPathComponent(),
                                             withIntermediateDirectories: true)
             let descriptor = acquireLockFD()
-            if descriptor >= 0 { flock(descriptor, LOCK_EX) }
-            defer { if descriptor >= 0 { flock(descriptor, LOCK_UN) } }
+            // Non-blocking with bounded retries: a wedged lock holder must never stall the
+            // request path. Under sustained contention (or when the lock fd can't open) the
+            // entry is dropped rather than written unlocked, which could interleave with the
+            // peer process's rotation.
+            var locked = false
+            if descriptor >= 0 {
+                for _ in 0..<5 {
+                    if flock(descriptor, LOCK_EX | LOCK_NB) == 0 { locked = true; break }
+                    Thread.sleep(forTimeInterval: 0.010)
+                }
+            }
+            guard locked else { return }
+            defer { flock(descriptor, LOCK_UN) }
             rotateIfNeeded(fileManager)
             if !fileManager.fileExists(atPath: fileURL.path) {
                 fileManager.createFile(atPath: fileURL.path, contents: nil,
@@ -117,6 +131,9 @@ public enum DebugLog {
             }
             let handle = try FileHandle(forWritingTo: fileURL)
             defer { do { try handle.close() } catch { /* nothing actionable */ } }
+            // Re-tighten on every open: a pre-existing world-readable log must not keep
+            // receiving sensitive bodies at the old mode.
+            fchmod(handle.fileDescriptor, 0o600)
             try handle.seekToEnd()
             try handle.write(contentsOf: data)
         } catch {

@@ -218,6 +218,34 @@ public enum ActionVocab {
     }
 }
 
+/// Shared display-text hygiene for every line-oriented rendering surface (control_app outline,
+/// element outline, diff rows): one place that collapses newlines, truncates, and escapes, so a
+/// hostile or merely enormous label/value can't break the line grammar or blow the payload.
+public enum TextDisplay {
+    /// Truncation cap for labels/titles (short, human-scannable).
+    public static let labelLimit = 120
+    /// Truncation cap for values (longer — fields legitimately hold sentences).
+    public static let valueLimit = 500
+
+    /// Single-line, truncated, escaped rendering of a free-text segment for a quoted display
+    /// slot. Newlines collapse to spaces (one element per line), the text is truncated, then
+    /// `\` and `"` are escaped so embedded quotes can't break the quoted line grammar
+    /// (`"Save \"Draft\""`). Truncation happens BEFORE escaping so it can never split an
+    /// escape pair.
+    public static func quoted(_ text: String, limit: Int) -> String {
+        var flat = String(text.map { $0.isNewline ? " " : $0 })
+        if flat.count > limit { flat = String(flat.prefix(limit)) + "…" }
+        return flat.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    /// Raw truncation for JSON surfaces (no escaping — the JSON encoder handles that), with a
+    /// flag so the caller can advertise that content was dropped.
+    public static func truncated(_ text: String, limit: Int) -> (text: String, wasTruncated: Bool) {
+        guard text.count > limit else { return (text, false) }
+        return (String(text.prefix(limit)), true)
+    }
+}
+
 /// Renders a `ControlNode` tree to the §7 outline, prefixed once by the legend header.
 public enum ControlRenderer {
     public static let legend = """
@@ -361,13 +389,9 @@ public enum ControlRenderer {
         return parts.joined(separator: " ")
     }
 
-    /// Single-line, truncated, escaped rendering of a free-text segment. Newlines collapse to
-    /// spaces (one element per line), then `\` and `"` are escaped so embedded quotes can't break
-    /// the quoted line grammar (`"Save \"Draft\""`).
+    /// Shim onto the shared `TextDisplay.quoted` (call sites pass their own varying limits).
     static func display(_ text: String, _ limit: Int) -> String {
-        var flat = String(text.map { $0.isNewline ? " " : $0 })
-        if flat.count > limit { flat = String(flat.prefix(limit)) + "…" }
-        return flat.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        TextDisplay.quoted(text, limit: limit)
     }
 
     /// Compact number rendering (`%g`): `0.72`, `1`, `100`, no trailing zeros.

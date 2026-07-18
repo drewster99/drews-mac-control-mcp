@@ -35,9 +35,9 @@ let mutatingTools: Set<String> = [
 // AX/ScreenCaptureKit/simctl never invokes the reply block and never trips the connection error
 // handler, so without this the relay would block forever and wedge the client's stdio channel.
 // Generous enough to clear the longest legitimate op (auto-launch ~15s, capture ~10s).
-// Tool timeouts are clamped under this budget in MacControlMCPCore.ToolTimeout (relayBudgetSeconds
-// must match this value) so a caller-supplied timeout can't routinely exceed it.
-let xpcCallTimeout: TimeInterval = 60
+// Derived from MacControlMCPCore.ToolTimeout — Core owns the number and clamps tool work budgets
+// under it, so a caller-supplied timeout can't routinely exceed this and the two can't drift.
+let xpcCallTimeout: TimeInterval = ToolTimeout.relayBudgetSeconds
 
 // Deferrable tools can PARK the call while the host waits for the user to go idle (up to the
 // configured defer budget, capped at DEFER_MAX). The relay must wait longer than the base budget
@@ -50,7 +50,10 @@ let deferrableTools: Set<String> = [
     "click", "click_point", "scroll", "key", "type", "drag", "hover",
     "window", "menu_pick", "open", "launch_app", "app", "control_app", "batch"
 ]
-let deferMaxSeconds: TimeInterval = 600   // DEFER_MAX (== ActivityConfig.deferBudgetCeiling)
+let deferMaxSeconds: TimeInterval = TimeInterval(ActivityConfig.deferBudgetCeiling)   // DEFER_MAX
+// Headroom for the host's GlobalInputGate wait (DeferringTool.gateWaitSeconds, re-armed while the
+// user is busy) on top of the defer budget.
+let gateGraceSeconds: TimeInterval = 30
 
 /// The XPC wait budget for a request: the base budget, plus the defer headroom when the call could
 /// park waiting for the user to be idle.
@@ -63,7 +66,16 @@ func xpcTimeout(for line: String) -> TimeInterval {
           let params = dict["params"] as? [String: Any],
           let name = params["name"] as? String,
           deferrableTools.contains(name) else { return xpcCallTimeout }
-    return xpcCallTimeout + deferMaxSeconds
+    // Defer budget + gate wait + work must all fit under this ceiling.
+    return xpcCallTimeout + deferMaxSeconds + gateGraceSeconds
+}
+
+/// How a single XPC attempt ended: a delivered reply, a connection-level failure (error handler
+/// fired or no proxy), or the relay's own wait budget expiring with the host silent.
+enum XPCAttemptOutcome {
+    case reply(String?)
+    case connectionFailure
+    case timedOut
 }
 
 /// First-write-wins box for an XPC call's outcome, guarded by a lock. Both the reply block and
@@ -73,23 +85,21 @@ func xpcTimeout(for line: String) -> TimeInterval {
 final class ReplyBox {
     private let lock = NSLock()
     private var settled = false
-    private var response: String?
-    private var failed = false
+    private var value: XPCAttemptOutcome = .connectionFailure
 
     /// Returns true only for the first caller to settle the box.
     @discardableResult
-    func settle(response: String?, failed: Bool) -> Bool {
+    func settle(_ outcome: XPCAttemptOutcome) -> Bool {
         lock.lock(); defer { lock.unlock() }
         if settled { return false }
         settled = true
-        self.response = response
-        self.failed = failed
+        value = outcome
         return true
     }
 
-    func outcome() -> (response: String?, failed: Bool) {
+    func outcome() -> XPCAttemptOutcome {
         lock.lock(); defer { lock.unlock() }
-        return (response, failed)
+        return value
     }
 }
 
@@ -167,30 +177,32 @@ func runRelay() {
         if line.isEmpty { continue }
         DebugLog.request(line)
 
+        let budget = xpcTimeout(for: line)
         var responded = false
-        for attempt in 0..<3 {
+        var timedOut = false
+
+        attemptLoop: for attempt in 0..<3 {
             let semaphore = DispatchSemaphore(value: 0)
             let box = ReplyBox()
 
             let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
-                if box.settle(response: nil, failed: true) { semaphore.signal() }
+                if box.settle(.connectionFailure) { semaphore.signal() }
             } as? MCPHostProtocol
 
             if let proxy {
                 proxy.handle(line: line) { reply in
-                    if box.settle(response: reply, failed: false) { semaphore.signal() }
+                    if box.settle(.reply(reply)) { semaphore.signal() }
                 }
-                let budget = xpcTimeout(for: line)
                 if semaphore.wait(timeout: .now() + budget) == .timedOut {
-                    box.settle(response: nil, failed: true)
+                    box.settle(.timedOut)
                     DebugLog.event("timeout", "xpc handle exceeded \(Int(budget))s")
                 }
             } else {
-                box.settle(response: nil, failed: true)
+                box.settle(.connectionFailure)
             }
 
-            let (response, failed) = box.outcome()
-            if !failed {
+            switch box.outcome() {
+            case .reply(let response):
                 if let response {
                     // A failed stdout write means the client closed its end — there's no one left
                     // to reply to, so stop the loop instead of crashing or spinning.
@@ -199,39 +211,54 @@ func runRelay() {
                 }
                 DebugLog.response(response)
                 responded = true
-                break
+                break attemptLoop
+
+            case .timedOut:
+                // The host ACCEPTED this call and went silent: it may still be executing it, so
+                // re-firing risks a double side effect and another full budget of stall, and
+                // bootstrapping would spuriously relaunch an app whose host is alive but busy.
+                // Drop the possibly-wedged connection so the NEXT request gets a fresh one — the
+                // host vends a fresh per-connection service (own lock), escaping the wedged call.
+                connection.invalidate()
+                connection = makeConnection()
+                timedOut = true
+                break attemptLoop
+
+            case .connectionFailure:
+                connection.invalidate()
+                let mutating = isMutating(line)
+
+                // Cold start: if a plain reconnect didn't help (attempt ≥ 1), or this is a mutating
+                // call we won't retry, bring the host up once by launching the app to register the
+                // LaunchAgent. A registered host that merely re-exec'd (e.g. for a grant) recovers
+                // on the first plain reconnect without this.
+                if !bootstrapped && (attempt >= 1 || mutating) {
+                    bootstrapped = true
+                    bootstrapHost()
+                    Thread.sleep(forTimeInterval: 1.5)
+                }
+                connection = makeConnection()
+
+                // Never re-fire a mutating call (no idempotency token) — surface the failure; the
+                // bootstrap above means the model's retry reaches the now-running host.
+                if mutating { break attemptLoop }
             }
-
-            connection.invalidate()
-            let mutating = isMutating(line)
-
-            // Cold start: if a plain reconnect didn't help (attempt ≥ 1), or this is a mutating
-            // call we won't retry, bring the host up once by launching the app to register the
-            // LaunchAgent. A registered host that merely re-exec'd (e.g. for a grant) recovers on
-            // the first plain reconnect without this.
-            if !bootstrapped && (attempt >= 1 || mutating) {
-                bootstrapped = true
-                bootstrapHost()
-                Thread.sleep(forTimeInterval: 1.5)
-            }
-            connection = makeConnection()
-
-            // Never re-fire a mutating call (no idempotency token) — surface the failure; the
-            // bootstrap above means the model's retry reaches the now-running host.
-            if mutating { break }
         }
 
         if !responded && !isNotification(line) {
+            let code = timedOut ? -32001 : -32000
+            let message = timedOut
+                ? "tool call timed out after \(Int(budget))s; the host may still be executing it — verify state before retrying"
+                : "host unavailable"
             let payload: [String: Any] = [
                 "jsonrpc": "2.0",
                 "id": requestID(line),
-                "error": ["code": -32000, "message": "host unavailable"]
+                "error": ["code": code, "message": message]
             ]
-            // isValidJSONObject screens a non-finite request id (e.g. -1e400 → Double.infinity):
-            // JSONSerialization.data would otherwise raise an uncatchable Objective-C exception and
-            // kill the relay, taking the client's stdio channel with it. On any failure keep the
-            // id:null literal below.
-            var fallback = #"{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"host unavailable"}}"#
+            // isValidJSONObject screens a non-finite request id: JSONSerialization.data would
+            // otherwise raise an uncatchable Objective-C exception and kill the relay. On any
+            // failure keep the id:null fallback (message contains no characters needing escaping).
+            var fallback = #"{"jsonrpc":"2.0","id":null,"error":{"code":\#(code),"message":"\#(message)"}}"#
             if JSONSerialization.isValidJSONObject(payload) {
                 do {
                     let data = try JSONSerialization.data(withJSONObject: payload)

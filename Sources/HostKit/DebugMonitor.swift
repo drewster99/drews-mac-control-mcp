@@ -55,9 +55,23 @@ public final class DebugMonitor: @unchecked Sendable {
         if token == generation { sink = nil }
     }
 
+    /// Debug events are for eyeballing the stream, not archiving payloads — cap each body so a
+    /// screenshot's base64 doesn't balloon every event.
+    static let maxBodyLength = 32_768
+
+    /// Cap a call/response body at `maxBodyLength`, noting how much was dropped.
+    static func truncated(_ body: String) -> String {
+        guard body.count > maxBodyLength else { return body }
+        return body.prefix(maxBodyLength) + "…[truncated \(body.count - maxBodyLength) more characters]"
+    }
+
     /// Build the event and hand it to the sink. The JSON is built under the lock (the formatter
-    /// isn't thread-safe); the sink call — a one-way XPC send — happens after unlocking.
+    /// isn't thread-safe); the sink call — a one-way XPC send — happens after unlocking. Bodies are
+    /// truncated BEFORE taking the lock: megabytes of screenshot base64 were being serialized under
+    /// the lock and buffered toward a possibly-stalled app.
     public func emit(sessionId: String, client: String?, call: String, response: String?) {
+        let call = DebugMonitor.truncated(call)
+        let response = response.map(DebugMonitor.truncated)
         lock.lock()
         guard let sink = self.sink else { lock.unlock(); return }
         let json = DebugMonitor.eventJSON(timestamp: DebugMonitor.timestampFormatter.string(from: Date()),

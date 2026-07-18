@@ -51,16 +51,19 @@ public typealias ActAndSettle = (_ pid: pid_t, _ action: () -> Void)
 
 public enum Diff {
     public static func compute(old: ElementNode, new: ElementNode) -> ElementDiff {
-        var oldMap: [String: ElementNode] = [:]
-        var newMap: [String: ElementNode] = [:]
-        flatten(old, into: &oldMap)
-        flatten(new, into: &newMap)
+        compute(oldMap: flatten(old), newMap: flatten(new))
+    }
 
+    /// Flat-map diff — the primitive the tree overload delegates to. `suppressRemovals` is for
+    /// consumers whose `newMap` came from a partial (deadline-truncated) walk: absence from a
+    /// prefix proves nothing, so reporting those refs as removed would be fabricated evidence.
+    public static func compute(oldMap: [String: ElementNode], newMap: [String: ElementNode],
+                               suppressRemovals: Bool = false) -> ElementDiff {
         let oldRefs = Set(oldMap.keys)
         let newRefs = Set(newMap.keys)
 
         let added = newRefs.subtracting(oldRefs).sorted().compactMap { newMap[$0]?.summaryLine() }
-        let removed = oldRefs.subtracting(newRefs).sorted()
+        let removed = suppressRemovals ? [] : oldRefs.subtracting(newRefs).sorted()
 
         var changed: [ChangedField] = []
         for ref in oldRefs.intersection(newRefs).sorted() {
@@ -68,13 +71,17 @@ public enum Diff {
             // Report each facet INDEPENDENTLY — a surviving ref can change value, title, settability,
             // its action set, and geometry at once, and the settle consumer needs to see all of them
             // (the old value-xor-title logic dropped every change after the first).
+            // Detection compares RAW strings (a change past the display cap must still register);
+            // only the rendered was/now go through the shared display hygiene.
             if (before.value ?? "") != (after.value ?? "") {
                 changed.append(ChangedField(ref: ref,
-                    was: "value:\"\(before.value ?? "")\"", now: "value:\"\(after.value ?? "")\""))
+                    was: "value:\"\(TextDisplay.quoted(before.value ?? "", limit: TextDisplay.valueLimit))\"",
+                    now: "value:\"\(TextDisplay.quoted(after.value ?? "", limit: TextDisplay.valueLimit))\""))
             }
             if (before.title ?? "") != (after.title ?? "") {
                 changed.append(ChangedField(ref: ref,
-                    was: "title:\"\(before.title ?? "")\"", now: "title:\"\(after.title ?? "")\""))
+                    was: "title:\"\(TextDisplay.quoted(before.title ?? "", limit: TextDisplay.labelLimit))\"",
+                    now: "title:\"\(TextDisplay.quoted(after.title ?? "", limit: TextDisplay.labelLimit))\""))
             }
             if before.settable != after.settable {
                 changed.append(ChangedField(ref: ref,
@@ -94,8 +101,22 @@ public enum Diff {
     }
 
     private static func frameDescription(_ rect: CGRect?) -> String {
-        guard let rect else { return "nil" }
-        return "[\(Int(rect.width))×\(Int(rect.height))]@(\(Int(rect.minX)),\(Int(rect.minY)))"
+        // Cross-process geometry: a nil rect AND a non-finite component both render as "nil"
+        // rather than trapping in Int(_:).
+        guard let rect,
+              let width = UntrustedNumeric.int(rect.width),
+              let height = UntrustedNumeric.int(rect.height),
+              let minX = UntrustedNumeric.int(rect.minX),
+              let minY = UntrustedNumeric.int(rect.minY) else { return "nil" }
+        return "[\(width)×\(height)]@(\(minX),\(minY))"
+    }
+
+    /// Flatten a tree to its ref → node map (public: AXKit's registry keeps flat baselines so a
+    /// partial snapshot can merge over the previous one instead of replacing it).
+    public static func flatten(_ node: ElementNode) -> [String: ElementNode] {
+        var map: [String: ElementNode] = [:]
+        flatten(node, into: &map)
+        return map
     }
 
     private static func flatten(_ node: ElementNode, into map: inout [String: ElementNode]) {

@@ -53,6 +53,9 @@ targets:
       - target: CaptureKit
       - target: InputKit
 
+  # Same sources as the SPM executable `MacControlMCP` (Package.swift); named differently
+  # because the project and MacControlApp's PRODUCT_NAME already claim "MacControlMCP".
+  # AXProbe is deliberately SPM-only. Keep dependencies in sync with Package.swift by hand.
   MacControlStdio:
     type: tool
     platform: macOS
@@ -152,6 +155,8 @@ targets:
           fi
     postCompileScripts:
       - name: Copy LaunchAgent plist
+        inputFiles:
+          - $(SRCROOT)/packaging/host.launchagent.plist
         outputFiles:
           - $(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/com.nuclearcyborg.maccontrol.host.plist
         script: |

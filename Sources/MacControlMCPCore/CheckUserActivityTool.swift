@@ -20,7 +20,7 @@ public struct CheckUserActivityTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Report how long since the user last used the mouse and keyboard (idle times in ms; combinedIdleMs is the smaller of the two). Query this to decide whether it's polite to drive the UI now. `mayReflectOwnInput` is true when the most recent input may have been the server's own synthetic action rather than the user. No permission required.",
+            "description": "Report how long since the user last used the mouse and keyboard (idle times in ms; combinedIdleMs is the smaller of the two). Query this to decide whether it's polite to drive the UI now. `mayReflectOwnInput` is true when the most recent input may have been the server's own synthetic action rather than the user; `userIdleMs` is the combined idle with the server's own synthetic input masked out — the best estimate of how long the REAL user has been idle. No permission required.",
             "inputSchema": ["type": "object", "properties": [String: Any]()]
         ]
     }

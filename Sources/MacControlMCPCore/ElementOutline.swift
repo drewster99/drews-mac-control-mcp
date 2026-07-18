@@ -10,8 +10,9 @@
 import CoreGraphics
 import Foundation
 
-/// Collapse newlines so a multi-line title/value/action can never break the line-based
-/// outline (each element must stay on one line). Other content is returned unchanged.
+/// Collapse newlines so a multi-line action token can never break the line-based outline (each
+/// element must stay on one line). Titles/values go through `TextDisplay.quoted` instead — they
+/// also need truncation and quote escaping, which bare action tokens don't.
 private func singleLine(_ text: String) -> String {
     guard text.contains(where: { $0.isNewline }) else { return text }
     return text.split(whereSeparator: { $0.isNewline }).joined(separator: " ")
@@ -68,11 +69,13 @@ public struct ElementNode: Equatable, Sendable {
     public func summaryLine() -> String {
         var parts = [ref, role]
         if let subrole, !subrole.isEmpty { parts.append(subrole) }
-        if let title, !title.isEmpty { parts.append("\"\(singleLine(title))\"") }
-        if let frame { parts.append("[\(Int(frame.width))×\(Int(frame.height))]") }
+        if let title, !title.isEmpty { parts.append("\"\(TextDisplay.quoted(title, limit: TextDisplay.labelLimit))\"") }
+        if let frame, let w = UntrustedNumeric.int(frame.width), let h = UntrustedNumeric.int(frame.height) {
+            parts.append("[\(w)×\(h)]")
+        }
         if !actions.isEmpty { parts.append("(" + actions.map(singleLine).joined(separator: ",") + ")") }
         if settable { parts.append("(settable)") }
-        if let value, !value.isEmpty { parts.append("value:\"\(singleLine(value))\"") }
+        if let value, !value.isEmpty { parts.append("value:\"\(TextDisplay.quoted(value, limit: TextDisplay.valueLimit))\"") }
         return parts.joined(separator: " ")
     }
 }
@@ -83,41 +86,57 @@ public enum ElementOutline {
     /// Render an indented outline. Under `.interactable`, decorative subtrees with no
     /// interactable descendant collapse to `×N children…` (expandable later by ref).
     public static func render(_ root: ElementNode, filter: Filter = .interactable) -> String {
+        // One bottom-up pass answers "any interactable descendant?" for every node, replacing an
+        // O(n·depth) per-node subtree walk. The `.all` filter never collapses, so it skips the pass.
+        let memo = filter == .interactable ? computeDescendantInteractability(root) : [:]
         var lines: [String] = []
-        emit(root, depth: 0, filter: filter, into: &lines)
+        emit(root, depth: 0, filter: filter, memo: memo, into: &lines)
         return lines.joined(separator: "\n")
     }
 
-    private static func emit(_ node: ElementNode, depth: Int, filter: Filter, into lines: inout [String]) {
+    private static func emit(_ node: ElementNode, depth: Int, filter: Filter,
+                             memo: [String: Bool], into lines: inout [String]) {
         let pad = String(repeating: "  ", count: depth)
         let collapse = filter == .interactable
             && !node.isInteractable
             && !node.children.isEmpty
-            && !hasInteractableDescendant(node)
+            && memo[node.ref] != true
         if collapse {
             lines.append(pad + summary(node, collapsedChildren: node.children.count))
             return
         }
         lines.append(pad + summary(node, collapsedChildren: nil))
         for child in node.children {
-            emit(child, depth: depth + 1, filter: filter, into: &lines)
+            emit(child, depth: depth + 1, filter: filter, memo: memo, into: &lines)
         }
     }
 
-    private static func hasInteractableDescendant(_ node: ElementNode) -> Bool {
-        for child in node.children {
-            if child.isInteractable || hasInteractableDescendant(child) { return true }
+    /// ref → "has an interactable descendant", for every node, in one bottom-up pass. The OR-merge
+    /// makes a duplicated ref fail conservative (render, not collapse).
+    private static func computeDescendantInteractability(_ root: ElementNode) -> [String: Bool] {
+        var memo: [String: Bool] = [:]
+        func walk(_ node: ElementNode) -> Bool {
+            var any = false
+            for child in node.children {
+                let childSubtree = walk(child)
+                any = any || child.isInteractable || childSubtree
+            }
+            memo[node.ref] = (memo[node.ref] ?? false) || any
+            return any
         }
-        return false
+        _ = walk(root)
+        return memo
     }
 
     private static func summary(_ node: ElementNode, collapsedChildren: Int?) -> String {
         guard let count = collapsedChildren else { return node.summaryLine() }
         var parts = [node.ref, node.role]
         if let subrole = node.subrole, !subrole.isEmpty { parts.append(subrole) }
-        if let title = node.title, !title.isEmpty { parts.append("\"\(singleLine(title))\"") }
-        if let frame = node.frame {
-            parts.append("[\(Int(frame.width))×\(Int(frame.height))]")
+        if let title = node.title, !title.isEmpty {
+            parts.append("\"\(TextDisplay.quoted(title, limit: TextDisplay.labelLimit))\"")
+        }
+        if let frame = node.frame, let w = UntrustedNumeric.int(frame.width), let h = UntrustedNumeric.int(frame.height) {
+            parts.append("[\(w)×\(h)]")
         }
         parts.append("×\(count) children…")
         return parts.joined(separator: " ")

@@ -9,8 +9,10 @@
 import Foundation
 
 public final class MCPServer {
-    /// MCP protocol revision we default to when the client doesn't pin one.
-    static let defaultProtocolVersion = "2024-11-05"
+    /// MCP protocol revisions this server can speak.
+    static let supportedProtocolVersions: Set<String> = ["2024-11-05", "2025-03-26", "2025-06-18"]
+    /// The newest supported revision — offered when the client pins nothing (or something we don't speak).
+    static let latestProtocolVersion = "2025-06-18"
 
     private let tools: [Tool]
 
@@ -58,7 +60,10 @@ public final class MCPServer {
                     .compactMap { $0 }.joined(separator: " ")
                 clientInfo = identity.isEmpty ? nil : identity
             }
-            let version = (request.params["protocolVersion"] as? String) ?? Self.defaultProtocolVersion
+            // MCP spec — answer the requested version only if supported, else our latest.
+            let requested = request.params["protocolVersion"] as? String
+            let version = requested.flatMap { Self.supportedProtocolVersions.contains($0) ? $0 : nil }
+                ?? Self.latestProtocolVersion
             return JSONRPC.responseData(id: request.id, result: [
                 "protocolVersion": version,
                 "capabilities": ["tools": [String: Any]()],

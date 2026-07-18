@@ -10,6 +10,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import ImageIO
 import MacControlMCPCore
 import Vision
 
@@ -52,6 +53,13 @@ public struct OCRTool: Tool {
 
 enum OCRSupport {
     static func loadCGImage(_ path: String) -> CGImage? {
+        // ImageIO decodes at pixel resolution; NSImage's point-size rect halves
+        // DPI-tagged (e.g. Retina screenshot) rasters before OCR ever sees them.
+        if let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            return image
+        }
+        // Fall back for vector formats (PDF/EPS) that ImageIO won't rasterize.
         guard let image = NSImage(contentsOfFile: path) else { return nil }
         var rect = CGRect(origin: .zero, size: image.size)
         return image.cgImage(forProposedRect: &rect, context: nil, hints: nil)

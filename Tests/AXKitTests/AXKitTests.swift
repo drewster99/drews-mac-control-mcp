@@ -25,7 +25,7 @@ final class AXKitTests: XCTestCase {
         let node = AXSnapshot.build(.systemWide(), maxDepth: 1) { _ in
             counter += 1
             return "e\(counter)"
-        }
+        }.root
         XCTAssertEqual(node.ref, "e1")
         XCTAssertFalse(node.role.isEmpty)
     }

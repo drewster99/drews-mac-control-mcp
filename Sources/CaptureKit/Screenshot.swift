@@ -121,18 +121,23 @@ enum CaptureSupport {
                 let content = try await SCShareableContent.current
                 guard let display = content.displays.first else { throw CaptureError.noDisplay }
                 let filter = SCContentFilter(display: display, excludingWindows: [])
+                // SCDisplay.width/height are points; SCStreamConfiguration wants pixels. Without the
+                // filter's point-to-pixel scale, Retina displays capture at 1x.
+                let pixelScale = Double(filter.pointPixelScale)
+                let pixelWidth = max(1, Int((filter.contentRect.width * pixelScale).rounded()))
+                let pixelHeight = max(1, Int((filter.contentRect.height * pixelScale).rounded()))
                 let config = SCStreamConfiguration()
-                let longest = max(display.width, display.height)
+                let longest = max(pixelWidth, pixelHeight)
                 if let maxDimension, maxDimension > 0, longest > maxDimension {
                     let scale = Double(maxDimension) / Double(longest)
                     // Clamp to 1: past a 32:1 aspect ratio the short side rounds to zero even at the
                     // minimum allowed maxDimension, and ScreenCaptureKit fails opaquely on a
                     // zero-dimension configuration.
-                    config.width = max(1, Int((Double(display.width) * scale).rounded()))
-                    config.height = max(1, Int((Double(display.height) * scale).rounded()))
+                    config.width = max(1, Int((Double(pixelWidth) * scale).rounded()))
+                    config.height = max(1, Int((Double(pixelHeight) * scale).rounded()))
                 } else {
-                    config.width = display.width
-                    config.height = display.height
+                    config.width = pixelWidth
+                    config.height = pixelHeight
                 }
                 box.image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
             } catch {
@@ -165,8 +170,18 @@ enum CaptureSupport {
         guard let data = output.data(using: .utf8),
               let root = JSONText.object(data) as? [String: Any],
               let devices = root["devices"] as? [String: Any] else { return nil }
-        for (_, value) in devices {
-            if let list = value as? [[String: Any]], let udid = list.first?["udid"] as? String {
+        // Dictionary iteration order is unspecified, so "first" used to change between calls —
+        // two back-to-back screenshots could hit different simulators. Pick deterministically:
+        // prefer iOS runtimes, then the newest runtime (numeric compare), then the lowest udid.
+        let runtimes = devices.keys.sorted { lhs, rhs in
+            let lhsIsIOS = lhs.contains("SimRuntime.iOS")
+            let rhsIsIOS = rhs.contains("SimRuntime.iOS")
+            if lhsIsIOS != rhsIsIOS { return lhsIsIOS }
+            return lhs.compare(rhs, options: .numeric) == .orderedDescending
+        }
+        for runtime in runtimes {
+            guard let list = devices[runtime] as? [[String: Any]] else { continue }
+            if let udid = list.compactMap({ $0["udid"] as? String }).min() {
                 return udid
             }
         }
@@ -209,7 +224,10 @@ enum CaptureSupport {
         if exited.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
             if exited.wait(timeout: .now() + 2) == .timedOut {
-                kill(process.processIdentifier, SIGKILL)
+                // Guard the SIGKILL on liveness: until Foundation reaps the child its pid is
+                // zombie-reserved, and isRunning flips false at that reap — this closes the
+                // pid-reuse window down to the instructions between the read and the kill.
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
                 exited.wait()
             }
         }
