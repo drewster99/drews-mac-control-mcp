@@ -15,10 +15,10 @@ import Foundation
 
 public enum AppVersion {
     /// Human-facing marketing version (`CFBundleShortVersionString`), e.g. "0.1.0".
-    public static let marketingVersion = "0.1.0"
+    public static let marketingVersion = "0.2.0"
 
     /// Monotonic build number (`CFBundleVersion`).
-    public static let buildNumber = "1"
+    public static let buildNumber = "2"
 
     /// "0.1.0 (1)" — marketing version with the build number in parentheses, for display.
     public static var displayString: String { "\(marketingVersion) (\(buildNumber))" }
