@@ -275,32 +275,25 @@ final class AppModel: ObservableObject {
     /// binary that would actually serve MCP calls. The connection is torn down as soon as we answer.
     func checkAgentVersion() {
         agentVersion = .checking
-        let connection = NSXPCConnection(machServiceName: mcpMachServiceName, options: [])
-        connection.remoteObjectInterface = NSXPCInterface(with: MCPHostProtocol.self)
-        connection.setCodeSigningRequirement(mcpHostRequirement)
-        connection.resume()
-
-        let proxy = connection.remoteObjectProxyWithErrorHandler { [weak self] error in
-            Task { @MainActor in
-                self?.settleAgentVersion(.unreachable(error.localizedDescription), connection: connection)
-            }
-        } as? MCPHostProtocol
-
-        guard let proxy else {
-            settleAgentVersion(.unreachable("could not create host proxy"), connection: connection)
-            return
-        }
-
-        proxy.buildInfo { [weak self] json in
-            Task { @MainActor in
-                guard let self else { connection.invalidate(); return }
-                guard let agent = BuildInfo.decoded(fromJSON: json) else {
-                    self.settleAgentVersion(.unreachable("malformed agent version"), connection: connection)
-                    return
+        // Rides callHost so the XPC-invoked closures are the shared, @Sendable (nonisolated)
+        // ones: the old bespoke version formed a MainActor-inferred error handler that macOS 26's
+        // strict isolation runtime traps on (dispatch_assert_queue) when XPC calls it on the reply
+        // queue — the register-flow crash. callHost also bounds the connection's lifetime.
+        callHost(
+            start: { proxy, reply in proxy.buildInfo(withReply: reply) },
+            completion: { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success(let json):
+                    guard let agent = BuildInfo.decoded(fromJSON: json) else {
+                        self.settleAgentVersion(.unreachable("malformed agent version"))
+                        return
+                    }
+                    self.settleAgentVersion(self.classify(agent: agent))
+                case .failure(let error):
+                    self.settleAgentVersion(.unreachable(Self.describe(error)))
                 }
-                self.settleAgentVersion(self.classify(agent: agent), connection: connection)
-            }
-        }
+            })
     }
 
     // MARK: - User-activity settings (host-owned, over XPC)
@@ -323,7 +316,11 @@ final class AppModel: ObservableObject {
     ) {
         let connection = hostConnection()
         let settler = HostCallSettler(connection: connection, completion: completion)
-        let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+        // @Sendable is load-bearing, not style: it makes the closure nonisolated. Without it a
+        // closure formed in this @MainActor method inherits main-actor isolation, and when XPC
+        // invokes it on its reply queue the strict-concurrency runtime (macOS 26) traps in
+        // dispatch_assert_queue. Same rule for every XPC-invoked closure in this file.
+        let proxy = connection.remoteObjectProxyWithErrorHandler { @Sendable error in
             let reason = error.localizedDescription
             Task { @MainActor in settler.settle(.failure(.transport(reason))) }
         } as? MCPHostProtocol
@@ -414,8 +411,7 @@ final class AppModel: ObservableObject {
 
     /// First-write-wins: the reply block and the error handler can both fire (a late reply after an
     /// invalidation, say), so once we have a non-`checking` answer we keep it and ignore the rest.
-    private func settleAgentVersion(_ result: AgentVersion, connection: NSXPCConnection) {
-        connection.invalidate()
+    private func settleAgentVersion(_ result: AgentVersion) {
         if case .checking = agentVersion {
             agentVersion = result
         } else if case .unknown = agentVersion {
@@ -534,7 +530,9 @@ final class AppModel: ObservableObject {
             old.invalidate()
             debugConnection = nil
         }
-        debugSink.onEvent = { [weak self] json in
+        // Every closure below runs on XPC's queue, so each must be @Sendable (nonisolated) — a
+        // MainActor-inferred closure invoked off-main traps under the strict isolation runtime.
+        debugSink.onEvent = { @Sendable [weak self] json in
             Task { @MainActor in self?.appendDebugEvent(json) }
         }
         let connection = NSXPCConnection(machServiceName: mcpMachServiceName, options: [])
@@ -542,12 +540,12 @@ final class AppModel: ObservableObject {
         connection.exportedInterface = NSXPCInterface(with: MCPDebugSink.self)
         connection.exportedObject = debugSink
         connection.setCodeSigningRequirement(mcpHostRequirement)
-        connection.invalidationHandler = { [weak self] in
+        connection.invalidationHandler = { @Sendable [weak self] in
             Task { @MainActor in self?.debugMonitoring = false }
         }
         connection.resume()
 
-        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ [weak self] _ in
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ @Sendable [weak self] _ in
             Task { @MainActor in self?.debugMonitoring = false }
         }) as? MCPHostProtocol else {
             connection.invalidationHandler = nil
@@ -556,14 +554,14 @@ final class AppModel: ObservableObject {
             return
         }
         debugConnection = connection
-        proxy.setDebugMonitoring(enabled: true) { [weak self] active in
+        proxy.setDebugMonitoring(enabled: true) { @Sendable [weak self] active in
             Task { @MainActor in self?.debugMonitoring = active }
         }
     }
 
     private func stopDebugMonitoring() {
-        if let proxy = debugConnection?.remoteObjectProxyWithErrorHandler({ _ in }) as? MCPHostProtocol {
-            proxy.setDebugMonitoring(enabled: false) { _ in }
+        if let proxy = debugConnection?.remoteObjectProxyWithErrorHandler({ @Sendable _ in }) as? MCPHostProtocol {
+            proxy.setDebugMonitoring(enabled: false) { @Sendable _ in }
         }
         debugConnection?.invalidate()
         debugConnection = nil
