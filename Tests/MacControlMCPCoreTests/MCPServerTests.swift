@@ -41,6 +41,18 @@ final class MCPServerTests: XCTestCase {
         let names = tools.compactMap { $0["name"] as? String }
         XCTAssertTrue(names.contains("list_running_apps"))
         XCTAssertTrue(names.contains("list_simulators"))
+        XCTAssertTrue(names.contains("version"))
+    }
+
+    func testVersionToolReportsCurrentBuild() throws {
+        let server = MCPServer()
+        let line = #"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"version","arguments":{}}}"#
+        let object = try resultObject(server.handleLine(line))
+        let result = try XCTUnwrap(object["result"] as? [String: Any])
+        let content = try XCTUnwrap(result["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+        XCTAssertTrue(text.contains("drews-mac-control-mcp"))
+        XCTAssertTrue(text.contains(AppVersion.displayString))
     }
 
     func testListAppsReturnsTextContent() throws {
