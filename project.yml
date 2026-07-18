@@ -141,6 +141,13 @@ targets:
       - target: InputKit
       - target: MacControlMCPCore
     preBuildScripts:
+      - name: Generate build stamp
+        basedOnDependencyAnalysis: false
+        script: |
+          # Refresh the per-build identity (git hash + timestamp) so every build is uniquely
+          # identifiable and components can detect a stale peer. The file must already exist in
+          # the source list (generated before `xcodegen generate`); this keeps it current.
+          "${SRCROOT}/scripts/gen-build-stamp.sh"
       - name: Verify version
         basedOnDependencyAnalysis: false
         script: |

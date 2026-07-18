@@ -122,6 +122,9 @@ info "signing identity: ${DIM}$IDENTITY${RST}"
 
 # ── 1. generate project ──────────────────────────────────────────────────────
 step "Generating Xcode project (xcodegen)"
+# Stamp a fresh per-build identity BEFORE xcodegen, so the generated file is in the source list
+# (and so this install is distinguishable from the last). The pre-build phase refreshes it again.
+./scripts/gen-build-stamp.sh
 xcodegen generate >/dev/null
 info "MacControlMCP.xcodeproj"
 

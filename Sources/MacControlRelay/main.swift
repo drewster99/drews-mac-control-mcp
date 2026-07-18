@@ -124,6 +124,26 @@ func isNotification(_ line: String) -> Bool {
     return dict["method"] is String && dict["id"] == nil
 }
 
+/// Passive version check: when the forwarded request is `initialize`, read the host's build id out
+/// of the response's `serverInfo` and log a mismatch against this relay's own build. Diagnostic
+/// only — it never disrupts the in-flight session; the host self-retires when its on-disk binary
+/// changes and the app surfaces a re-register banner, so a stale host is short-lived.
+func noteHostBuildIfInitialize(request line: String, response: String) {
+    guard let reqData = line.data(using: .utf8),
+          let req = (try? JSONSerialization.jsonObject(with: reqData)) as? [String: Any],
+          (req["method"] as? String) == "initialize" else { return }
+    guard let respData = response.data(using: .utf8),
+          let resp = (try? JSONSerialization.jsonObject(with: respData)) as? [String: Any],
+          let result = resp["result"] as? [String: Any],
+          let serverInfo = result["serverInfo"] as? [String: Any],
+          let hostBuildId = serverInfo["buildId"] as? String else { return }
+    let relayBuildId = BuildInfo.current.buildId
+    if hostBuildId != relayBuildId {
+        DebugLog.event("version_mismatch",
+                       "host build \(hostBuildId) != relay build \(relayBuildId) — a stale host is running; open MacControlMCP and Re-register, or it will self-retire when idle")
+    }
+}
+
 func isMutating(_ line: String) -> Bool {
     guard let data = line.data(using: .utf8) else { return false }
     let object: Any
@@ -208,6 +228,7 @@ func runRelay() {
                     // to reply to, so stop the loop instead of crashing or spinning.
                     do { try stdout.write(contentsOf: Data((response + "\n").utf8)) }
                     catch { DebugLog.event("disconnect", "stdout write failed: \(error)"); return }
+                    noteHostBuildIfInitialize(request: line, response: response)
                 }
                 DebugLog.response(response)
                 responded = true

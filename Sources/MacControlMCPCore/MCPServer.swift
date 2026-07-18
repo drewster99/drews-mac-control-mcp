@@ -67,7 +67,12 @@ public final class MCPServer {
             return JSONRPC.responseData(id: request.id, result: [
                 "protocolVersion": version,
                 "capabilities": ["tools": [String: Any]()],
-                "serverInfo": ["name": "mac-control-mcp", "version": AppVersion.marketingVersion]
+                // serverInfo carries the host's full build identity: standard `name`/`version`
+                // plus the per-build `buildId`, so an MCP client (and the relay) can tell exactly
+                // which build answered and detect a stale host from an earlier install.
+                "serverInfo": ["name": "mac-control-mcp",
+                               "version": AppVersion.marketingVersion,
+                               "buildId": BuildStamp.buildId]
             ])
 
         case "notifications/initialized", "notifications/cancelled":

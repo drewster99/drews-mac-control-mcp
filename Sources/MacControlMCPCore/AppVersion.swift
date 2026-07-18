@@ -36,12 +36,19 @@ public struct BuildInfo: Codable, Equatable, Sendable {
     public let marketingVersion: String
     public let buildNumber: String
 
+    /// Per-build identity (git hash + build timestamp) baked in by `scripts/gen-build-stamp.sh`.
+    /// Unlike marketing/build numbers this changes on EVERY build, so two components compiled from
+    /// the same install share it and a stale peer from a different install does not — this is the
+    /// authoritative same-build signal.
+    public let buildId: String
+
     /// ISO-8601 modification time of the running executable, or `nil` if it couldn't be read.
     public let binaryBuiltISO8601: String?
 
-    public init(marketingVersion: String, buildNumber: String, binaryBuiltISO8601: String?) {
+    public init(marketingVersion: String, buildNumber: String, buildId: String, binaryBuiltISO8601: String?) {
         self.marketingVersion = marketingVersion
         self.buildNumber = buildNumber
+        self.buildId = buildId
         self.binaryBuiltISO8601 = binaryBuiltISO8601
     }
 
@@ -49,14 +56,15 @@ public struct BuildInfo: Codable, Equatable, Sendable {
     public static var current: BuildInfo {
         BuildInfo(marketingVersion: AppVersion.marketingVersion,
                   buildNumber: AppVersion.buildNumber,
+                  buildId: BuildStamp.buildId,
                   binaryBuiltISO8601: currentBinaryModificationDate())
     }
 
-    /// True when two components were built from the same version + build number. Binary timestamps
-    /// are intentionally excluded: distinct executables of the *same* build (e.g. the GUI and the
-    /// host) have different mtimes, so comparing them would report false drift.
+    /// True when two components are the SAME build — same per-build id. This is stricter than
+    /// marketing/build number (which only bump on manual releases): it catches a stale host or
+    /// relay left over from a previous install of the same nominal version.
     public func hasSameVersion(as other: BuildInfo) -> Bool {
-        marketingVersion == other.marketingVersion && buildNumber == other.buildNumber
+        buildId == other.buildId
     }
 
     /// "0.1.0 (1)" — for display, mirroring `AppVersion.displayString`.
@@ -68,7 +76,7 @@ public struct BuildInfo: Codable, Equatable, Sendable {
         do {
             return String(decoding: try JSONEncoder().encode(self), as: UTF8.self)
         } catch {
-            return #"{"marketingVersion":"?","buildNumber":"?","binaryBuiltISO8601":null}"#
+            return #"{"marketingVersion":"?","buildNumber":"?","buildId":"?","binaryBuiltISO8601":null}"#
         }
     }
 

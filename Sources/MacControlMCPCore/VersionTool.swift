@@ -25,6 +25,7 @@ public struct VersionTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         let info = BuildInfo.current
         var text = "Drew's Mac Control MCP Server (drews-mac-control-mcp) version \(info.displayString)"
+        text += ", build \(info.buildId)"
         if let built = info.binaryBuiltISO8601 {
             text += ", binary built \(built)"
         }

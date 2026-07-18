@@ -451,14 +451,35 @@ final class AppModel: ObservableObject {
     }
 
     func register() {
+        guard runningFromApplications else {
+            lastMessage = "This isn't the /Applications build — SMAppService only registers a signed app from a stable location. Run ./install.sh, then open /Applications/MacControlMCP.app."
+            return
+        }
         do {
+            // Unregister first when already registered: SMAppService.register() is a no-op (or
+            // errors with "Invalid argument") when the same Label already has a Background Task
+            // Management record, even after the embedded plist's BundleProgram changed — so a
+            // rebuild keeps launchd spawning the OLD binary path. Clearing the record first forces
+            // launchd to re-read the current plist. (Learned the hard way in the video-scheduler.)
+            if agent.status != .notRegistered {
+                try? agent.unregister()
+                Thread.sleep(forTimeInterval: 0.8)   // let launchd tear the old job down
+            }
             try agent.register()
-            HostLifecycle.terminateStaleHost()
-            if agent.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
-            lastMessage = runningFromApplications ? "" :
-                "Registered, but this isn't the /Applications build — registration may not stick. Use the notarized app in /Applications."
+            switch agent.status {
+            case .enabled:
+                HostLifecycle.terminateStaleHost()
+                lastMessage = ""
+            case .requiresApproval:
+                SMAppService.openSystemSettingsLoginItems()
+                lastMessage = "Approve MacControlMCP in System Settings ▸ General ▸ Login Items to enable the host."
+            case .notRegistered, .notFound:
+                lastMessage = "Register returned but the host is still \(statusName(agent.status)) — try quitting and reopening the app from /Applications (a running copy whose bundle was replaced by an update can't re-register)."
+            @unknown default:
+                lastMessage = "Register returned an unexpected status: \(statusName(agent.status))."
+            }
         } catch {
-            lastMessage = "Register failed: \(error.localizedDescription) — the app must be the signed/notarized build running from /Applications."
+            lastMessage = "Register failed: \(error.localizedDescription). If you just updated, quit and reopen /Applications/MacControlMCP.app — a running copy whose bundle was replaced can't register."
         }
         refresh()
     }
@@ -654,7 +675,7 @@ struct ContentView: View {
                 Text("MacControlMCP")
                     .font(.largeTitle).bold()
                 Spacer()
-                Text("Version \(model.clientVersion.displayString)")
+                Text("Version \(model.clientVersion.displayString) · build \(model.clientVersion.buildId)")
                     .font(.callout).foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
