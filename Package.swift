@@ -13,7 +13,7 @@ let package = Package(
         // Built by the Xcode project as `MacControlStdio` (project.yml) — same sources, different
         // name because the project and app already claim "MacControlMCP". Keep deps in sync by hand.
         .executableTarget(name: "MacControlMCP", dependencies: ["HostKit"]),
-        .executableTarget(name: "MacControlHost", dependencies: ["HostKit"]),
+        .executableTarget(name: "MacControlHost", dependencies: ["HostKit", "CaptureKit"]),
         .executableTarget(name: "MacControlRelay", dependencies: ["HostKit", "MacControlMCPCore"]),
         .executableTarget(name: "MacControlRegistrar"),
         .executableTarget(name: "AXProbe", dependencies: ["AXKit"],

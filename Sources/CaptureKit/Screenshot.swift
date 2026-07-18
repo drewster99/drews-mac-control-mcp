@@ -73,7 +73,6 @@ public struct ScreenshotTool: Tool {
     // MARK: - Screen (ScreenCaptureKit)
 
     private func captureScreen(maxDimension: Int?) -> String {
-        CaptureSupport.pruneOldScreenshots()
         do {
             let image = try CaptureSupport.captureMainDisplay(maxDimension: maxDimension)
             let path = CaptureSupport.screenshotPath(prefix: "screen")
@@ -87,7 +86,6 @@ public struct ScreenshotTool: Tool {
     // MARK: - Simulator (simctl)
 
     private func captureSimulator(requestedUDID: String?) -> String {
-        CaptureSupport.pruneOldScreenshots()
         let udid: String
         if let requestedUDID, !requestedUDID.isEmpty {
             udid = requestedUDID
@@ -102,6 +100,14 @@ public struct ScreenshotTool: Tool {
             return JSONText.from(["path": path, "udid": udid])
         }
         return JSONText.from(["error": "simulator_capture_failed", "udid": udid])
+    }
+}
+
+/// Public entry point for the long-lived host to prune stale screenshots on its own schedule
+/// (startup + a timer), so cleanup no longer piggybacks on the next capture call.
+public enum ScreenshotCleanup {
+    public static func prune(maxAge: TimeInterval = 3600) {
+        CaptureSupport.pruneOldScreenshots(maxAge: maxAge)
     }
 }
 
@@ -161,13 +167,17 @@ enum CaptureSupport {
         try data.write(to: URL(fileURLWithPath: path))
     }
 
-    /// Our own subdirectory of the temp dir, so cleanup only ever deletes files WE wrote — the
-    /// generic `screen_*`/`simulator_*` prefixes could otherwise collide with another process's
-    /// or the user's files in the shared temp dir.
+    /// Our own subdirectory of the per-user temp dir, so cleanup only ever deletes files WE wrote
+    /// (the generic `screen_*`/`simulator_*` prefixes could otherwise collide with others' files),
+    /// and so macOS's own temp purge (per-user `$TMPDIR`, items untouched for days) is a backstop
+    /// even when the host isn't running to prune. Created 0700 — the captures can contain sensitive
+    /// screen content, so keep them owner-only rather than relying on the temp dir's default mode.
     static func screenshotsDirectory() -> URL {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("maccontrol-screenshots", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
         return dir
     }
 

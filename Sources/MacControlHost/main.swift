@@ -11,6 +11,7 @@
 
 import AppKit
 import ApplicationServices
+import CaptureKit
 import Foundation
 import HostKit
 
@@ -119,6 +120,15 @@ listener.resume()
 
 Timer.scheduledTimer(timeInterval: 15, target: delegate, selector: #selector(HostDelegate.retirementTick),
                      userInfo: nil, repeats: true)
+
+// Screenshot cleanup, decoupled from capture calls: prune stale captures now (clearing anything
+// a prior session left behind, even weeks later when the host next launches) and every 5 minutes
+// while running. macOS's per-user $TMPDIR purge is the backstop for the host-never-runs case. The
+// closure captures nothing (a static call), so it's Sendable-safe under Swift 6.
+ScreenshotCleanup.prune()
+Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
+    ScreenshotCleanup.prune()
+}
 
 // Run a faceless AppKit loop, NOT dispatchMain(): a launchd agent parked in dispatchMain()
 // never pumps the main run loop, so NSWorkspace.runningApplications (used by list_apps)
