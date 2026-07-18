@@ -56,7 +56,8 @@ final class InputToolsTests: XCTestCase {
         let fakeSettle: ActAndSettle = { pid, _ in
             sawPid = pid
             return (quiesced: true, settledAfterMs: 42,
-                    diff: ElementDiff(added: ["e9 AXButton \"Go\""], removed: [], changed: []))
+                    diff: ElementDiff(added: ["e9 AXButton \"Go\""], removed: [], changed: []),
+                    diffPartial: false)
         }
         let out = ScrollTool(canPostEvents: granted, settle: fakeSettle)
             .call(["dy": -120, "observe": "settle", "pid": 4321])

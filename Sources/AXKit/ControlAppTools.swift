@@ -620,6 +620,17 @@ private func axInsertText(_ element: AXElement, _ text: String) -> Bool {
 /// keys a no-op. A nil re-read (element died or AX errored) counts as moved: the likeliest
 /// cause is that the keys landed and changed the UI, and a blind global ⌘V retry would paste
 /// into whatever now has focus.
+/// Paste-consumption probe for `SyntheticInput.paste`: true only on POSITIVE evidence that the
+/// field's value moved off `baseline`. Runs under `pasteLock`, so it must stay a bare AX read.
+/// Returns nil (no probe → blind hold window) when there is nothing trustworthy to compare.
+private func makeConsumedProbe(element: AXElement, canVerify: Bool, baseline: String?) -> (@Sendable () -> Bool)? {
+    guard canVerify, let baseline else { return nil }
+    return { @Sendable in
+        guard let current = element.value else { return false }
+        return current != baseline
+    }
+}
+
 private func valueMoved(_ element: AXElement, from baseline: String, within window: TimeInterval) -> Bool {
     let deadline = Date().addingTimeInterval(window)
     while true {
@@ -734,10 +745,11 @@ public struct TypeTool: Tool {
             let before = canVerify ? element.value : nil
             // Paste-consumption probe: the moment the element's value moves off the baseline, the
             // clipboard can be restored early. Must stay a bare AX read — it runs under pasteLock.
-            var consumedProbe: (@Sendable () -> Bool)?
-            if canVerify, before != nil {
-                consumedProbe = { @Sendable in element.value != before }
-            }
+            // Positive evidence only: a nil re-read (transient AX failure, busy target) must NOT
+            // count as consumed — an early clipboard restore while ⌘V is still queued makes the
+            // target paste the user's OLD clipboard, the exact wrong-data failure the hold window
+            // exists to prevent.
+            let consumedProbe = makeConsumedProbe(element: element, canVerify: canVerify, baseline: before)
             // Assignment inside the actAndSettle action closure is fine — it runs synchronously.
             var typeOutcome: TypeOutcome?
             if let pid = element.pid {
@@ -757,10 +769,16 @@ public struct TypeTool: Tool {
             // ⌘V retry would double-enter the secret.
             if !paste, canVerify, element.subrole != "AXSecureTextField", let baseline = before,
                !valueMoved(element, from: baseline, within: 0.8) {
+                // Re-baseline for the retry's probe: the retry fires precisely because the target
+                // is slow, so the pre-keystroke baseline may be stale — if the keystrokes land
+                // during the paste window, a probe against the OLD baseline would read "consumed"
+                // and restore the clipboard before ⌘V is serviced. A fresh read (nil → no probe,
+                // blind window) keeps the probe's evidence current.
+                let retryProbe = makeConsumedProbe(element: element, canVerify: canVerify, baseline: element.value)
                 if let pid = element.pid {
-                    _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { typeOutcome = type(text, true, consumedProbe) })
+                    _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { typeOutcome = type(text, true, retryProbe) })
                 } else {
-                    typeOutcome = type(text, true, consumedProbe)
+                    typeOutcome = type(text, true, retryProbe)
                 }
                 usedVia = "paste_retry"
             }

@@ -510,12 +510,16 @@ final class AppModel: ObservableObject {
     }
 
     /// Flip verbatim-body logging on the host. The reply is the host's resulting state, so the
-    /// toggle always reflects what the host actually did (a failed round-trip leaves it unchanged).
+    /// toggle always reflects what the host actually did; on a failed round-trip, re-fetch so the
+    /// toggle snaps back to the host's truth instead of silently showing the attempted state.
     func setBodyLogging(_ enabled: Bool) {
         callHost(
             start: { proxy, reply in proxy.setBodyLogging(enabled: enabled, withReply: reply) },
             completion: { [weak self] result in
-                if case .success(let value) = result { self?.bodyLogging = value == "1" }
+                switch result {
+                case .success(let value): self?.bodyLogging = value == "1"
+                case .failure: self?.loadBodyLogging()
+                }
             })
     }
 
@@ -708,7 +712,7 @@ struct ContentView: View {
                     Toggle("Log full request/response bodies to maccontrol.log", isOn: Binding(
                         get: { model.bodyLogging },
                         set: { model.setBodyLogging($0) }))
-                    Text("Bodies can include typed text and clipboard contents. Applies to the host immediately; agent sessions already running keep logging suppressed bodies until they restart.")
+                    Text("Bodies can include typed text and clipboard contents. Applies immediately to the host and to running agent sessions (unless a session was launched with an explicit MACCONTROL_LOG_BODIES override).")
                         .font(.caption2).foregroundStyle(.secondary)
                     if model.debugEvents.isEmpty {
                         Text(model.debugMonitoring ? "Monitoring — waiting for calls…" : "Off")

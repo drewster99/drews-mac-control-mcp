@@ -83,6 +83,10 @@ case "$PREFIX" in
   *)  die "--prefix must be an absolute path (got: $PREFIX)" ;;
 esac
 [ -d "$PREFIX" ] || die "--prefix directory does not exist: $PREFIX"
+# Canonicalize so `..`/symlinks can't sneak past the checks above (e.g. `/Applications/..`
+# resolves to `/`), then re-reject the root against the resolved path.
+PREFIX=$(cd "$PREFIX" && pwd -P) || die "--prefix could not be resolved"
+[ "$PREFIX" != "/" ] || die "--prefix cannot be the filesystem root."
 command -v xcodegen  >/dev/null || die "xcodegen not found. Install it: brew install xcodegen"
 command -v xcodebuild >/dev/null || die "xcodebuild not found. Install the Xcode command-line tools / full Xcode."
 
@@ -152,7 +156,10 @@ STAGE="$PREFIX/.MacControlMCP.app.staging.$$"
 OLD="$PREFIX/.MacControlMCP.app.old.$$"
 # Clean up only the staging copy on exit; $OLD is handled explicitly because on
 # a failed rollback it is the sole surviving copy of the previous install.
-trap 'rm -rf "$STAGE" 2>/dev/null || true' EXIT
+# On any exit: drop the staging copy, and if an interrupt struck between the two renames
+# (old moved aside, new not yet in place), put the previous install back so the user is
+# never left with no app at $DEST.
+trap 'rm -rf "$STAGE" 2>/dev/null || true; if [ ! -e "$DEST" ] && [ -d "$OLD" ]; then mv "$OLD" "$DEST" 2>/dev/null || true; fi' EXIT
 
 if ! cp -R "$APP" "$STAGE" 2>/dev/null; then
   die "Couldn't write to $PREFIX (permission denied). Re-run with: sudo ./install.sh"

@@ -84,6 +84,9 @@ private func settledResult(_ settle: ActAndSettle?, _ arguments: [String: Any],
         "removed": outcome.diff.removed,
         "changed": outcome.diff.changed.map { ["ref": $0.ref, "was": $0.was, "now": $0.now] }
     ]
+    // Same partial-snapshot honesty the AX act verbs report: removals were suppressed because a
+    // bounding snapshot was truncated, so absence from the diff is not proof of removal.
+    if outcome.diffPartial { dict["diffPartial"] = true }
     return JSONText.from(dict)
 }
 

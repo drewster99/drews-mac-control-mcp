@@ -98,6 +98,12 @@ final class HostDelegate: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
         let stale = BinaryIdentity.ofMainExecutable() != launchIdentity
         let idle = Date().timeIntervalSince(lastBecameIdleAt) >= idleExitAfter
         guard stale || idle else { return }
+        // Zero connections does not prove zero work: a relay that timed out invalidates its
+        // connection while the orphaned call may still be running (e.g. mid-typeUnicode). The
+        // input gate is held for exactly that span, so refuse to die while someone holds it —
+        // exiting mid-keystroke could leave a key logically down. The next 15s tick retries.
+        guard GlobalInputGate.shared.tryAcquire() else { return }
+        GlobalInputGate.shared.release()
         DebugLog.event("retire", stale ? "binary changed on disk" : "idle \(Int(idleExitAfter))s with no clients")
         listener.invalidate()
         exit(0)

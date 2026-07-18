@@ -47,7 +47,7 @@ public struct ElementDiff: Equatable, Sendable {
 /// non-Sendable ElementRegistry); calls are serialized by the host, so it's never sent across
 /// isolation boundaries — same as the AX tools that hold the session.
 public typealias ActAndSettle = (_ pid: pid_t, _ action: () -> Void)
-    -> (quiesced: Bool, settledAfterMs: Int, diff: ElementDiff)
+    -> (quiesced: Bool, settledAfterMs: Int, diff: ElementDiff, diffPartial: Bool)
 
 public enum Diff {
     public static func compute(old: ElementNode, new: ElementNode) -> ElementDiff {

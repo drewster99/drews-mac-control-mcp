@@ -47,7 +47,7 @@ public func makeFullServer() -> MCPServer {
     // use, so a click/type/etc. with observe:"settle" returns a diff in the same ref vocabulary.
     let settle: ActAndSettle = { pid, action in
         let outcome = SettleEngine(session: session).actAndSettle(pid: pid, action: action)
-        return (outcome.quiesced, outcome.settledAfterMs, outcome.diff)
+        return (outcome.quiesced, outcome.settledAfterMs, outcome.diff, outcome.diffPartial)
     }
     // The control_app `click`/`type` verbs reach the synthetic-input layer (InputKit) via injected
     // closures, so AXKit stays input-free.

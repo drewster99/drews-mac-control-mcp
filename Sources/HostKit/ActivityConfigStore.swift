@@ -46,7 +46,11 @@ public final class ActivityConfigStore: @unchecked Sendable {
         // Drain the queue before returning so the value is durable by the time the XPC reply
         // confirms it — a host crash right after this call can't silently drop the setting.
         persistQueue.sync {}
-        return clamped
+        // Reply with the LATEST stored value, not necessarily this call's: two concurrent updates
+        // can drain the queue in either order, and an older reply overwriting the app's displayed
+        // config would misreport what the host actually holds.
+        lock.lock(); defer { lock.unlock() }
+        return value
     }
 
     // MARK: - Persistence

@@ -210,7 +210,10 @@ public enum SyntheticInput {
             // a lock-free read — it runs while pasteLock is held. Deadline is checked BEFORE
             // consumed() because an AX read against a hung app can block ~5s, so worst-case hold is
             // ceiling + one AX timeout.
-            let deadline = start.addingTimeInterval(consumed == nil ? pasteConsumeWindow : pasteConsumeCeiling)
+            // The window starts at ⌘V post time, not at `start` — snapshotting a large or
+            // lazy-provider clipboard above can itself take a while, and charging that against
+            // the consume window would restore before the paste had any chance to land.
+            let deadline = Date().addingTimeInterval(consumed == nil ? pasteConsumeWindow : pasteConsumeCeiling)
             while Date() < deadline, pasteboard.changeCount == stamp {
                 if let consumed, consumed() { break }
                 Thread.sleep(forTimeInterval: 0.05)

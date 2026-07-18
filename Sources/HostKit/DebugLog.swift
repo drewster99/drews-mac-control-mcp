@@ -39,30 +39,31 @@ public enum DebugLog {
 
     private static let bodiesLock = NSLock()
 
-    /// Verbatim request/response payloads are opt-in (they may contain secrets); default off.
-    /// The env var wins at process start when explicitly set; otherwise the marker file (the app
-    /// toggle) decides. Only touched under `bodiesLock`.
-    nonisolated(unsafe) private static var logBodiesState: Bool = {
+    /// Explicit env override, captured at launch: "1"/"0" pins the setting for this process's
+    /// lifetime; unset defers to the marker file (the app toggle).
+    private static let bodiesEnvOverride: Bool? = {
         switch ProcessInfo.processInfo.environment["MACCONTROL_LOG_BODIES"] {
         case "1": return true
         case "0": return false
-        default: return FileManager.default.fileExists(atPath: bodiesMarkerURL.path)
+        default: return nil
         }
     }()
 
-    /// Whether verbatim request/response bodies are currently logged.
+    /// Whether verbatim request/response bodies are currently logged. Without an env override
+    /// this consults the marker file on EVERY call (one stat at MCP request rates — cheap), so
+    /// turning the app toggle OFF stops body capture in already-running relays immediately, not
+    /// just in processes launched afterward. Secrets must never keep flowing into the log after
+    /// the user disabled the switch.
     public static var logBodiesEnabled: Bool {
-        bodiesLock.lock(); defer { bodiesLock.unlock() }
-        return logBodiesState
+        if let bodiesEnvOverride { return bodiesEnvOverride }
+        return FileManager.default.fileExists(atPath: bodiesMarkerURL.path)
     }
 
-    /// Flip body logging at runtime (the app's toggle). Persisted as a marker file so the launchd
-    /// host and every future relay process pick the setting up at launch; already-running relays
-    /// keep their launch-time value until their session restarts.
+    /// Flip body logging at runtime (the app's toggle). The marker file IS the state — created
+    /// or removed under `bodiesLock` so concurrent toggles can't interleave their file operations
+    /// and strand the switch opposite to the last request.
     public static func setLogBodies(_ enabled: Bool) {
-        bodiesLock.lock()
-        logBodiesState = enabled
-        bodiesLock.unlock()
+        bodiesLock.lock(); defer { bodiesLock.unlock() }
         let fileManager = FileManager.default
         if enabled {
             try? fileManager.createDirectory(at: bodiesMarkerURL.deletingLastPathComponent(),
