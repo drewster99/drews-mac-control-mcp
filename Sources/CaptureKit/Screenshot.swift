@@ -15,94 +15,6 @@ import Foundation
 import MacControlMCPCore
 import ScreenCaptureKit
 
-public struct ScreenshotTool: Tool {
-    private let hasScreenRecording: @Sendable () -> Bool
-
-    public init(hasScreenRecording: @escaping @Sendable () -> Bool = { CGPreflightScreenCaptureAccess() }) {
-        self.hasScreenRecording = hasScreenRecording
-    }
-
-    public let name = "screenshot"
-
-    /// Below this the capture is unreadably small, and tiny values put extreme-aspect displays at
-    /// risk of a zero scaled dimension, which ScreenCaptureKit rejects opaquely.
-    private static let minimumMaxDimension = 16
-
-    public var descriptor: [String: Any] {
-        [
-            "name": name,
-            "description": "Capture a PNG and return its file path. target: screen (ScreenCaptureKit, needs Screen Recording) or simulator (simctl, no grant).",
-            "inputSchema": [
-                "type": "object",
-                "properties": [
-                    "target": ["type": "string", "enum": ["screen", "simulator"]],
-                    "udid": ["type": "string", "description": "Simulator UDID (defaults to first booted)."],
-                    "maxDimension": ["type": "integer",
-                                     "minimum": Self.minimumMaxDimension,
-                                     "description": "Downscale longest side to this many px (min \(Self.minimumMaxDimension))."]
-                ],
-                "required": ["target"]
-            ]
-        ]
-    }
-
-    public func call(_ arguments: [String: Any]) -> String {
-        switch arguments["target"] as? String {
-        case "simulator":
-            return captureSimulator(requestedUDID: arguments["udid"] as? String)
-        case "screen":
-            guard hasScreenRecording() else {
-                return #"{"error":"screen_recording_not_granted","howToFix":"Grant Screen Recording to the host in System Settings ‣ Privacy & Security ‣ Screen Recording","deepLink":"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"}"#
-            }
-            // JSON null conventionally means "no value" — treat it exactly like an omitted key.
-            guard let rawMaxDimension = arguments["maxDimension"], !(rawMaxDimension is NSNull) else {
-                return captureScreen(maxDimension: nil)
-            }
-            // NSNumber (not `as? Int`) so JSON floats like 500.5 downscale instead of being silently
-            // ignored; the floor also rejects booleans, which bridge to 0 or 1.
-            guard let maxDimension = (rawMaxDimension as? NSNumber)?.intValue,
-                  maxDimension >= Self.minimumMaxDimension else {
-                return #"{"error":"invalid_maxDimension","howToFix":"Pass an integer of at least \#(Self.minimumMaxDimension) — the pixel size for the screenshot's longest side — or omit it for full resolution."}"#
-            }
-            return captureScreen(maxDimension: maxDimension)
-        default:
-            return #"{"error":"unsupported_target","howToFix":"Use target screen or simulator."}"#
-        }
-    }
-
-    // MARK: - Screen (ScreenCaptureKit)
-
-    private func captureScreen(maxDimension: Int?) -> String {
-        do {
-            let image = try CaptureSupport.captureMainDisplay(maxDimension: maxDimension)
-            let path = CaptureSupport.screenshotPath(prefix: "screen")
-            try CaptureSupport.writePNG(image, to: path)
-            return JSONText.from(["path": path, "width": image.width, "height": image.height])
-        } catch {
-            return JSONText.from(["error": "capture_failed", "detail": "\(error)"])
-        }
-    }
-
-    // MARK: - Simulator (simctl)
-
-    private func captureSimulator(requestedUDID: String?) -> String {
-        let udid: String
-        if let requestedUDID, !requestedUDID.isEmpty {
-            udid = requestedUDID
-        } else if let booted = CaptureSupport.firstBootedSimulatorUDID() {
-            udid = booted
-        } else {
-            return #"{"error":"no_booted_simulator","howToFix":"Boot a simulator or pass udid (see list_simulators)."}"#
-        }
-        let path = CaptureSupport.screenshotPath(prefix: "simulator")
-        let status = CaptureSupport.runProcessStatus("/usr/bin/xcrun", ["simctl", "io", udid, "screenshot", path])
-        if status == 0, FileManager.default.fileExists(atPath: path) {
-            return JSONText.from(["path": path, "udid": udid])
-        }
-        return JSONText.from(["error": "simulator_capture_failed", "udid": udid])
-    }
-}
-
 /// Public entry point for the long-lived host to prune stale screenshots on its own schedule
 /// (startup + a timer), so cleanup no longer piggybacks on the next capture call.
 public enum ScreenshotCleanup {
@@ -111,56 +23,9 @@ public enum ScreenshotCleanup {
     }
 }
 
-enum CaptureError: Error { case noDisplay, captureFailed, encodeFailed }
+enum CaptureError: Error { case captureFailed, encodeFailed }
 
 enum CaptureSupport {
-    private final class ResultBox: @unchecked Sendable {
-        var image: CGImage?
-        var error: Error?
-    }
-
-    static func captureMainDisplay(maxDimension: Int?) throws -> CGImage {
-        let box = ResultBox()
-        let semaphore = DispatchSemaphore(value: 0)
-        let task = Task {
-            do {
-                let content = try await SCShareableContent.current
-                guard let display = content.displays.first else { throw CaptureError.noDisplay }
-                let filter = SCContentFilter(display: display, excludingWindows: [])
-                // SCDisplay.width/height are points; SCStreamConfiguration wants pixels. Without the
-                // filter's point-to-pixel scale, Retina displays capture at 1x.
-                let pixelScale = Double(filter.pointPixelScale)
-                let pixelWidth = max(1, Int((filter.contentRect.width * pixelScale).rounded()))
-                let pixelHeight = max(1, Int((filter.contentRect.height * pixelScale).rounded()))
-                let config = SCStreamConfiguration()
-                let longest = max(pixelWidth, pixelHeight)
-                if let maxDimension, maxDimension > 0, longest > maxDimension {
-                    let scale = Double(maxDimension) / Double(longest)
-                    // Clamp to 1: past a 32:1 aspect ratio the short side rounds to zero even at the
-                    // minimum allowed maxDimension, and ScreenCaptureKit fails opaquely on a
-                    // zero-dimension configuration.
-                    config.width = max(1, Int((Double(pixelWidth) * scale).rounded()))
-                    config.height = max(1, Int((Double(pixelHeight) * scale).rounded()))
-                } else {
-                    config.width = pixelWidth
-                    config.height = pixelHeight
-                }
-                box.image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-            } catch {
-                box.error = error
-            }
-            semaphore.signal()
-        }
-        // Bounded wait — a hung capture path must not block the host (which serializes
-        // requests) indefinitely. Cancel the abandoned task so it can't keep doing work.
-        if semaphore.wait(timeout: .now() + 10) == .timedOut {
-            task.cancel()
-            throw CaptureError.captureFailed
-        }
-        if let image = box.image { return image }
-        throw box.error ?? CaptureError.captureFailed
-    }
-
     static func writePNG(_ image: CGImage, to path: String) throws {
         let rep = NSBitmapImageRep(cgImage: image)
         guard let data = rep.representation(using: .png, properties: [:]) else { throw CaptureError.encodeFailed }
@@ -185,27 +50,31 @@ enum CaptureSupport {
         screenshotsDirectory().appendingPathComponent("\(prefix)_\(UUID().uuidString).png").path
     }
 
-    static func firstBootedSimulatorUDID() -> String? {
+    struct SimulatorDevice: Equatable { let udid: String; let name: String }
+
+    /// Booted simulators in a deterministic order: iOS runtimes first, then the newest runtime
+    /// (numeric compare), then lowest udid — so repeated calls list them the same way.
+    static func bootedSimulators() -> [SimulatorDevice] {
         let output = shellOutput("/usr/bin/xcrun", ["simctl", "list", "devices", "booted", "-j"])
         guard let data = output.data(using: .utf8),
               let root = JSONText.object(data) as? [String: Any],
-              let devices = root["devices"] as? [String: Any] else { return nil }
-        // Dictionary iteration order is unspecified, so "first" used to change between calls —
-        // two back-to-back screenshots could hit different simulators. Pick deterministically:
-        // prefer iOS runtimes, then the newest runtime (numeric compare), then the lowest udid.
+              let devices = root["devices"] as? [String: Any] else { return [] }
         let runtimes = devices.keys.sorted { lhs, rhs in
             let lhsIsIOS = lhs.contains("SimRuntime.iOS")
             let rhsIsIOS = rhs.contains("SimRuntime.iOS")
             if lhsIsIOS != rhsIsIOS { return lhsIsIOS }
             return lhs.compare(rhs, options: .numeric) == .orderedDescending
         }
+        var result: [SimulatorDevice] = []
         for runtime in runtimes {
             guard let list = devices[runtime] as? [[String: Any]] else { continue }
-            if let udid = list.compactMap({ $0["udid"] as? String }).min() {
-                return udid
-            }
+            let sims = list.compactMap { entry -> SimulatorDevice? in
+                guard let udid = entry["udid"] as? String else { return nil }
+                return SimulatorDevice(udid: udid, name: entry["name"] as? String ?? udid)
+            }.sorted { $0.udid < $1.udid }
+            result.append(contentsOf: sims)
         }
-        return nil
+        return result
     }
 
     private final class DataBox: @unchecked Sendable { var data = Data() }
@@ -282,9 +151,9 @@ enum CaptureSupport {
         } catch { return }
         let cutoff = Date().addingTimeInterval(-maxAge)
         for url in items {
-            let name = url.lastPathComponent
-            guard url.pathExtension == "png",
-                  name.hasPrefix("screen_") || name.hasPrefix("simulator_") else { continue }
+            // The subdirectory is exclusively ours (only default-location captures land here), so
+            // every PNG in it is fair game — no prefix filter needed.
+            guard url.pathExtension == "png" else { continue }
             do {
                 let values = try url.resourceValues(forKeys: [.contentModificationDateKey])
                 if let modified = values.contentModificationDate, modified < cutoff {

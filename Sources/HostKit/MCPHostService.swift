@@ -63,7 +63,8 @@ public func makeFullServer() -> MCPServer {
     }
     let baseTools = MCPServer.defaultTools()
         + AXTools.all(session: session, click: click, type: type)
-        + [ScreenshotTool(), OCRTool()]
+        + [ScreenshotAppWindowTool(), ScreenshotFullDisplayTool(), ScreenshotSimulatorTool(),
+           ListConnectedDisplaysTool(), ListAppWindowsTool(), OCRTool()]
         + InputTools.all(settle: settle)
     // `batch` dispatches over the base tools (never itself), so a sequence like pressing several
     // calculator keys runs in one XPC round-trip instead of one per key.

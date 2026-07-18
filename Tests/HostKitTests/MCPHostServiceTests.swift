@@ -20,7 +20,8 @@ final class MCPHostServiceTests: XCTestCase {
         let expectation = expectation(description: "reply")
         service.handle(line: #"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#) { reply in
             let text = reply ?? ""
-            for tool in ["list_running_apps", "control_app", "element_detail", "screenshot", "action", "click", "key", "type"] {
+            for tool in ["list_running_apps", "control_app", "element_detail", "screenshot_app_window",
+                         "screenshot_full_display", "list_app_windows", "action", "click", "key", "type"] {
                 XCTAssertTrue(text.contains(tool), "tools/list missing \(tool)")
             }
             expectation.fulfill()
