@@ -77,9 +77,27 @@ enum SCKCapture {
 
 enum CaptureTools {
     static let maxScreenshotsCeiling = 10
+    /// Overall wall-clock budget for a whole multi-capture call. These tools aren't deferrable
+    /// (they don't drive input), so they get the base ~60s relay budget — cap the aggregate well
+    /// under it so N slow captures (each ≤ per-capture timeout, plus OCR) can't wedge the relay.
+    static let overallBudgetSeconds: TimeInterval = 45
+    static let perCaptureTimeout: TimeInterval = 10
     private static let permissionError = #"{"success":false,"error":"screen_recording_not_granted","howToFix":"Grant Screen Recording to the host in System Settings ‣ Privacy & Security ‣ Screen Recording","deepLink":"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"}"#
 
     static func screenRecordingError() -> String { permissionError }
+
+    /// Extract a matcher argument as a string. Absent → "" (match all, intended). A JSON string is
+    /// used as-is; a JSON number (e.g. a pid passed unquoted) is coerced to its digits so it can't
+    /// silently fall through to match-all — the dangerous case codex flagged. Booleans/other types
+    /// are rejected to "" (they can't be a meaningful matcher).
+    static func matcherArgument(_ arguments: [String: Any], _ key: String) -> String {
+        guard let value = arguments[key] else { return "" }
+        if let string = value as? String { return string }
+        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            return number.stringValue
+        }
+        return ""
+    }
 
     /// `""`/`"*"` match everything; otherwise a case-insensitive substring test.
     static func matchesAll(_ pattern: String) -> Bool { pattern.isEmpty || pattern == "*" }
@@ -219,8 +237,8 @@ public struct ScreenshotAppWindowTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard hasScreenRecording() else { return CaptureTools.screenRecordingError() }
-        let appMatch = (arguments["appMatch"] as? String) ?? ""
-        let windowMatch = (arguments["windowMatch"] as? String) ?? ""
+        let appMatch = CaptureTools.matcherArgument(arguments, "appMatch")
+        let windowMatch = CaptureTools.matcherArgument(arguments, "windowMatch")
         let performOCR = (arguments["performOCR"] as? Bool) ?? false
         let limit = CaptureTools.clampMaxScreenshots(ToolArguments.strictNumber(arguments, for: "maxScreenshots")?.intValue)
 
@@ -260,6 +278,8 @@ public struct ScreenshotAppWindowTool: Tool {
         let selected = Array(candidates.prefix(limit))
         let dropped = candidates.count - selected.count
 
+        let overallDeadline = Date().addingTimeInterval(CaptureTools.overallBudgetSeconds)
+        var budgetSkipped = 0
         var screenshots: [[String: Any]] = []
         for window in selected {
             let app = window.owningApplication
@@ -269,20 +289,33 @@ public struct ScreenshotAppWindowTool: Tool {
                 "windowId": Int(window.windowID)
             ]
             if let display = CaptureTools.displayName(for: window, in: displays) { entry["display"] = display }
-            do {
-                let filter = SCContentFilter(desktopIndependentWindow: window)
-                let image = try SCKCapture.capture(filter: filter, maxDimension: nil)
-                let path = CaptureTools.outputPath(in: outputDir, prefix: app?.applicationName ?? "window")
-                CaptureTools.writeAndOCR(image, to: path, performOCR: performOCR, into: &entry)
-            } catch {
+            let remaining = overallDeadline.timeIntervalSinceNow
+            if remaining < 1 {
+                budgetSkipped += 1
                 entry["success"] = false
-                entry["error"] = "capture_failed: \(error.localizedDescription)"
+                entry["error"] = "skipped: overall capture budget exceeded"
+            } else {
+                do {
+                    let filter = SCContentFilter(desktopIndependentWindow: window)
+                    let image = try SCKCapture.capture(filter: filter, maxDimension: nil,
+                                                       timeout: min(CaptureTools.perCaptureTimeout, remaining))
+                    let path = CaptureTools.outputPath(in: outputDir, prefix: app?.applicationName ?? "window")
+                    CaptureTools.writeAndOCR(image, to: path, performOCR: performOCR, into: &entry)
+                } catch {
+                    entry["success"] = false
+                    entry["error"] = "capture_failed: \(error.localizedDescription)"
+                }
             }
             screenshots.append(entry)
         }
 
-        var out: [String: Any] = ["success": true, "screenshots": screenshots]
+        // Top-level `success` means "matched and attempted" (per the tool contract); `succeeded`
+        // is the count that actually produced an image, so automation can tell an all-failed run
+        // from a clean one without walking every entry.
+        var out: [String: Any] = ["success": true, "screenshots": screenshots,
+                                   "succeeded": screenshots.filter { ($0["success"] as? Bool) == true }.count]
         if dropped > 0 { out["truncated"] = ["matched": candidates.count, "captured": selected.count, "dropped": dropped] }
+        if budgetSkipped > 0 { out["budgetSkipped"] = budgetSkipped }
         return JSONText.from(out)
     }
 }
@@ -314,7 +347,7 @@ public struct ScreenshotFullDisplayTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard hasScreenRecording() else { return CaptureTools.screenRecordingError() }
-        let displayMatch = (arguments["displayMatch"] as? String) ?? ""
+        let displayMatch = CaptureTools.matcherArgument(arguments, "displayMatch")
         let maxDimension = ToolArguments.strictNumber(arguments, for: "maxDimension")?.intValue
 
         let outputDir: URL
@@ -413,7 +446,7 @@ public struct ListAppWindowsTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard hasScreenRecording() else { return CaptureTools.screenRecordingError() }
-        let appMatch = (arguments["appMatch"] as? String) ?? ""
+        let appMatch = CaptureTools.matcherArgument(arguments, "appMatch")
         guard let content = SCKCapture.shareableContent() else {
             return JSONText.from(["success": false, "error": "capture_unavailable"])
         }
@@ -472,7 +505,7 @@ public struct ScreenshotSimulatorTool: Tool {
     }
 
     public func call(_ arguments: [String: Any]) -> String {
-        let match = (arguments["match"] as? String) ?? ""
+        let match = CaptureTools.matcherArgument(arguments, "match")
         let performOCR = (arguments["performOCR"] as? Bool) ?? false
         let limit = CaptureTools.clampMaxScreenshots(ToolArguments.strictNumber(arguments, for: "maxScreenshots")?.intValue)
 
@@ -494,9 +527,18 @@ public struct ScreenshotSimulatorTool: Tool {
         let selected = Array(booted.prefix(limit))
         let dropped = booted.count - selected.count
 
+        let overallDeadline = Date().addingTimeInterval(CaptureTools.overallBudgetSeconds)
+        var budgetSkipped = 0
         var screenshots: [[String: Any]] = []
         for sim in selected {
             var entry: [String: Any] = ["udid": sim.udid, "appName": sim.name]
+            if overallDeadline.timeIntervalSinceNow < 1 {
+                budgetSkipped += 1
+                entry["success"] = false
+                entry["error"] = "skipped: overall capture budget exceeded"
+                screenshots.append(entry)
+                continue
+            }
             let path = CaptureTools.outputPath(in: outputDir, prefix: "simulator_\(sim.name)")
             let status = CaptureSupport.runProcessStatus("/usr/bin/xcrun", ["simctl", "io", sim.udid, "screenshot", path])
             if status == 0, let image = OCRSupport.loadCGImage(path) {
@@ -524,8 +566,10 @@ public struct ScreenshotSimulatorTool: Tool {
             screenshots.append(entry)
         }
 
-        var out: [String: Any] = ["success": true, "screenshots": screenshots]
+        var out: [String: Any] = ["success": true, "screenshots": screenshots,
+                                   "succeeded": screenshots.filter { ($0["success"] as? Bool) == true }.count]
         if dropped > 0 { out["truncated"] = ["matched": booted.count, "captured": selected.count, "dropped": dropped] }
+        if budgetSkipped > 0 { out["budgetSkipped"] = budgetSkipped }
         return JSONText.from(out)
     }
 }
