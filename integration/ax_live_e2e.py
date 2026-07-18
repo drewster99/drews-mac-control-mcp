@@ -25,12 +25,14 @@ NOT exercised here — they post system-wide events and must be run deliberately
 Usage:  python3 integration/ax_live_e2e.py   (exit 0 = all checks passed)
 """
 import glob
-import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mcp_client import MCPServer, ServerDied, RpcTimeout, TestAbort, first
 
 
 def locate_binary():
@@ -41,40 +43,9 @@ def locate_binary():
         "~/Library/Developer/Xcode/DerivedData/MacControlMCP-*/Build/Products/*/MacControlStdio")
     hits = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
     if not hits:
-        sys.exit("MacControlStdio not found — build the 'All' scheme via xcode-mcp-server first, "
+        sys.exit("MacControlStdio not found — build the 'All' scheme via drews-xcode-mcp first, "
                  "or set MACCONTROL_STDIO=/path/to/MacControlStdio")
     return hits[0]
-
-
-class Server:
-    def __init__(self, binary):
-        self.p = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                  stderr=subprocess.DEVNULL, bufsize=1, text=True)
-        self._id = 0
-
-    def rpc(self, method, params=None):
-        self._id += 1
-        req = {"jsonrpc": "2.0", "id": self._id, "method": method}
-        if params is not None:
-            req["params"] = params
-        self.p.stdin.write(json.dumps(req) + "\n")
-        self.p.stdin.flush()
-        return json.loads(self.p.stdout.readline())
-
-    def call(self, name, arguments):
-        resp = self.rpc("tools/call", {"name": name, "arguments": arguments})
-        text = resp["result"]["content"][0]["text"]
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {"_text": text}
-
-    def close(self):
-        try:
-            self.p.stdin.close()
-        except Exception:
-            pass
-        self.p.terminate()
 
 
 results = []
@@ -134,7 +105,7 @@ def test_calculator(s):
             e = s.call("find_elements", {"pid": pid, "identifier": ident})
             if isinstance(e, list) and e:
                 return e[0]["ref"]
-        return None
+        raise TestAbort(f"no element with identifier in {idents}")
 
     s.call("perform", {"ref": ref_for("AllClear", "Clear"), "action": "AXPress"})
     time.sleep(0.2)
@@ -157,7 +128,7 @@ def test_calculator(s):
     check("set_focus", s.call("set_focus", {"ref": ref_for("Five")}).get("ok") is True)
 
     wins = s.call("find_elements", {"pid": pid, "role": "AXWindow", "limit": 5})
-    wref = wins[0]["ref"]
+    wref = first(wins, "Calculator AXWindow")["ref"]
     mv = s.call("window", {"ref": wref, "action": "move", "x": 120, "y": 120})
     fr = s.call("element_detail", {"ref": wref}).get("frame", {})
     check("window move -> frame read-back (verified AX write)",
@@ -195,7 +166,7 @@ def test_textedit(s):
         time.sleep(1.0)  # let the document window's AX tree populate
         areas = s.call("find_elements", {"pid": pid, "role": "AXTextArea", "limit": 5})
         check("found AXTextArea", isinstance(areas, list) and len(areas) > 0)
-        ref = areas[0]["ref"]
+        ref = first(areas, "TextEdit AXTextArea")["ref"]
         check("text area is value-settable",
               s.call("element_detail", {"ref": ref}).get("settable") is True)
 
@@ -226,18 +197,28 @@ def test_textedit(s):
         pass
 
 
+def run_tests(s):
+    init = s.rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                "clientInfo": {"name": "ax-live-e2e", "version": "1"}})
+    check("initialize", "result" in init)
+    if "result" not in init:
+        return
+    for section in (test_calculator, test_textedit):
+        try:
+            section(s)
+        except TestAbort as e:
+            check(f"{section.__name__} completed", False, str(e))
+
+
 def main():
     binary = locate_binary()
     print(f"server: {binary}\n")
-    s = Server(binary)
+    s = MCPServer([binary])
     try:
-        init = s.rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
-                                    "clientInfo": {"name": "ax-live-e2e", "version": "1"}})
-        check("initialize", "result" in init)
-        if "result" not in init:
-            sys.exit("server did not initialize")
-        test_calculator(s)
-        test_textedit(s)
+        try:
+            run_tests(s)
+        except (ServerDied, RpcTimeout, TestAbort) as e:
+            check("server conversation stayed healthy", False, str(e))
     finally:
         s.close()
 

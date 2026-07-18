@@ -18,10 +18,10 @@ the on-demand host (launched by launchd), so a correct response proves relay →
 """
 import json
 import os
-import select
-import subprocess
 import sys
-import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mcp_client import MCPServer, ServerDied, RpcTimeout, TestAbort
 
 
 def locate_relay():
@@ -40,65 +40,51 @@ def locate_relay():
 def main():
     relay = locate_relay()
     print(f"relay: {relay}\n")
-    p = subprocess.Popen([relay], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, bufsize=1, text=True)
-
-    def rpc(obj, timeout=20):
-        p.stdin.write(json.dumps(obj) + "\n")
-        p.stdin.flush()
-        # The relay may need to cold-launch the host on the first call. Bounded reads via
-        # select() so a host that never launches reports a timeout instead of hanging.
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            ready, _, _ = select.select([p.stdout], [], [], max(0.0, deadline - time.time()))
-            if not ready:
-                return None
-            line = p.stdout.readline()
-            if line == "":   # EOF — relay exited
-                return None
-            if line.strip():
-                return json.loads(line)
-        return None
-
+    # 20s per call: the relay may need to cold-launch the host via launchd on the first one.
+    s = MCPServer([relay], timeout=20)
     ok = True
     try:
-        init = rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                    "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                               "clientInfo": {"name": "verify-relay", "version": "1"}}})
-        if init and "result" in init:
+        init = s.rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                    "clientInfo": {"name": "verify-relay", "version": "1"}})
+        if "result" in init:
             print("  [PASS] initialize via relay->XPC->host")
         else:
             ok = False
             print(f"  [FAIL] initialize via relay — {init}")
 
-        resp = rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                    "params": {"name": "list_apps", "arguments": {}}})
         try:
-            apps = json.loads(resp["result"]["content"][0]["text"])
-            print(f"  [PASS] list_apps via relay -> {len(apps)} apps (host is alive)")
-        except Exception:
+            apps = s.call("list_apps", {})
+            if isinstance(apps, list):
+                print(f"  [PASS] list_apps via relay -> {len(apps)} apps (host is alive)")
+            else:
+                ok = False
+                print(f"  [FAIL] list_apps via relay — {json.dumps(apps)}")
+        except TestAbort as e:
             ok = False
-            print(f"  [FAIL] list_apps via relay — {resp}")
+            print(f"  [FAIL] list_apps via relay — {e}")
 
         # Confirm the host actually holds the Accessibility grant (so AX tools will work).
-        resp = rpc({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                    "params": {"name": "focused_element", "arguments": {}}})
-        text = (resp or {}).get("result", {}).get("content", [{}])[0].get("text", "") if resp else ""
-        if "accessibility_not_granted" in text:
-            ok = False
-            print("  [FAIL] host lacks Accessibility — grant the HOST (not the relay) in "
-                  "System Settings ‣ Privacy & Security ‣ Accessibility")
-        else:
-            print("  [PASS] host holds Accessibility (focused_element did not report a grant error)")
-    finally:
         try:
-            p.stdin.close()
-        except Exception:
-            pass
-        err = p.stderr.read() if p.stderr else ""
-        p.terminate()
-        if err.strip():
-            print(f"\nrelay stderr:\n{err.strip()}")
+            focused = s.call("focused_element", {})
+            text = focused.get("_text") if isinstance(focused, dict) and "_text" in focused \
+                else json.dumps(focused)
+            if "accessibility_not_granted" in text:
+                ok = False
+                print("  [FAIL] host lacks Accessibility — grant the HOST (not the relay) in "
+                      "System Settings ‣ Privacy & Security ‣ Accessibility")
+            else:
+                print("  [PASS] host holds Accessibility (focused_element did not report a grant error)")
+        except TestAbort as e:
+            ok = False
+            print(f"  [FAIL] focused_element via relay — {e}")
+    except (ServerDied, RpcTimeout) as e:
+        ok = False
+        print(f"  [FAIL] relay conversation died — {e}")
+    finally:
+        s.close()
+        tail = s.stderr_tail()
+        if tail.strip():
+            print(f"\nrelay stderr:\n{tail.strip()}")
 
     print("\n" + ("ALL GOOD — the installed launchd/XPC path works end-to-end."
                   if ok else "INCOMPLETE — see FAIL lines above."))

@@ -17,12 +17,14 @@ stay hands-off while it runs. Run it ATTENDED. It verifies effects by reading st
 Run from an Accessibility-trusted terminal (synthetic input rides that grant).
 """
 import glob
-import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mcp_client import MCPServer, ServerDied, RpcTimeout, TestAbort, first
 
 
 def locate_binary():
@@ -35,36 +37,6 @@ def locate_binary():
     if not hits:
         sys.exit("MacControlStdio not found — build the 'All' scheme first.")
     return hits[0]
-
-
-class Server:
-    def __init__(self, b):
-        self.p = subprocess.Popen([b], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                  stderr=subprocess.DEVNULL, bufsize=1, text=True)
-        self._id = 0
-
-    def rpc(self, method, params=None):
-        self._id += 1
-        req = {"jsonrpc": "2.0", "id": self._id, "method": method}
-        if params is not None:
-            req["params"] = params
-        self.p.stdin.write(json.dumps(req) + "\n")
-        self.p.stdin.flush()
-        return json.loads(self.p.stdout.readline())
-
-    def call(self, name, arguments):
-        text = self.rpc("tools/call", {"name": name, "arguments": arguments})["result"]["content"][0]["text"]
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {"_text": text}
-
-    def close(self):
-        try:
-            self.p.stdin.close()
-        except Exception:
-            pass
-        self.p.terminate()
 
 
 results = []
@@ -179,6 +151,8 @@ def test_click(s):
 
     # Park the window at a known spot so button screen-coords are stable and unoccluded.
     win = find_one(s, pid, role="AXWindow", limit=1)
+    if win is None:
+        raise TestAbort("no Calculator AXWindow found")
     s.call("window", {"ref": win["ref"], "action": "move", "x": 220, "y": 220})
     s.call("window", {"ref": win["ref"], "action": "raise"})
     time.sleep(0.6)
@@ -197,6 +171,8 @@ def test_click(s):
         time.sleep(0.3)
 
     five = ref_for("Five")
+    if five is None:
+        raise TestAbort("no Calculator button with identifier 'Five'")
     fr = five["frame"]
     s.call("click", {"x": fr["x"] + fr["w"] // 2, "y": fr["y"] + fr["h"] // 2})
     time.sleep(0.4)
@@ -209,23 +185,46 @@ def test_click(s):
           disp is not None and disp.replace("‎", "").strip().endswith("5"), f"display={disp!r}")
 
 
+def run_tests(s):
+    s.rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                         "clientInfo": {"name": "cgevent-e2e", "version": "1"}})
+    # Confirm synthetic-input access before firing (gates on CGPreflightPostEventAccess).
+    # Fail closed: anything other than a clean hover result means we refuse to post
+    # system-wide events on an unknown-state machine.
+    probe = s.call("hover", {"x": 12, "y": 12})
+    err = probe.get("error") if isinstance(probe, dict) else None
+    if err == "post_event_access_denied":
+        check("synthetic-input access granted", False, str(probe)); return
+    if err is not None or not isinstance(probe, dict):
+        check("hover preflight healthy (unexpected error — refusing to fire global input)",
+              False, str(probe)); return
+    for section in (test_typing, test_click):
+        try:
+            section(s)
+        except TestAbort as e:
+            check(f"{section.__name__} completed", False, str(e))
+
+
 def main():
     binary = locate_binary()
     print(f"server: {binary}")
     print("ATTENDED RUN — please don't touch the keyboard/mouse for ~30s.\n")
-    s = Server(binary)
+    # Remember what the user was working in so the harness's foregrounding of throwaway
+    # targets doesn't leave them stranded in Calculator/TextEdit afterwards.
+    frontmost = subprocess.run(
+        ["osascript", "-e",
+         'tell application "System Events" to get name of first process whose frontmost is true'],
+        capture_output=True, text=True).stdout.strip()
+    s = MCPServer([binary])
     try:
-        s.rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
-                             "clientInfo": {"name": "cgevent-e2e", "version": "1"}})
-        # Confirm synthetic-input access before firing (gates on CGPreflightPostEventAccess).
-        probe = s.call("hover", {"x": 12, "y": 12})
-        if isinstance(probe, dict) and "error" in probe and "post" in json.dumps(probe).lower():
-            check("synthetic-input access granted", False, str(probe))
-            return
-        test_typing(s)
-        test_click(s)
+        try:
+            run_tests(s)
+        except (ServerDied, RpcTimeout, TestAbort) as e:
+            check("server conversation stayed healthy", False, str(e))
     finally:
         s.close()
+        if frontmost:
+            activate(frontmost.replace('"', '\\"'))
 
     passed = sum(1 for _, ok in results if ok)
     print(f"\n{passed}/{len(results)} checks passed")

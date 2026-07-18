@@ -56,8 +56,13 @@ while [ $# -gt 0 ]; do
 done
 
 # ── pretty output ────────────────────────────────────────────────────────────
-if [ -t 1 ]; then BOLD=$(tput bold); DIM=$(tput dim); RED=$(tput setaf 1); GRN=$(tput setaf 2); YEL=$(tput setaf 3); RST=$(tput sgr0)
-else BOLD=""; DIM=""; RED=""; GRN=""; YEL=""; RST=""; fi
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "$TERM" != "dumb" ] && command -v tput >/dev/null 2>&1; then
+  BOLD=$(tput bold 2>/dev/null || true); DIM=$(tput dim 2>/dev/null || true)
+  RED=$(tput setaf 1 2>/dev/null || true); GRN=$(tput setaf 2 2>/dev/null || true)
+  YEL=$(tput setaf 3 2>/dev/null || true); RST=$(tput sgr0 2>/dev/null || true)
+else
+  BOLD=""; DIM=""; RED=""; GRN=""; YEL=""; RST=""
+fi
 step() { echo "${BOLD}==>${RST} ${BOLD}$*${RST}"; }
 info() { echo "    $*"; }
 warn() { echo "${YEL}    warning:${RST} $*" >&2; }
@@ -68,6 +73,16 @@ step "Preflight"
 [ "$(uname)" = "Darwin" ] || die "MacControlMCP only runs on macOS."
 OSMAJOR=$(sw_vers -productVersion | cut -d. -f1)
 [ "$OSMAJOR" -ge 14 ] || die "macOS 14 (Sonoma) or later required (found $(sw_vers -productVersion))."
+
+# --prefix is the target of move/remove operations below; validate it before
+# anything destructive can run against a bad value.
+while [ "${PREFIX%/}" != "$PREFIX" ]; do PREFIX="${PREFIX%/}"; done
+[ -n "$PREFIX" ] || die "--prefix cannot be the filesystem root."
+case "$PREFIX" in
+  /*) ;;
+  *)  die "--prefix must be an absolute path (got: $PREFIX)" ;;
+esac
+[ -d "$PREFIX" ] || die "--prefix directory does not exist: $PREFIX"
 command -v xcodegen  >/dev/null || die "xcodegen not found. Install it: brew install xcodegen"
 command -v xcodebuild >/dev/null || die "xcodebuild not found. Install the Xcode command-line tools / full Xcode."
 
@@ -130,14 +145,43 @@ fi
 # ── 5. install ───────────────────────────────────────────────────────────────
 step "Installing to $PREFIX"
 DEST="$PREFIX/MacControlMCP.app"
-# Stop a host left running by a previous install so the bundle can be replaced.
-pkill -x MacControlHost 2>/dev/null || true
-if ! rm -rf "$DEST" 2>/dev/null; then
-  die "Couldn't remove $DEST (permission denied). Re-run with: sudo ./install.sh"
-fi
-if ! cp -R "$APP" "$DEST" 2>/dev/null; then
+# Stage the new bundle next to the destination so the final swap is a pair of
+# atomic same-volume renames — no window where $DEST is missing or half-copied
+# while launchd can respawn the host. $$ suffixes keep concurrent runs apart.
+STAGE="$PREFIX/.MacControlMCP.app.staging.$$"
+OLD="$PREFIX/.MacControlMCP.app.old.$$"
+# Clean up only the staging copy on exit; $OLD is handled explicitly because on
+# a failed rollback it is the sole surviving copy of the previous install.
+trap 'rm -rf "$STAGE" 2>/dev/null || true' EXIT
+
+if ! cp -R "$APP" "$STAGE" 2>/dev/null; then
   die "Couldn't write to $PREFIX (permission denied). Re-run with: sudo ./install.sh"
 fi
+
+# Stop a host left running by a previous install, and wait for it to actually
+# exit so the swap doesn't race a process launchd is still tearing down.
+pkill -x MacControlHost 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  pgrep -x MacControlHost >/dev/null 2>&1 || break
+  sleep 0.2
+done
+
+if [ -e "$DEST" ] || [ -L "$DEST" ]; then
+  if ! mv "$DEST" "$OLD" 2>/dev/null; then
+    die "Couldn't move aside $DEST (permission denied). Re-run with: sudo ./install.sh"
+  fi
+fi
+if ! mv "$STAGE" "$DEST" 2>/dev/null; then
+  if [ -d "$OLD" ]; then
+    mv "$OLD" "$DEST" 2>/dev/null || warn "rollback failed — previous app left at $OLD"
+  fi
+  die "Couldn't install to $DEST. Re-run with: sudo ./install.sh"
+fi
+# The Mach service may have relaunched the old host mid-swap; stop it (before
+# deleting its bundle) so the next activation runs the new binary.
+pkill -x MacControlHost 2>/dev/null || true
+rm -rf "$OLD" 2>/dev/null || true
+trap - EXIT
 RELAY="$DEST/Contents/Helpers/MacControlRelay"
 info "$DEST"
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Signs + notarizes the Xcode-built MacControlMCP.app (build it via xcode-mcp-server first).
+# Signs + notarizes the Xcode-built MacControlMCP.app (build it via drews-xcode-mcp first).
 # Re-signing without an entitlements file strips the debug get-task-allow, giving a clean
 # hardened-runtime bundle that notarization accepts.
 set -euo pipefail
@@ -8,8 +8,11 @@ cd "$(dirname "$0")"
 DID="Developer ID Application: Nuclear Cyborg Corp (P8MA38JTXY)"
 PROFILE="${NOTARY_PROFILE:-ncc-cli-notarytool}"
 
-SRC=$(find "$HOME/Library/Developer/Xcode/DerivedData/MacControlMCP-"*/Build/Products/Release -maxdepth 1 -name "MacControlMCP.app" 2>/dev/null | head -1)
-if [ -z "${SRC:-}" ]; then echo "No Release app found — build the 'Release' scheme via xcode-mcp-server first."; exit 1; fi
+# find's glob order is unspecified and could sign a stale build; ls -td picks the
+# newest, and `|| true` keeps this pipefail script alive so the friendly error
+# below prints instead of a silent death.
+SRC=$(ls -td "$HOME/Library/Developer/Xcode/DerivedData/MacControlMCP-"*/Build/Products/Release/MacControlMCP.app 2>/dev/null | head -1 || true)
+if [ -z "${SRC:-}" ]; then echo "No Release app found — build the 'Release' scheme via drews-xcode-mcp first."; exit 1; fi
 echo "source: $SRC"
 
 APP="dist/MacControlMCP.app"

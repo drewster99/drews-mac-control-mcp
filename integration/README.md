@@ -15,7 +15,7 @@ The binary is auto-located from DerivedData (build the `All` scheme first), or p
 | Script | Proves | Targets | Attended? |
 |---|---|---|---|
 | `ax_live_e2e.py` | read (`ui_snapshot`, `find_elements` incl. identifier/actionable filters, `element_detail`, `element_at`, `focused_element`), AX **act** (`perform`/AXPress, `set_value`, `set_focus`, `reveal`, `window` move, `open_menu`), `observe:"settle"`, `wait_for`, `get_changes` value-diff | Calculator (native AppKit), TextEdit | no — background, element-targeted |
-| `capture_sim_electron_e2e.py` | `screenshot` (screen + simulator), downscale, `ocr` (Vision), `sim` (statusbar/appearance), `list_simulators`, Electron read coverage | Booted simulator, screen, Slack/Postman/Discord | no |
+| `capture_sim_electron_e2e.py` | `screenshot` (screen + simulator), downscale, `ocr` (Vision), `sim` (statusbar/appearance), `list_simulators`, Electron read coverage | Booted simulator, screen, Slack/Postman/Discord (already running; launching is opt-in via `E2E_LAUNCH_APPS=1`) | no |
 | `cgevent_live_e2e.py` | the 6 **global-input** verbs — `click`, `scroll`, `key`, `type_text`, `hover`, `drag` — with read-back where observable (typed text, ⌘A+delete→empty, click→display, drag→window frame), plus `type_text` with `observe:"settle"` returning a diff | Calculator + TextEdit (foregrounded) | **YES** — posts system-wide events |
 
 Run:
@@ -28,8 +28,11 @@ python3 integration/cgevent_live_e2e.py   # ATTENDED — don't touch keyboard/mo
 
 Each prints per-check PASS/FAIL and exits non-zero if any check fails. The first two only
 touch apps they launch in the background (`open -g`) with element-targeted AX calls, so they
-don't disturb the foreground session. `cgevent_live_e2e.py` foregrounds its targets and fires
-**real keyboard/mouse events** — run it attended.
+don't disturb the foreground session. `capture_sim_electron_e2e.py` prefers an
+already-running Electron app; launching one is **opt-in** via `E2E_LAUNCH_APPS=1` (without it
+the Electron section prints a SKIP, not a failure), and any app it launched is quit on exit.
+`cgevent_live_e2e.py` foregrounds its targets and fires **real keyboard/mouse events** — run
+it attended.
 
 Note: CGEvent keystrokes/clicks process a beat *after* `post()` returns, so the harness reads
 state back after a short settle delay (an immediate read can miss the just-posted key).
