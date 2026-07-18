@@ -224,15 +224,26 @@ if [ "$LAUNCH" -eq 1 ]; then
 fi
 
 # ── 7. register MCP clients ──────────────────────────────────────────────────
+# Remove-then-add would destroy a working registration if the add then failed. Try add first;
+# only if it fails (usually "already exists") remove and re-add, so a working registration is
+# never left worse than it started. Report failure honestly to the caller.
 register_claude() {
   command -v claude >/dev/null || return 1
-  as_user claude mcp remove maccontrol >/dev/null 2>&1 || true
-  as_user claude mcp add --scope user maccontrol "$RELAY" && info "claude: registered 'maccontrol'"
+  if as_user claude mcp add --scope user maccontrol "$RELAY" >/dev/null 2>&1 \
+     || { as_user claude mcp remove maccontrol >/dev/null 2>&1; as_user claude mcp add --scope user maccontrol "$RELAY" >/dev/null 2>&1; }; then
+    info "claude: registered 'maccontrol'"
+  else
+    warn "claude: could not register 'maccontrol' (prior registration, if any, left intact)"; return 1
+  fi
 }
 register_codex() {
   command -v codex >/dev/null || return 1
-  as_user codex mcp remove maccontrol >/dev/null 2>&1 || true
-  as_user codex mcp add maccontrol -- "$RELAY" && info "codex: registered 'maccontrol'"
+  if as_user codex mcp add maccontrol -- "$RELAY" >/dev/null 2>&1 \
+     || { as_user codex mcp remove maccontrol >/dev/null 2>&1; as_user codex mcp add maccontrol -- "$RELAY" >/dev/null 2>&1; }; then
+    info "codex: registered 'maccontrol'"
+  else
+    warn "codex: could not register 'maccontrol' (prior registration, if any, left intact)"; return 1
+  fi
 }
 
 if [ "$CLIENTS" != "none" ]; then

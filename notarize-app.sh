@@ -30,7 +30,8 @@ codesign --force --options runtime --timestamp -s "$DID" "$APP"
 
 echo "== verify =="
 codesign --verify --deep --strict --verbose=2 "$APP"
-codesign -dvv "$APP/Contents/Helpers/MacControlHost.app" 2>&1 | grep -E "Identifier|TeamIdentifier" | head -2
+# Informational only; `|| true` so a non-matching grep can't abort the script under pipefail.
+codesign -dvv "$APP/Contents/Helpers/MacControlHost.app" 2>&1 | grep -E "Identifier|TeamIdentifier" | head -2 || true
 
 echo "== notarize =="
 rm -f dist/MacControlMCP.zip
@@ -38,5 +39,11 @@ ditto -c -k --keepParent "$APP" dist/MacControlMCP.zip
 xcrun notarytool submit dist/MacControlMCP.zip --keychain-profile "$PROFILE" --wait
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
-spctl -a -vvv -t exec "$APP" 2>&1 || true
-echo "== done -> $APP =="
+# The final Gatekeeper acceptance check must be able to FAIL the script — masking a rejection
+# with `|| true` would print "done" for an app that won't actually launch on a user's machine.
+if spctl -a -vvv -t exec "$APP" 2>&1; then
+  echo "== done -> $APP =="
+else
+  echo "!! Gatekeeper assessment REJECTED $APP — not distributable" >&2
+  exit 1
+fi

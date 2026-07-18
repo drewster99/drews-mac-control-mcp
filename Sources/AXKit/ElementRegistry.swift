@@ -407,16 +407,14 @@ public final class ElementRegistry {
         switch LocatorMatcher.resolve(locator, in: freshTree) {
         case .resolved(let tempRef):
             guard let element = fresh[tempRef] else { return .stale }
-            // Re-bind the ORIGINAL ref to the live element so future calls hit the cache,
-            // instead of allocating a fresh ref and re-resolving (slow) on every call.
-            // Drop the dead element's identity entry only if THIS ref owns it — an alias must not
-            // evict the canonical owner's mapping. (If unowned by us, the owner's own reap removes it.)
-            if elementToRef[stored.element] == ref { elementToRef[stored.element] = nil }
-            storage[ref] = Stored(element: element, locator: locator, pid: pid,
-                                  processStartTime: Self.processStartTime(of: pid))
-            // Claim identity only if unowned: a prior canonical ref stays canonical; this ref remains
-            // a working alias through its storage entry.
-            if elementToRef[element] == nil { elementToRef[element] = ref }
+            // Do NOT rebind storage[ref] to the recovered element. `ref` may be a control ref,
+            // whose contract forbids silent remapping (a later control verb must not act on a
+            // different, locator-matched element). Register the recovered element under its own
+            // identity-stable ref and return the element directly; `ref` keeps pointing at the
+            // dead element, so control verbs (element(for:)+isAlive) correctly report it stale
+            // while AX verbs — which permit locator recovery — get the live element (re-resolving
+            // per call, an acceptable cost on the stale path).
+            _ = register(element)
             return .resolved(element)
         case .ambiguous(let tempRefs):
             let candidates = tempRefs.compactMap { fresh[$0] }.map { register($0).ref }

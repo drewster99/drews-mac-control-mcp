@@ -161,8 +161,18 @@ enum CaptureSupport {
         try data.write(to: URL(fileURLWithPath: path))
     }
 
+    /// Our own subdirectory of the temp dir, so cleanup only ever deletes files WE wrote — the
+    /// generic `screen_*`/`simulator_*` prefixes could otherwise collide with another process's
+    /// or the user's files in the shared temp dir.
+    static func screenshotsDirectory() -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("maccontrol-screenshots", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
     static func screenshotPath(prefix: String) -> String {
-        (NSTemporaryDirectory() as NSString).appendingPathComponent("\(prefix)_\(UUID().uuidString).png")
+        screenshotsDirectory().appendingPathComponent("\(prefix)_\(UUID().uuidString).png").path
     }
 
     static func firstBootedSimulatorUDID() -> String? {
@@ -253,7 +263,7 @@ enum CaptureSupport {
     /// captures (which can contain sensitive screen content) don't accumulate there. Called at the
     /// start of each capture; failures are ignored.
     static func pruneOldScreenshots(maxAge: TimeInterval = 3600) {
-        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        let dir = screenshotsDirectory()   // only our own subdirectory, never the shared temp root
         let fileManager = FileManager.default
         let items: [URL]
         do {

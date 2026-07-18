@@ -73,6 +73,7 @@ public struct BatchTool: Tool {
         var results: [[String: Any]] = []
         var failedAt: Int?
         var aborted = false
+        var overranBudget = false
 
         for (index, step) in steps.enumerated() {
             let remaining = deadline.timeIntervalSinceNow
@@ -101,6 +102,10 @@ public struct BatchTool: Tool {
             let raw = ToolTimeout.withScopeCeiling(remaining) { dispatch(toolName, stepArguments) }
             let failed = BatchTool.stepFailed(raw)
             results.append(["step": index, "tool": toolName, "ok": !failed, "result": BatchTool.parse(raw)])
+            // The scope ceiling only bounds tools that consult ToolTimeout; a fixed-duration tool
+            // (screenshot, a settle-heavy action) can still finish past the batch deadline. Record
+            // that so the batch doesn't report a clean run when it actually overran its budget.
+            if Date() > deadline { overranBudget = true }
             if failed {
                 failedAt = failedAt ?? index
                 if stopOnError { aborted = true; break }
@@ -115,13 +120,14 @@ public struct BatchTool: Tool {
         }
 
         var out: [String: Any] = [
-            "ok": failedAt == nil,
+            "ok": failedAt == nil && !overranBudget,
             "stepCount": steps.count,
             "ran": results.count,
             "aborted": aborted,
             "results": results
         ]
         if let failedAt { out["failedAt"] = failedAt }
+        if overranBudget { out["overranBudget"] = true }
         return JSONText.from(out)
     }
 

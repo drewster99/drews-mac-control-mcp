@@ -126,11 +126,34 @@ class MCPServer:
         except json.JSONDecodeError:
             return {"_text": text}
 
+    def _drain_pipes(self, budget=1.0):
+        # Bounded, non-blocking drain: read whatever's already buffered on both pipes so a large
+        # shutdown flush (>64 KiB) can't block the server on a full pipe while we wait for it to
+        # exit. Never reads to EOF (that could block forever if the server doesn't exit) — it just
+        # empties what's ready within `budget` seconds.
+        import select
+        fds = [p.fileno() for p in (self.p.stdout, self.p.stderr)]
+        deadline = time.monotonic() + budget
+        while fds:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select(fds, [], [], remaining)
+            if not ready:
+                break
+            for fd in ready:
+                try:
+                    if not os.read(fd, 65536):
+                        fds.remove(fd)   # EOF on this pipe
+                except OSError:
+                    fds.remove(fd)
+
     def close(self):
         try:
             self.p.stdin.close()  # EOF lets a well-behaved server exit on its own
         except Exception:
             pass
+        self._drain_pipes()
         try:
             self.p.wait(timeout=2)
         except subprocess.TimeoutExpired:
