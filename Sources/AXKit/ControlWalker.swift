@@ -157,6 +157,12 @@ public enum ControlWalker {
     ) -> ([AXElement], HiddenCount) {
         let element = node.element
         if collectionRoles.contains(node.role) {
+            // Bracket the collection reads: these visible/selected fetches run AFTER draft's own
+            // per-node bracket closed, so without this they'd use the ~6s global default each —
+            // one wedged collection could overrun the walk deadline by tens of seconds while
+            // holding the host's serial request queue. Revert to the global default after.
+            element.setMessagingTimeout(1)
+            defer { element.setMessagingTimeout(0) }
             // `node.rowCount` was captured by draft under this same collection-role predicate, so it
             // is populated here — and reusing it keeps the hidden count consistent with the
             // `[N rows × M cols]` the renderer prints from the same value.

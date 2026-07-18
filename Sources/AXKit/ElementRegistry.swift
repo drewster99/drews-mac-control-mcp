@@ -18,6 +18,10 @@ public final class ElementRegistry {
         var element: AXElement
         var locator: Locator?
         var pid: pid_t?
+        /// Start time of the process this handle was bound to. An AXUIElement is tied to a pid, so
+        /// after the original app exits and the pid is recycled, the handle would silently target
+        /// the replacement process — this stamp lets resolve() reject that.
+        var processStartTime: UInt64?
     }
 
     private struct SnapshotBaseline {
@@ -115,12 +119,16 @@ public final class ElementRegistry {
     private func ref(for element: AXElement, pid: pid_t?) -> String {
         if let existing = elementToRef[element] {
             storage[existing]?.element = element
-            if let pid { storage[existing]?.pid = pid }
+            if let pid {
+                storage[existing]?.pid = pid
+                storage[existing]?.processStartTime = Self.processStartTime(of: pid)
+            }
             return existing
         }
         let ref = allocator.next()
         elementToRef[element] = ref
-        storage[ref] = Stored(element: element, locator: nil, pid: pid)
+        storage[ref] = Stored(element: element, locator: nil, pid: pid,
+                              processStartTime: pid.flatMap { Self.processStartTime(of: $0) })
         return ref
     }
 
@@ -373,6 +381,15 @@ public final class ElementRegistry {
     /// Resolve a ref to a live element, re-resolving via its locator if the element died.
     public func resolve(_ ref: String) -> RefResolution {
         guard let stored = storage[ref] else { return .unknown }
+        // Reject a recycled pid before trusting the handle: if the process that owned this pid at
+        // registration is gone and a new one took the pid, both isAlive (the handle now answers
+        // from the replacement process) and the locator rebuild below would silently act on the
+        // wrong app. Only fail when both incarnation stamps are known and differ — an unreadable
+        // stamp degrades to today's liveness-only behavior.
+        if let pid = stored.pid, let launched = stored.processStartTime,
+           let current = Self.processStartTime(of: pid), current != launched {
+            return .stale
+        }
         if stored.element.isAlive { return .resolved(stored.element) }
         guard let locator = stored.locator, let pid = stored.pid else { return .stale }
 
@@ -395,7 +412,8 @@ public final class ElementRegistry {
             // Drop the dead element's identity entry only if THIS ref owns it — an alias must not
             // evict the canonical owner's mapping. (If unowned by us, the owner's own reap removes it.)
             if elementToRef[stored.element] == ref { elementToRef[stored.element] = nil }
-            storage[ref] = Stored(element: element, locator: locator, pid: pid)
+            storage[ref] = Stored(element: element, locator: locator, pid: pid,
+                                  processStartTime: Self.processStartTime(of: pid))
             // Claim identity only if unowned: a prior canonical ref stays canonical; this ref remains
             // a working alias through its storage entry.
             if elementToRef[element] == nil { elementToRef[element] = ref }
@@ -505,7 +523,15 @@ public final class ElementRegistry {
     /// this host. Passing 0 to the system-wide element resets the global to its default; there is no
     /// getter for the global timeout, so restoring a saved prior value is impossible — call sites must
     /// not nest, and nothing else in the host may set a session-long global.
+    /// The system-wide AX element's messaging timeout is PROCESS-global, so two connections on
+    /// different queue threads would otherwise clobber each other's set/reset. Serialize the
+    /// whole set→use→reset span across the process so the timeout each caller sets is the one in
+    /// force for its own body.
+    private static let systemWideTimeoutLock = NSLock()
+
     private func withGlobalMessagingTimeout<T>(_ seconds: Float, _ body: (AXElement) -> T) -> T {
+        Self.systemWideTimeoutLock.lock()
+        defer { Self.systemWideTimeoutLock.unlock() }
         let systemWide = AXElement.systemWide()
         systemWide.setMessagingTimeout(seconds)
         defer { systemWide.setMessagingTimeout(0) }
@@ -536,6 +562,7 @@ public final class ElementRegistry {
         let app = AXElement.application(pid: pid)
         app.setMessagingTimeout(5)
         guard let menuBar = app.menuBar else { return (false, "no menu bar") }
+        menuBar.setMessagingTimeout(5)   // bound the menuBar.children read (app's timeout doesn't reach it)
         var current = menuBar
         var openedTopLevelItem: AXElement?
         for title in path {
@@ -587,13 +614,23 @@ public final class ElementRegistry {
     /// Finds a child menu item by title — handles both the menu bar (AXMenuBarItem children)
     /// and a submenu (an AXMenu child whose children are AXMenuItems).
     private static func findMenuChild(in element: AXElement, title: String) -> AXElement? {
+        // Bound every per-child read: a timeout on `element` (or the app) does not extend to its
+        // children (per the setMessagingTimeout contract), so without bracketing each child these
+        // role/title reads run at the ~6s global default and a wedged app could hold the serial
+        // request queue for N×6s. Revert each to the global default after.
         for child in element.children {
+            child.setMessagingTimeout(1)
+            defer { child.setMessagingTimeout(0) }
             guard let role = child.role else { continue }
             if (role == "AXMenuBarItem" || role == "AXMenuItem"), child.title == title {
                 return child
             }
             if role == "AXMenu" {
-                for item in child.children where item.title == title { return item }
+                for item in child.children {
+                    item.setMessagingTimeout(1)
+                    defer { item.setMessagingTimeout(0) }
+                    if item.title == title { return item }
+                }
             }
         }
         return nil

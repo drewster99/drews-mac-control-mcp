@@ -100,7 +100,16 @@ public struct DeferringTool: Tool {
 
         while true {
             let userReady = !willDefer || executeDespiteBusy || idle() >= minIdle
-            if userReady, gate.tryAcquire() { break }
+            if userReady, gate.tryAcquire() {
+                // Honor the caller's total deadline even on a late acquisition: a gate that frees
+                // up after the deadline must not let the (bounded but nonzero) inner work run past
+                // the budget the caller asked for. Release and report rather than proceed.
+                if let totalDeadline, Date() >= totalDeadline {
+                    gate.release()
+                    return inputBusy(waited: Date().timeIntervalSince(start))
+                }
+                break
+            }
             let now = Date()
             if let totalDeadline, now >= totalDeadline {
                 return userReady ? inputBusy(waited: now.timeIntervalSince(start))

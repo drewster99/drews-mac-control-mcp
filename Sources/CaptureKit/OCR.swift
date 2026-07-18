@@ -46,8 +46,12 @@ public struct OCRTool: Tool {
         guard let image = OCRSupport.loadCGImage(expanded) else {
             return JSONText.from(["error": "cannot_load_image", "path": path])
         }
-        let lines = OCRSupport.recognizeText(image)
-        return JSONText.from(["text": lines.joined(separator: "\n"), "lines": lines])
+        switch OCRSupport.recognizeText(image) {
+        case .text(let lines):
+            return JSONText.from(["text": lines.joined(separator: "\n"), "lines": lines])
+        case .failure(let reason):
+            return JSONText.from(["error": "ocr_failed", "reason": reason, "path": path])
+        }
     }
 }
 
@@ -65,17 +69,24 @@ enum OCRSupport {
         return image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
     }
 
-    static func recognizeText(_ image: CGImage) -> [String] {
+    enum OCRResult {
+        case text([String])
+        /// Vision failed (as opposed to genuinely finding no text) — the caller must report an
+        /// error rather than an empty result, or an agent reads a failure as "nothing on screen".
+        case failure(String)
+    }
+
+    static func recognizeText(_ image: CGImage) -> OCRResult {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         do {
             try handler.perform([request])
         } catch {
-            return []
+            return .failure(error.localizedDescription)
         }
-        guard let results = request.results else { return [] }
-        return results.compactMap { $0.topCandidates(1).first?.string }
+        guard let results = request.results else { return .text([]) }
+        return .text(results.compactMap { $0.topCandidates(1).first?.string })
     }
 
 }

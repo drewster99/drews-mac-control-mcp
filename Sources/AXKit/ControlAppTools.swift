@@ -689,6 +689,17 @@ public struct TypeTool: Tool {
             var result: [String: Any] = ["success": outcome.posted,
                                          "chars": outcome.typedCharacters ?? text.count]
             if !outcome.posted { result["error"] = "event_creation_failed" }
+            // Surface clipboard fate on the paste path here too — otherwise a lost clipboard
+            // (`.failed`) would be reported as a plain success, same gap the ref path avoids.
+            if let pasteDetails = outcome.paste {
+                result["clipboardRestore"] = pasteDetails.clipboardRestore.rawValue
+                result["clipboardHeldMs"] = pasteDetails.heldMs
+                if pasteDetails.clipboardRestore == .failed {
+                    result["clipboardWarning"] = "The user's previous clipboard contents could not be restored and were lost."
+                } else if pasteDetails.clipboardRestore == .restoredWithoutPromises {
+                    result["clipboardWarning"] = "The clipboard was restored, but provider-backed content (e.g. file promises) could not be preserved and was lost."
+                }
+            }
             return JSONText.from(result)
         }
         guard let ref = refArgument as? String else {
@@ -727,7 +738,12 @@ public struct TypeTool: Tool {
                 Thread.sleep(forTimeInterval: 0.15)
             }
             let clickable = element.activationPoint
-            let safeToClick = isTextInput(element) || element.actions.isEmpty
+            // Pre-click to focus ONLY a genuine text-input role or an inert (no-action) element.
+            // Deliberately NOT `isTextInput`, which also returns true for any value-settable
+            // element — a settable *actionable* control (slider/stepper/checkbox) would be pressed
+            // or jumped by the click before we ever typed.
+            let isTextInputRole = element.role.map(textInputRoles.contains) ?? false
+            let safeToClick = isTextInputRole || element.actions.isEmpty
             if let point = clickable, safeToClick {
                 _ = click(Double(point.x), Double(point.y), 1) // raises app to key + focuses a field
                 Thread.sleep(forTimeInterval: 0.25)
@@ -769,16 +785,15 @@ public struct TypeTool: Tool {
             // ⌘V retry would double-enter the secret.
             if !paste, canVerify, element.subrole != "AXSecureTextField", let baseline = before,
                !valueMoved(element, from: baseline, within: 0.8) {
-                // Re-baseline for the retry's probe: the retry fires precisely because the target
-                // is slow, so the pre-keystroke baseline may be stale — if the keystrokes land
-                // during the paste window, a probe against the OLD baseline would read "consumed"
-                // and restore the clipboard before ⌘V is serviced. A fresh read (nil → no probe,
-                // blind window) keeps the probe's evidence current.
-                let retryProbe = makeConsumedProbe(element: element, canVerify: canVerify, baseline: element.value)
+                // No consumption probe on the retry: the retry fires precisely because the target
+                // is draining events slowly, so a value-move probe can't tell OUR paste landing
+                // from the first attempt's late keystrokes — and a false "consumed" would restore
+                // the clipboard before ⌘V is serviced, making the target paste the OLD clipboard.
+                // The blind hold window (nil probe) is the safe choice for exactly this case.
                 if let pid = element.pid {
-                    _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { typeOutcome = type(text, true, retryProbe) })
+                    _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { typeOutcome = type(text, true, nil) })
                 } else {
-                    typeOutcome = type(text, true, retryProbe)
+                    typeOutcome = type(text, true, nil)
                 }
                 usedVia = "paste_retry"
             }
@@ -805,6 +820,8 @@ public struct TypeTool: Tool {
                 base["clipboardHeldMs"] = pasteDetails.heldMs
                 if pasteDetails.clipboardRestore == .failed {
                     base["clipboardWarning"] = "The user's previous clipboard contents could not be restored and were lost."
+                } else if pasteDetails.clipboardRestore == .restoredWithoutPromises {
+                    base["clipboardWarning"] = "The clipboard was restored, but provider-backed content (e.g. file promises) could not be preserved and was lost."
                 }
             }
             return actedResponse(registry, ref: ref, deadline: Date().addingTimeInterval(4),
@@ -1102,7 +1119,7 @@ public struct PressByNameTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return controlPermissionError }
-        guard let pidValue = arguments["pid"] as? Int, let pid = pid_t(exactly: pidValue) else {
+        guard let pidValue = arguments["pid"] as? Int, let pid = pid_t(exactly: pidValue), pid > 0 else {
             return JSONText.from(["success": false, "error": "missing_or_invalid_pid"])
         }
         guard let name = (arguments["name"] as? String), !name.isEmpty else {

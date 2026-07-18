@@ -10,6 +10,10 @@ public struct PasteOutcome: Sendable {
     public enum ClipboardRestore: String, Sendable {
         /// Snapshot written back successfully.
         case restored
+        /// Plain-data types were restored, but the original clipboard held provider-backed content
+        /// (file promises, lazy providers) whose data couldn't be captured, so that content is
+        /// lost even though the write "succeeded".
+        case restoredWithoutPromises = "restored_without_promises"
         /// Someone else wrote the pasteboard during the hold; their content wins.
         case skippedExternalWrite = "skipped_external_write"
         /// Restore write failed twice — the user's clipboard was lost.

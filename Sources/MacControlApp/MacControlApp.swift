@@ -563,6 +563,10 @@ final class AppModel: ObservableObject {
         if let proxy = debugConnection?.remoteObjectProxyWithErrorHandler({ @Sendable _ in }) as? MCPHostProtocol {
             proxy.setDebugMonitoring(enabled: false) { @Sendable _ in }
         }
+        // Detach the invalidation handler before invalidating, mirroring startDebugMonitoring: a
+        // deferred `debugMonitoring = false` from this teardown could otherwise land after a quick
+        // re-enable and wrongly show the toggle Off while the host keeps streaming.
+        debugConnection?.invalidationHandler = nil
         debugConnection?.invalidate()
         debugConnection = nil
         debugMonitoring = false

@@ -68,9 +68,30 @@ info() { echo "    $*"; }
 warn() { echo "${YEL}    warning:${RST} $*" >&2; }
 die()  { echo "${RED}error:${RST} $*" >&2; exit 1; }
 
+# Run a command as the human who invoked sudo, not as root — GUI launch and per-user MCP
+# client registration must land in the user's session/home, not root's. A no-op when not
+# running under sudo.
+as_user() {
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    sudo -u "$SUDO_USER" "$@"
+  else
+    "$@"
+  fi
+}
+# UID whose hosts we may stop: the invoking user's, so a shared/multi-user machine's other
+# sessions aren't killed by an install.
+TARGET_UID="$(id -u "${SUDO_USER:-$(id -un)}" 2>/dev/null || id -u)"
+
 # ── preflight ────────────────────────────────────────────────────────────────
 step "Preflight"
 [ "$(uname)" = "Darwin" ] || die "MacControlMCP only runs on macOS."
+# Running the whole script as root signs against root's (usually empty) keychain and leaves
+# root-owned build artifacts. Only the copy into a protected prefix ever needs elevation, and
+# the user-facing steps (launch, client registration) are dropped back to $SUDO_USER below.
+if [ "$(id -u)" -eq 0 ]; then
+  warn "running as root: signing uses root's keychain and build artifacts will be root-owned."
+  warn "prefer running unprivileged; elevate only if the copy into $PREFIX is denied."
+fi
 OSMAJOR=$(sw_vers -productVersion | cut -d. -f1)
 [ "$OSMAJOR" -ge 14 ] || die "macOS 14 (Sonoma) or later required (found $(sw_vers -productVersion))."
 
@@ -161,15 +182,18 @@ OLD="$PREFIX/.MacControlMCP.app.old.$$"
 # never left with no app at $DEST.
 trap 'rm -rf "$STAGE" 2>/dev/null || true; if [ ! -e "$DEST" ] && [ -d "$OLD" ]; then mv "$OLD" "$DEST" 2>/dev/null || true; fi' EXIT
 
+# A leftover staging dir (from a killed prior run) would make cp -R nest the bundle inside it
+# and install a wrapper dir as MacControlMCP.app — remove any before copying.
+rm -rf "$STAGE" 2>/dev/null || true
 if ! cp -R "$APP" "$STAGE" 2>/dev/null; then
   die "Couldn't write to $PREFIX (permission denied). Re-run with: sudo ./install.sh"
 fi
 
 # Stop a host left running by a previous install, and wait for it to actually
 # exit so the swap doesn't race a process launchd is still tearing down.
-pkill -x MacControlHost 2>/dev/null || true
+pkill -x -U "$TARGET_UID" MacControlHost 2>/dev/null || true
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  pgrep -x MacControlHost >/dev/null 2>&1 || break
+  pgrep -x -U "$TARGET_UID" MacControlHost >/dev/null 2>&1 || break
   sleep 0.2
 done
 
@@ -186,7 +210,7 @@ if ! mv "$STAGE" "$DEST" 2>/dev/null; then
 fi
 # The Mach service may have relaunched the old host mid-swap; stop it (before
 # deleting its bundle) so the next activation runs the new binary.
-pkill -x MacControlHost 2>/dev/null || true
+pkill -x -U "$TARGET_UID" MacControlHost 2>/dev/null || true
 rm -rf "$OLD" 2>/dev/null || true
 trap - EXIT
 RELAY="$DEST/Contents/Helpers/MacControlRelay"
@@ -195,20 +219,20 @@ info "$DEST"
 # ── 6. launch (self-bootstraps the host LaunchAgent + permission prompts) ─────
 if [ "$LAUNCH" -eq 1 ]; then
   step "Launching (registers the host LaunchAgent, prompts for permissions)"
-  open "$DEST"
+  as_user open "$DEST"
   info "grant Accessibility (and Screen Recording for screenshots) when prompted"
 fi
 
 # ── 7. register MCP clients ──────────────────────────────────────────────────
 register_claude() {
   command -v claude >/dev/null || return 1
-  claude mcp remove maccontrol >/dev/null 2>&1 || true
-  claude mcp add --scope user maccontrol "$RELAY" && info "claude: registered 'maccontrol'"
+  as_user claude mcp remove maccontrol >/dev/null 2>&1 || true
+  as_user claude mcp add --scope user maccontrol "$RELAY" && info "claude: registered 'maccontrol'"
 }
 register_codex() {
   command -v codex >/dev/null || return 1
-  codex mcp remove maccontrol >/dev/null 2>&1 || true
-  codex mcp add maccontrol -- "$RELAY" && info "codex: registered 'maccontrol'"
+  as_user codex mcp remove maccontrol >/dev/null 2>&1 || true
+  as_user codex mcp add maccontrol -- "$RELAY" && info "codex: registered 'maccontrol'"
 }
 
 if [ "$CLIENTS" != "none" ]; then
