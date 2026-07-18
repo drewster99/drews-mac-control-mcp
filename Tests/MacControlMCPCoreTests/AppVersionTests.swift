@@ -18,16 +18,17 @@ final class AppVersionTests: XCTestCase {
         XCTAssertNil(BuildInfo.decoded(fromJSON: "not json"))
     }
 
-    func testSameBuildIdIgnoresBinaryTimestamp() {
-        let a = BuildInfo(marketingVersion: "1.0.0", buildNumber: "5", buildId: "same", binaryBuiltISO8601: "A")
-        let b = BuildInfo(marketingVersion: "1.0.0", buildNumber: "5", buildId: "same", binaryBuiltISO8601: "B")
+    func testSameMarketingAndBuildIsSameVersion() {
+        // Same install: equal marketing + build, even if buildId/binary timestamp differ.
+        let a = BuildInfo(marketingVersion: "1.0.0", buildNumber: "5", buildId: "x", binaryBuiltISO8601: "A")
+        let b = BuildInfo(marketingVersion: "1.0.0", buildNumber: "5", buildId: "y", binaryBuiltISO8601: "B")
         XCTAssertTrue(a.hasSameVersion(as: b))
     }
 
-    func testDifferentBuildIdIsDrift() {
-        // Same nominal version, different per-build id (a stale peer from another install).
-        let a = BuildInfo(marketingVersion: "1.0.0", buildNumber: "5", buildId: "build-A", binaryBuiltISO8601: nil)
-        let b = BuildInfo(marketingVersion: "1.0.0", buildNumber: "5", buildId: "build-B", binaryBuiltISO8601: nil)
+    func testHigherBuildNumberIsDrift() {
+        // A stale peer from an earlier install has a lower build number.
+        let a = BuildInfo(marketingVersion: "0.2.1", buildNumber: "3", buildId: "x", binaryBuiltISO8601: nil)
+        let b = BuildInfo(marketingVersion: "0.2.0", buildNumber: "2", buildId: "x", binaryBuiltISO8601: nil)
         XCTAssertFalse(a.hasSameVersion(as: b))
     }
 }

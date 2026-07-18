@@ -13,8 +13,8 @@ settings:
     CODE_SIGNING_ALLOWED: "NO"
     # Native-bundle version. Keep in lockstep with AppVersion.swift (the compiled-in source of
     # truth every target reports); the "Verify version" pre-build phase fails the build on drift.
-    MARKETING_VERSION: "0.2.0"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "0.2.1"
+    CURRENT_PROJECT_VERSION: "3"
 
 targets:
   MacControlMCPCore:
@@ -141,23 +141,18 @@ targets:
       - target: InputKit
       - target: MacControlMCPCore
     preBuildScripts:
-      - name: Generate build stamp
-        basedOnDependencyAnalysis: false
-        script: |
-          # Refresh the per-build identity (git hash + timestamp) so every build is uniquely
-          # identifiable and components can detect a stale peer. The file must already exist in
-          # the source list (generated before `xcodegen generate`); this keeps it current.
-          "${SRCROOT}/scripts/gen-build-stamp.sh"
       - name: Verify version
         basedOnDependencyAnalysis: false
         script: |
-          # Fail the build if the bundle version (project.yml) and AppVersion.swift (what every
-          # component reports at runtime / over MCP) disagree — so there is one number to bump.
+          # Keep marketing version AND build number in lockstep between project.yml (the bundle
+          # Info.plists) and AppVersion.swift (what every component reports at runtime / over MCP).
+          # scripts/bump-version.sh advances both together on each install; this guards a hand-edit
+          # that touched only one.
           APPVER="${SRCROOT}/Sources/MacControlMCPCore/AppVersion.swift"
           SWIFT_MARKETING=$(grep -oE 'marketingVersion = "[^"]+"' "$APPVER" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           SWIFT_BUILD=$(grep -oE 'buildNumber = "[^"]+"' "$APPVER" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           if [ "$SWIFT_MARKETING" != "$MARKETING_VERSION" ] || [ "$SWIFT_BUILD" != "$CURRENT_PROJECT_VERSION" ]; then
-            echo "error: version drift — AppVersion.swift is $SWIFT_MARKETING ($SWIFT_BUILD) but project.yml MARKETING_VERSION/CURRENT_PROJECT_VERSION is $MARKETING_VERSION ($CURRENT_PROJECT_VERSION). Set both to the same value."
+            echo "error: version drift — AppVersion.swift is $SWIFT_MARKETING ($SWIFT_BUILD) but project.yml is $MARKETING_VERSION ($CURRENT_PROJECT_VERSION). Set both to the same value."
             exit 1
           fi
     postCompileScripts:

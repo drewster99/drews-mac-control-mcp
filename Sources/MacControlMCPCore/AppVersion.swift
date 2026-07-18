@@ -14,13 +14,17 @@
 import Foundation
 
 public enum AppVersion {
-    /// Human-facing marketing version (`CFBundleShortVersionString`), e.g. "0.1.0".
-    public static let marketingVersion = "0.2.0"
+    /// Marketing version (`CFBundleShortVersionString`). The patch component is bumped on every
+    /// install by `scripts/bump-version.sh` (0.2.0 → 0.2.1 → …); bump minor/major by hand for a
+    /// real release. Kept in lockstep with project.yml's MARKETING_VERSION.
+    public static let marketingVersion = "0.2.1"
 
-    /// Monotonic build number (`CFBundleVersion`).
-    public static let buildNumber = "2"
+    /// Monotonic build number (`CFBundleVersion`), incremented on every install by
+    /// `scripts/bump-version.sh` — never reused, so a higher number is always a newer install.
+    /// Kept in lockstep with project.yml's CURRENT_PROJECT_VERSION.
+    public static let buildNumber = "3"
 
-    /// "0.1.0 (1)" — marketing version with the build number in parentheses, for display.
+    /// "0.2.1 (3)" — marketing version with the build number; both advance on every install.
     public static var displayString: String { "\(marketingVersion) (\(buildNumber))" }
 }
 
@@ -60,11 +64,12 @@ public struct BuildInfo: Codable, Equatable, Sendable {
                   binaryBuiltISO8601: currentBinaryModificationDate())
     }
 
-    /// True when two components are the SAME build — same per-build id. This is stricter than
-    /// marketing/build number (which only bump on manual releases): it catches a stale host or
-    /// relay left over from a previous install of the same nominal version.
+    /// True when two components are from the same install. marketing + build both advance on every
+    /// install, so equal values mean the same install and a stale peer (an older install) has a
+    /// lower build number. (`buildId` is finer-grained but isn't needed for this — a bumped build
+    /// number already distinguishes installs.)
     public func hasSameVersion(as other: BuildInfo) -> Bool {
-        buildId == other.buildId
+        marketingVersion == other.marketingVersion && buildNumber == other.buildNumber
     }
 
     /// "0.1.0 (1)" — for display, mirroring `AppVersion.displayString`.

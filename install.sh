@@ -122,9 +122,14 @@ info "signing identity: ${DIM}$IDENTITY${RST}"
 
 # ── 1. generate project ──────────────────────────────────────────────────────
 step "Generating Xcode project (xcodegen)"
-# Stamp a fresh per-build identity BEFORE xcodegen, so the generated file is in the source list
-# (and so this install is distinguishable from the last). The pre-build phase refreshes it again.
+# Bump the committed version (marketing patch + monotonic build number) so every install is a new,
+# higher version — then stamp the exact-binary id — both BEFORE xcodegen so they're in the build.
+# The version files are left modified; commit them after the install.
+./scripts/bump-version.sh
 ./scripts/gen-build-stamp.sh
+NEW_VERSION=$(grep -oE 'marketingVersion = "[^"]+"' Sources/MacControlMCPCore/AppVersion.swift | sed -E 's/.*"([^"]+)".*/\1/')
+NEW_BUILD=$(grep -oE 'buildNumber = "[^"]+"' Sources/MacControlMCPCore/AppVersion.swift | sed -E 's/.*"([^"]+)".*/\1/')
+info "version: $NEW_VERSION ($NEW_BUILD)"
 xcodegen generate >/dev/null
 info "MacControlMCP.xcodeproj"
 

@@ -1,10 +1,11 @@
 import XCTest
 @testable import MacControlMCPCore
 
-/// Guards the version lockstep between `AppVersion.swift` (the compiled-in source of truth every
-/// component reports) and project.yml's `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` (what the
-/// native bundles' Info.plists are stamped with). The Xcode "Verify version" pre-build phase
-/// enforces the same invariant, but only for Xcode builds — this test covers `swift test` too.
+/// Guards the MARKETING version lockstep between `AppVersion.swift` (the compiled-in source of
+/// truth every component reports) and project.yml's `MARKETING_VERSION` (what the native bundles'
+/// Info.plists are stamped with). The Xcode "Verify marketing version" pre-build phase enforces the
+/// same invariant, but only for Xcode builds — this test covers `swift test` too. The build number
+/// is generated per install (BuildStamp), so it is deliberately not part of the lockstep.
 final class VersionParityTests: XCTestCase {
     func testProjectYMLVersionsMatchCompiledAppVersion() throws {
         // Tests/MacControlMCPCoreTests/VersionParityTests.swift → repo root.
