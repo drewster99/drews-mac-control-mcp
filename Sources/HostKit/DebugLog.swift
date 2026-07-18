@@ -27,10 +27,54 @@ public enum DebugLog {
 
     private static let enabled: Bool = ProcessInfo.processInfo.environment["MACCONTROL_LOG"] != "0"
 
-    /// Verbatim request/response payloads are opt-in (they may contain secrets); default off.
-    private static let logBodies: Bool = ProcessInfo.processInfo.environment["MACCONTROL_LOG_BODIES"] == "1"
+    /// Marker file backing the app's body-logging toggle. A file (not a plist key) so every
+    /// process that shares this log — the launchd host and each client-spawned relay — reads the
+    /// same switch at launch without any shared-defaults domain.
+    private static let bodiesMarkerURL: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        return base.appendingPathComponent("MacControlMCP", isDirectory: true)
+            .appendingPathComponent("log-bodies-enabled")
+    }()
 
-    private static let suppressedBody = "<payload suppressed; set MACCONTROL_LOG_BODIES=1 to log it>"
+    private static let bodiesLock = NSLock()
+
+    /// Verbatim request/response payloads are opt-in (they may contain secrets); default off.
+    /// The env var wins at process start when explicitly set; otherwise the marker file (the app
+    /// toggle) decides. Only touched under `bodiesLock`.
+    nonisolated(unsafe) private static var logBodiesState: Bool = {
+        switch ProcessInfo.processInfo.environment["MACCONTROL_LOG_BODIES"] {
+        case "1": return true
+        case "0": return false
+        default: return FileManager.default.fileExists(atPath: bodiesMarkerURL.path)
+        }
+    }()
+
+    /// Whether verbatim request/response bodies are currently logged.
+    public static var logBodiesEnabled: Bool {
+        bodiesLock.lock(); defer { bodiesLock.unlock() }
+        return logBodiesState
+    }
+
+    /// Flip body logging at runtime (the app's toggle). Persisted as a marker file so the launchd
+    /// host and every future relay process pick the setting up at launch; already-running relays
+    /// keep their launch-time value until their session restarts.
+    public static func setLogBodies(_ enabled: Bool) {
+        bodiesLock.lock()
+        logBodiesState = enabled
+        bodiesLock.unlock()
+        let fileManager = FileManager.default
+        if enabled {
+            try? fileManager.createDirectory(at: bodiesMarkerURL.deletingLastPathComponent(),
+                                             withIntermediateDirectories: true)
+            fileManager.createFile(atPath: bodiesMarkerURL.path, contents: nil,
+                                   attributes: [.posixPermissions: 0o600])
+        } else {
+            try? fileManager.removeItem(at: bodiesMarkerURL)
+        }
+    }
+
+    private static let suppressedBody = "<payload suppressed; set MACCONTROL_LOG_BODIES=1 or enable body logging in the MacControlMCP app>"
 
     private static let tag: String =
         "\(ProcessInfo.processInfo.processName):\(ProcessInfo.processInfo.processIdentifier)"
@@ -70,12 +114,12 @@ public enum DebugLog {
 
     /// A full inbound JSON-RPC request line, verbatim — only when `MACCONTROL_LOG_BODIES=1`.
     public static func request(_ line: String) {
-        write(kind: "REQUEST", body: logBodies ? line : suppressedBody)
+        write(kind: "REQUEST", body: logBodiesEnabled ? line : suppressedBody)
     }
 
-    /// A full outbound JSON-RPC response, verbatim — only when `MACCONTROL_LOG_BODIES=1`.
+    /// A full outbound JSON-RPC response, verbatim — only when body logging is enabled.
     public static func response(_ line: String?) {
-        write(kind: "RESPONSE", body: logBodies ? (line ?? "<nil>") : suppressedBody)
+        write(kind: "RESPONSE", body: logBodiesEnabled ? (line ?? "<nil>") : suppressedBody)
     }
 
     private static func write(kind: String, body: String) {

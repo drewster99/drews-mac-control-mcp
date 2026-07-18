@@ -39,6 +39,15 @@ public protocol MCPHostProtocol {
     /// dedicated debug connection, not by the relay.
     func setDebugMonitoring(enabled: Bool, withReply reply: @escaping (Bool) -> Void)
 
+    /// Whether verbatim request/response bodies are being written to maccontrol.log. Replies
+    /// "1"/"0" (String so the app's shared host-call plumbing applies unchanged).
+    func bodyLogging(withReply reply: @escaping (String) -> Void)
+
+    /// Enable/disable verbatim body logging. The host applies it immediately and persists it, so
+    /// future relay processes (new agent sessions) pick it up at launch; already-running relays
+    /// keep their launch-time value. Replies with the resulting state as "1"/"0".
+    func setBodyLogging(enabled: Bool, withReply reply: @escaping (String) -> Void)
+
     /// The host-owned user-activity / idle-defer settings as JSON (see `ActivityConfig.jsonString()`).
     /// The host is the single owner; the app reads them here rather than from any shared file.
     func activityConfig(withReply reply: @escaping (String) -> Void)

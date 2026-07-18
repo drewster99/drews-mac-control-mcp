@@ -196,6 +196,17 @@ public final class MCPHostService: NSObject, MCPHostProtocol, @unchecked Sendabl
         reply(BuildInfo.current.jsonString())
     }
 
+    public func bodyLogging(withReply reply: @escaping (String) -> Void) {
+        reply(DebugLog.logBodiesEnabled ? "1" : "0")
+    }
+
+    public func setBodyLogging(enabled: Bool, withReply reply: @escaping (String) -> Void) {
+        DebugLog.setLogBodies(enabled)
+        // Leave a trail in the log itself so a bodies-on window is identifiable after the fact.
+        DebugLog.event("body_logging", enabled ? "enabled" : "disabled")
+        reply(DebugLog.logBodiesEnabled ? "1" : "0")
+    }
+
     public func activityConfig(withReply reply: @escaping (String) -> Void) {
         reply(ActivityConfigStore.shared.current.jsonString())
     }

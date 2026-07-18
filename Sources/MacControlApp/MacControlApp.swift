@@ -221,6 +221,10 @@ final class AppModel: ObservableObject {
     /// False until the host's real settings have arrived once; the controls stay disabled
     /// until then so a save can never push the placeholder default over the host's config.
     @Published private(set) var activityConfigLoaded = false
+
+    /// Mirrors the host's verbatim-body logging switch (DebugLog); loaded on appear, set by the
+    /// debug-section toggle.
+    @Published private(set) var bodyLogging = false
     /// Live idle readout, refreshed by a 1s timer. Read directly from this process's `CGEventSource`
     /// (global OS idle) — no XPC needed, and this app never posts synthetic input.
     @Published private(set) var liveMouseIdle: TimeInterval = 0
@@ -496,6 +500,25 @@ final class AppModel: ObservableObject {
         if on { startDebugMonitoring() } else { stopDebugMonitoring() }
     }
 
+    /// Fetch the host's verbatim-body logging state (see `MCPHostProtocol.bodyLogging`).
+    func loadBodyLogging() {
+        callHost(
+            start: { proxy, reply in proxy.bodyLogging(withReply: reply) },
+            completion: { [weak self] result in
+                if case .success(let value) = result { self?.bodyLogging = value == "1" }
+            })
+    }
+
+    /// Flip verbatim-body logging on the host. The reply is the host's resulting state, so the
+    /// toggle always reflects what the host actually did (a failed round-trip leaves it unchanged).
+    func setBodyLogging(_ enabled: Bool) {
+        callHost(
+            start: { proxy, reply in proxy.setBodyLogging(enabled: enabled, withReply: reply) },
+            completion: { [weak self] result in
+                if case .success(let value) = result { self?.bodyLogging = value == "1" }
+            })
+    }
+
     /// Open a dedicated debug connection: it exports our sink (host → app event stream) and turns
     /// the host's global monitor on. Separate from the short-lived version-check connection.
     private func startDebugMonitoring() {
@@ -682,6 +705,11 @@ struct ContentView: View {
                     Toggle("Monitor MCP calls", isOn: Binding(
                         get: { model.debugMonitoring },
                         set: { model.setDebugMonitoring($0) }))
+                    Toggle("Log full request/response bodies to maccontrol.log", isOn: Binding(
+                        get: { model.bodyLogging },
+                        set: { model.setBodyLogging($0) }))
+                    Text("Bodies can include typed text and clipboard contents. Applies to the host immediately; agent sessions already running keep logging suppressed bodies until they restart.")
+                        .font(.caption2).foregroundStyle(.secondary)
                     if model.debugEvents.isEmpty {
                         Text(model.debugMonitoring ? "Monitoring — waiting for calls…" : "Off")
                             .font(.caption).foregroundStyle(.secondary)
@@ -769,33 +797,47 @@ struct ContentView: View {
         .onAppear {
             model.refresh()
             model.loadActivityConfig()
+            model.loadBodyLogging()
         }
         .task { await model.runIdleRefreshLoop() }
     }
 }
 
-/// One compact row in the debug monitor: timestamp + client on top, then the call and its response
-/// (each truncated to a single line; secrets in payloads can appear, so monitoring is opt-in).
+/// One row in the debug monitor: timestamp + client on top, then the call and its response.
+/// Collapsed, each payload is one middle-truncated line; clicking the row expands it to the full
+/// (host-capped) text with selection enabled, so the monitor is usable for real payloads.
 struct DebugEventRow: View {
     let event: DebugEvent
 
+    @State private var expanded = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 6) {
-                Text(shortTime).font(.caption2).foregroundStyle(.secondary)
-                if let client = event.client, !client.isEmpty {
-                    Text(client).font(.caption2).foregroundStyle(.secondary)
+        Button {
+            expanded.toggle()
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Text(shortTime).font(.caption2).foregroundStyle(.secondary)
+                    if let client = event.client, !client.isEmpty {
+                        Text(client).font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
+                Text(event.call)
+                    .font(.system(.caption2, design: .monospaced))
+                    .lineLimit(expanded ? nil : 1).truncationMode(.middle)
+                    .textSelection(.enabled)
+                Text(event.response ?? "—")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(expanded ? nil : 1).truncationMode(.middle)
+                    .textSelection(.enabled)
             }
-            Text(event.call)
-                .font(.system(.caption2, design: .monospaced))
-                .lineLimit(1).truncationMode(.middle)
-            Text(event.response ?? "—")
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1).truncationMode(.middle)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .buttonStyle(.plain)
     }
 
     /// HH:MM:SS pulled from the ISO-8601 timestamp; falls back to the raw string.
