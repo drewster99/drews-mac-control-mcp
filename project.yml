@@ -13,8 +13,8 @@ settings:
     CODE_SIGNING_ALLOWED: "NO"
     # Native-bundle version. Keep in lockstep with AppVersion.swift (the compiled-in source of
     # truth every target reports); the "Verify version" pre-build phase fails the build on drift.
-    MARKETING_VERSION: "0.2.6"
-    CURRENT_PROJECT_VERSION: "8"
+    MARKETING_VERSION: "0.2.7"
+    CURRENT_PROJECT_VERSION: "9"
 
 targets:
   MacControlMCPCore:
