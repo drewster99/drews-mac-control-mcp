@@ -6,18 +6,34 @@
 //  control_app `ControlNode` tree (which already bounds collections to visible∪selected rows), so it
 //  is unit-testable with no Accessibility grant. Produces a compact grouped summary — app header,
 //  windows, non-standard menus, and the active window's controls grouped by kind with values —
-//  rather than the full ref-bearing hierarchy.
+//  each item carrying its element ref so a follow-up action/type/etc. can target it directly.
 //
 
 import Foundation
 
 public struct AppSummary: Equatable, Sendable {
+    /// One rendered control: its element `ref` (for action/type/…) plus the display `detail` that
+    /// follows the "Kind N [ref]: " prefix.
+    public struct Entry: Equatable, Sendable {
+        public let ref: String
+        public let detail: String
+    }
     public struct Group: Equatable, Sendable {
-        public let name: String          // "Buttons", "Text fields", "Other", "Text"
-        public let entries: [String]     // rendered, name-first, deduped
+        public let name: String          // plural heading: "Buttons", "Text fields", "Other", "Text"
+        public let itemLabel: String     // singular row label: "Button", "Text field", "Other", "Text"
+        public let entries: [Entry]      // rendered, deduped by detail (first ref kept)
         public let unnamed: Int          // actionable-but-unlabeled, surfaced as elision
-        public let more: Int             // deduped past the cap (shown - total)
+        public let more: Int             // deduped past the cap (total - shown)
         public let total: Int            // distinct entries after dedup
+    }
+    public struct WindowRef: Equatable, Sendable {
+        public let ref: String
+        public let title: String
+        public let isActive: Bool
+    }
+    public struct MenuRef: Equatable, Sendable {
+        public let ref: String
+        public let title: String
     }
     public struct Window: Equatable, Sendable {
         public let title: String
@@ -27,8 +43,8 @@ public struct AppSummary: Equatable, Sendable {
     public let name: String
     public let pid: Int
     public let bundleId: String
-    public let windows: [String]
-    public let menus: [String]          // top-level menu titles only; items load when a menu is opened
+    public let windows: [WindowRef]
+    public let menus: [MenuRef]         // top-level menu titles only; items load when a menu is opened
     public let activeWindow: Window?
 }
 
@@ -48,15 +64,16 @@ public enum AppProjection {
     public static func project(tree: ControlNode, name: String, pid: Int, bundleId: String,
                                activeWindowTitle: String? = nil) -> AppSummary {
         let windowNodes = tree.children.filter { windowTypes.contains($0.type) }
-        let windowTitles = windowNodes.map { $0.label ?? "(untitled)" }
-
         let active = activeWindowNode(windowNodes, preferred: activeWindowTitle)
+        let windows = windowNodes.map { node in
+            AppSummary.WindowRef(ref: node.ref, title: oneLine(node.label ?? "(untitled)"),
+                                 isActive: active.map { $0.ref == node.ref } ?? false)
+        }
         let activeWindow = active.map {
             AppSummary.Window(title: oneLine($0.label ?? "(untitled)"), groups: groups(in: $0))
         }
         return AppSummary(name: name, pid: pid, bundleId: bundleId,
-                          windows: windowTitles.map { oneLine($0) },
-                          menus: menuTitles(in: tree), activeWindow: activeWindow)
+                          windows: windows, menus: menus(in: tree), activeWindow: activeWindow)
     }
 
     static func activeWindowNode(_ windows: [ControlNode], preferred: String?) -> ControlNode? {
@@ -71,12 +88,15 @@ public enum AppProjection {
             ?? windows.first
     }
 
-    /// Top-level menu titles only (Apple, File, Edit, …). A menu's items are huge and partly
+    /// Top-level menus (Apple, File, Edit, …) with their refs. A menu's items are huge and partly
     /// dynamic (History, Bookmarks, Recent), and submenus load lazily, so we surface just the
     /// titles; a menu's items are read when it's opened.
-    static func menuTitles(in tree: ControlNode) -> [String] {
+    static func menus(in tree: ControlNode) -> [AppSummary.MenuRef] {
         guard let menuBar = firstDescendant(tree, type: "menuBar") else { return [] }
-        return menuBar.children.compactMap { $0.label }.filter { !$0.isEmpty }.map { oneLine($0) }
+        return menuBar.children.compactMap { node in
+            guard let label = node.label, !label.isEmpty else { return nil }
+            return AppSummary.MenuRef(ref: node.ref, title: oneLine(label))
+        }
     }
 
     static func groups(in window: ControlNode) -> [AppSummary.Group] {
@@ -88,33 +108,42 @@ public enum AppProjection {
             else if !node.actions.isEmpty || node.textValue != nil { other.append(node) }
         }
         var out: [AppSummary.Group] = []
-        out.append(group("Buttons", buttons) { $0.label.map { oneLine($0) } })
-        out.append(group("Text fields", fields) { node in
-            guard let label = node.label, !label.isEmpty else { return nil }
-            if let value = node.textValue, !value.isEmpty { return "\(oneLine(label)) =\(quote(value))" }
-            return oneLine(label)
+        out.append(group("Buttons", "Button", buttons) { $0.label.map { oneLine($0) } })
+        // Text fields show title / placeholder / contents so an unlabeled field with text is still
+        // usable (search boxes, code editors); only a fully-empty field falls through to `unnamed`.
+        out.append(group("Text fields", "Text field", fields) { node in
+            let title = node.label ?? ""
+            let placeholder = node.placeholder ?? ""
+            let contents = node.textValue ?? ""
+            if title.isEmpty && placeholder.isEmpty && contents.isEmpty { return nil }
+            return "title \(quote(title)), placeholder \(quote(placeholder)), contents: \(quote(contents))"
         })
-        out.append(group("Other", other) { node in
+        out.append(group("Other", "Other", other) { node in
             guard let label = node.label, !label.isEmpty else { return nil }
             return "\(oneLine(label)) (\(node.type))"
         })
-        out.append(group("Text", text) { node in node.label.map(quote) })
+        out.append(group("Text", "Text", text) { node in node.label.map(quote) })
         return out.filter { !$0.entries.isEmpty || $0.unnamed > 0 }
     }
 
-    /// Build a rendered group from nodes: dedup identical rendered entries (many apps repeat the
-    /// same "Copy code" button / message row), then cap. `total` is the distinct count.
-    static func group(_ name: String, _ nodes: [ControlNode], render: (ControlNode) -> String?) -> AppSummary.Group {
-        var entries: [String] = []
+    /// Build a rendered group from nodes: dedup identical rendered details (many apps repeat the same
+    /// "Copy code" button / message row), keeping the first node's ref, then cap. `total` is the
+    /// distinct count.
+    static func group(_ name: String, _ itemLabel: String, _ nodes: [ControlNode],
+                      render: (ControlNode) -> String?) -> AppSummary.Group {
+        var entries: [AppSummary.Entry] = []
         var unnamed = 0
         var seen = Set<String>()
         for node in nodes {
-            guard let rendered = render(node) else { unnamed += 1; continue }
-            if seen.insert(rendered).inserted { entries.append(rendered) }   // drop exact duplicates
+            guard let detail = render(node) else { unnamed += 1; continue }
+            if seen.insert(detail).inserted {   // drop exact duplicates, keep the first ref
+                entries.append(AppSummary.Entry(ref: node.ref, detail: detail))
+            }
         }
         let total = entries.count
         let more = max(0, total - perGroupCap)
-        return AppSummary.Group(name: name, entries: Array(entries.prefix(perGroupCap)),
+        return AppSummary.Group(name: name, itemLabel: itemLabel,
+                                entries: Array(entries.prefix(perGroupCap)),
                                 unnamed: unnamed, more: more, total: total)
     }
 
@@ -154,21 +183,34 @@ public enum AppRenderer {
         var lines: [String] = []
         lines.append("App: \(summary.name)  pid \(summary.pid)  \(summary.bundleId)")
 
-        var windowLine = "Windows: " + summary.windows.joined(separator: ", ")
-        if summary.windows.isEmpty { windowLine = "Windows: (none)" }
-        lines.append(windowLine)
+        if summary.windows.isEmpty {
+            lines.append("Windows: (none)")
+        } else {
+            lines.append("Windows:")
+            for (index, window) in summary.windows.enumerated() {
+                let active = window.isActive ? " ACTIVE" : ""
+                lines.append("  Window \(index + 1)\(active) [\(window.ref)]: \(window.title)")
+            }
+        }
 
         if !summary.menus.isEmpty {
-            lines.append("Menus: " + summary.menus.joined(separator: ", "))
+            lines.append("Menus:")
+            for (index, menu) in summary.menus.enumerated() {
+                lines.append("  Menu \(index + 1) [\(menu.ref)]: \(menu.title)")
+            }
         }
 
         if let window = summary.activeWindow {
             lines.append("Active window: \(window.title)")
             for group in window.groups {
-                var line = "  \(group.name) (\(group.total)): " + group.entries.joined(separator: ", ")
-                if group.more > 0 { line += " [+\(group.more) more]" }
-                if group.unnamed > 0 { line += " [+\(group.unnamed) unnamed]" }
-                lines.append(line)
+                lines.append("  \(group.name) (\(group.total)):")
+                for (index, entry) in group.entries.enumerated() {
+                    lines.append("    \(group.itemLabel) \(index + 1) [\(entry.ref)]: \(entry.detail)")
+                }
+                var elision: [String] = []
+                if group.more > 0 { elision.append("[+\(group.more) more]") }
+                if group.unnamed > 0 { elision.append("[+\(group.unnamed) unnamed]") }
+                if !elision.isEmpty { lines.append("    " + elision.joined(separator: " ")) }
             }
         } else {
             lines.append("Active window: (none)")

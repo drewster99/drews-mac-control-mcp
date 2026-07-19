@@ -33,33 +33,48 @@ final class AppSummaryTests: XCTestCase {
         let summary = AppProjection.project(tree: fixture(), name: "Notes", pid: 123, bundleId: "com.apple.Notes")
         XCTAssertEqual(summary.name, "Notes")
         XCTAssertEqual(summary.pid, 123)
-        XCTAssertEqual(summary.windows, ["Vacation plan", "New Note"])
-        XCTAssertEqual(summary.menus, ["File", "Edit"])   // titles only
+        XCTAssertEqual(summary.windows.map(\.title), ["Vacation plan", "New Note"])
+        XCTAssertEqual(summary.windows.map(\.ref), ["e10", "e17"])
+        XCTAssertEqual(summary.windows.map(\.isActive), [true, false])       // main window is active
+        XCTAssertEqual(summary.menus.map(\.title), ["File", "Edit"])         // titles only
+        XCTAssertEqual(summary.menus.map(\.ref), ["e3", "e7"])
         XCTAssertEqual(summary.activeWindow?.title, "Vacation plan")
 
         let groups = Dictionary(uniqueKeysWithValues: (summary.activeWindow?.groups ?? []).map { ($0.name, $0) })
-        XCTAssertEqual(groups["Buttons"]?.entries, ["Save", "Cancel"])
+        XCTAssertEqual(groups["Buttons"]?.entries.map(\.detail), ["Save", "Cancel"])
+        XCTAssertEqual(groups["Buttons"]?.entries.map(\.ref), ["e11", "e12"])
         XCTAssertEqual(groups["Buttons"]?.unnamed, 1)
-        XCTAssertEqual(groups["Text fields"]?.entries, ["Title =\"My note\""])
-        XCTAssertEqual(groups["Other"]?.entries, ["Open (link)"])
-        XCTAssertEqual(groups["Text"]?.entries, ["\"Some label\""])
+        XCTAssertEqual(groups["Text fields"]?.entries.map(\.detail),
+                       ["title \"Title\", placeholder \"\", contents: \"My note\""])
+        XCTAssertEqual(groups["Text fields"]?.entries.map(\.ref), ["e14"])
+        XCTAssertEqual(groups["Other"]?.entries.map(\.detail), ["Open (link)"])
+        XCTAssertEqual(groups["Text"]?.entries.map(\.detail), ["\"Some label\""])
     }
 
     func testRender() {
         let summary = AppProjection.project(tree: fixture(), name: "Notes", pid: 123, bundleId: "com.apple.Notes")
         let text = AppRenderer.render(summary)
         XCTAssertTrue(text.contains("App: Notes  pid 123  com.apple.Notes"))
-        XCTAssertTrue(text.contains("Windows: Vacation plan, New Note"))
-        XCTAssertTrue(text.contains("Menus: File, Edit"))
+        XCTAssertTrue(text.contains("Windows:"))
+        XCTAssertTrue(text.contains("  Window 1 ACTIVE [e10]: Vacation plan"))
+        XCTAssertTrue(text.contains("  Window 2 [e17]: New Note"))
+        XCTAssertTrue(text.contains("Menus:"))
+        XCTAssertTrue(text.contains("  Menu 1 [e3]: File"))
+        XCTAssertTrue(text.contains("  Menu 2 [e7]: Edit"))
         XCTAssertTrue(text.contains("Active window: Vacation plan"))
-        XCTAssertTrue(text.contains("Buttons (2): Save, Cancel [+1 unnamed]"))
-        XCTAssertTrue(text.contains("Text fields (1): Title =\"My note\""))
+        XCTAssertTrue(text.contains("  Buttons (2):"))
+        XCTAssertTrue(text.contains("    Button 1 [e11]: Save"))
+        XCTAssertTrue(text.contains("    Button 2 [e12]: Cancel"))
+        XCTAssertTrue(text.contains("    [+1 unnamed]"))
+        XCTAssertTrue(text.contains("    Text field 1 [e14]: title \"Title\", placeholder \"\", contents: \"My note\""))
     }
 
     func testActiveWindowOverride() {
         let summary = AppProjection.project(tree: fixture(), name: "Notes", pid: 123,
                                             bundleId: "com.apple.Notes", activeWindowTitle: "New Note")
         XCTAssertEqual(summary.activeWindow?.title, "New Note")
+        // The ACTIVE marker follows the override, not the "main" state.
+        XCTAssertEqual(summary.windows.map(\.isActive), [false, true])
     }
 
     func testActiveWindowSubstringMatch() {
@@ -78,9 +93,10 @@ final class AppSummaryTests: XCTestCase {
             ])
         ])
         let summary = AppProjection.project(tree: tree, name: "Safari", pid: 1, bundleId: "com.apple.Safari")
-        XCTAssertEqual(summary.windows, ["macOS26/Agent"])
+        XCTAssertEqual(summary.windows.map(\.title), ["macOS26/Agent"])
+        XCTAssertEqual(summary.windows.map(\.ref), ["e3"])
         XCTAssertEqual(summary.activeWindow?.title, "macOS26/Agent")
-        XCTAssertEqual(Dictionary(uniqueKeysWithValues: (summary.activeWindow?.groups ?? []).map { ($0.name, $0) })["Buttons"]?.entries, ["Reload"])
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: (summary.activeWindow?.groups ?? []).map { ($0.name, $0) })["Buttons"]?.entries.map(\.detail), ["Reload"])
     }
 
     func testNewlinesAreEscapedEverywhere() {
@@ -93,7 +109,8 @@ final class AppSummaryTests: XCTestCase {
         let text = AppRenderer.render(AppProjection.project(tree: tree, name: "X", pid: 1, bundleId: "x"))
         XCTAssertTrue(text.contains("Press\\nMe"))                  // escaped
         XCTAssertFalse(text.contains("Press\nMe"))                 // no RAW newline inside a label
-        XCTAssertTrue(text.contains("Body =\"line1\\nline2\""))
+        XCTAssertTrue(text.contains("contents: \"line1\\nline2\""))
+        XCTAssertTrue(text.contains("Window 1 ACTIVE [e2]: Win\\nTwo"))
         XCTAssertTrue(text.contains("Active window: Win\\nTwo"))
     }
 }
