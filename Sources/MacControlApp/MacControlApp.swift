@@ -127,6 +127,7 @@ enum AgentVersion {
 struct DebugEvent: Identifiable {
     let id = UUID()
     let timestamp: String
+    let sessionId: String?
     let client: String?
     let call: String
     let response: String?
@@ -604,6 +605,7 @@ final class AppModel: ObservableObject {
         guard let dictionary = object as? [String: Any] else { return }
         debugEvents.append(DebugEvent(
             timestamp: dictionary["timestamp"] as? String ?? "",
+            sessionId: dictionary["sessionId"] as? String,
             client: dictionary["client"] as? String,
             call: dictionary["call"] as? String ?? "",
             response: dictionary["response"] as? String))
@@ -848,14 +850,23 @@ struct DebugEventRow: View {
                         .font(.caption2).foregroundStyle(.secondary)
                     Text(shortTime).font(.caption2).foregroundStyle(.secondary)
                     if let client = event.client, !client.isEmpty {
-                        Text(client).font(.caption2).foregroundStyle(.secondary)
+                        Text(client)
+                            .font(.caption2).fontWeight(.semibold)
+                            .foregroundStyle(Color.accentColor)
+                    } else {
+                        Text("unknown client").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    if let tag = sessionTag {
+                        Text(tag)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.tertiary)
                     }
                 }
-                Text(event.call)
+                Text(callText)
                     .font(.system(.caption2, design: .monospaced))
                     .lineLimit(expanded ? nil : 1).truncationMode(.middle)
                     .textSelection(.enabled)
-                Text(event.response ?? "—")
+                Text(responseText)
                     .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(expanded ? nil : 1).truncationMode(.middle)
@@ -867,9 +878,38 @@ struct DebugEventRow: View {
         .buttonStyle(.plain)
     }
 
+    /// The request payload — pretty-printed once expanded, raw single-line when collapsed.
+    private var callText: String { expanded ? Self.prettyPrinted(event.call) : event.call }
+
+    /// The response payload — pretty-printed once expanded; "—" when there was none.
+    private var responseText: String {
+        guard let response = event.response else { return "—" }
+        return expanded ? Self.prettyPrinted(response) : response
+    }
+
+    /// A short, stable tag from the session UUID so two concurrent clients — even of the same name —
+    /// are distinguishable at a glance. nil when the event carries no session id.
+    private var sessionTag: String? {
+        guard let session = event.sessionId, !session.isEmpty else { return nil }
+        return "#" + String(session.prefix(4))
+    }
+
     /// HH:MM:SS pulled from the ISO-8601 timestamp; falls back to the raw string.
     private var shortTime: String {
         guard let tIndex = event.timestamp.firstIndex(of: "T") else { return event.timestamp }
         return String(event.timestamp[event.timestamp.index(after: tIndex)...].prefix(8))
+    }
+
+    /// Pretty-print a compact JSON payload for the expanded view. Host-capped bodies (>32 KB) arrive
+    /// truncated and can't parse — return them unchanged so the readable head still shows.
+    private static func prettyPrinted(_ raw: String) -> String {
+        guard let data = raw.data(using: .utf8) else { return raw }
+        do {
+            let object = try JSONSerialization.jsonObject(with: data)
+            let pretty = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+            return String(decoding: pretty, as: UTF8.self)
+        } catch {
+            return raw
+        }
     }
 }
