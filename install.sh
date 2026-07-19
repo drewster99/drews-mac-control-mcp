@@ -197,13 +197,21 @@ if ! cp -R "$APP" "$STAGE" 2>/dev/null; then
   die "Couldn't write to $PREFIX (permission denied). Re-run with: sudo ./install.sh"
 fi
 
-# Stop a host left running by a previous install, and wait for it to actually
-# exit so the swap doesn't race a process launchd is still tearing down.
+# Stop the host AND the front-end app left running by a previous install, then wait for both to
+# exit before the swap. The host matters because launchd may be mid-teardown. The app matters
+# because the end-of-install `open "$DEST"` only *activates* an already-running instance — it will
+# not relaunch the new binary — so an old app instance keeps running from the bundle this install
+# is about to delete, and its XPC link to the freshly-installed helper breaks ("can't communicate
+# with helper", then a crash on register). Quitting it here makes the later `open` start fresh.
 pkill -x -U "$TARGET_UID" MacControlHost 2>/dev/null || true
+pkill -x -U "$TARGET_UID" MacControlMCP 2>/dev/null || true
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  pgrep -x -U "$TARGET_UID" MacControlHost >/dev/null 2>&1 || break
+  pgrep -x -U "$TARGET_UID" MacControlHost >/dev/null 2>&1 || \
+    pgrep -x -U "$TARGET_UID" MacControlMCP >/dev/null 2>&1 || break
   sleep 0.2
 done
+# A GUI app wedged on a modal/alert can ignore SIGTERM; force it so the swap can delete its bundle.
+pkill -9 -x -U "$TARGET_UID" MacControlMCP 2>/dev/null || true
 
 if [ -e "$DEST" ] || [ -L "$DEST" ]; then
   if ! mv "$DEST" "$OLD" 2>/dev/null; then
