@@ -203,14 +203,16 @@ public enum AppRenderer {
         if let window = summary.activeWindow {
             lines.append("Active window: \(window.title)")
             for group in window.groups {
-                lines.append("  \(group.name) (\(group.total)):")
+                // Fold the elision counts into the header (not a trailing line) so they're
+                // unambiguously scoped to this group and the group header has no sibling that looks
+                // like a nested item.
+                var header = "  \(group.name) (\(group.total))"
+                if group.more > 0 { header += " [+\(group.more) more]" }
+                if group.unnamed > 0 { header += " [+\(group.unnamed) unnamed]" }
+                lines.append(header + ":")
                 for (index, entry) in group.entries.enumerated() {
                     lines.append("    \(group.itemLabel) \(index + 1) [\(entry.ref)]: \(entry.detail)")
                 }
-                var elision: [String] = []
-                if group.more > 0 { elision.append("[+\(group.more) more]") }
-                if group.unnamed > 0 { elision.append("[+\(group.unnamed) unnamed]") }
-                if !elision.isEmpty { lines.append("    " + elision.joined(separator: " ")) }
             }
         } else {
             lines.append("Active window: (none)")

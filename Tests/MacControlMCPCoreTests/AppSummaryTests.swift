@@ -62,10 +62,9 @@ final class AppSummaryTests: XCTestCase {
         XCTAssertTrue(text.contains("  Menu 1 [e3]: File"))
         XCTAssertTrue(text.contains("  Menu 2 [e7]: Edit"))
         XCTAssertTrue(text.contains("Active window: Vacation plan"))
-        XCTAssertTrue(text.contains("  Buttons (2):"))
+        XCTAssertTrue(text.contains("  Buttons (2) [+1 unnamed]:"))    // elision on the header, not a trailing line
         XCTAssertTrue(text.contains("    Button 1 [e11]: Save"))
         XCTAssertTrue(text.contains("    Button 2 [e12]: Cancel"))
-        XCTAssertTrue(text.contains("    [+1 unnamed]"))
         XCTAssertTrue(text.contains("    Text field 1 [e14]: title \"Title\", placeholder \"\", contents: \"My note\""))
     }
 
