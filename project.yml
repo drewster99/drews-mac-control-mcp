@@ -11,6 +11,11 @@ settings:
     CODE_SIGNING_REQUIRED: "NO"
     CODE_SIGN_IDENTITY: ""
     CODE_SIGNING_ALLOWED: "NO"
+    # The "Verify version" pre-build phase greps AppVersion.swift and the module header-copy steps
+    # write into the build's include dir; user-script sandboxing (default-on under some xcodebuild
+    # invocations, e.g. the MCP build server) denies both. These scripts only touch this repo and the
+    # build's own products, so turn the sandbox off rather than enumerate every input/output file.
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
     # Native-bundle version. Keep in lockstep with AppVersion.swift (the compiled-in source of
     # truth every target reports); the "Verify version" pre-build phase fails the build on drift.
     MARKETING_VERSION: "0.2.9"
