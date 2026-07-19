@@ -18,8 +18,8 @@ settings:
     ENABLE_USER_SCRIPT_SANDBOXING: "NO"
     # Native-bundle version. Keep in lockstep with AppVersion.swift (the compiled-in source of
     # truth every target reports); the "Verify version" pre-build phase fails the build on drift.
-    MARKETING_VERSION: "0.2.11"
-    CURRENT_PROJECT_VERSION: "13"
+    MARKETING_VERSION: "0.2.12"
+    CURRENT_PROJECT_VERSION: "14"
 
 targets:
   MacControlMCPCore:
