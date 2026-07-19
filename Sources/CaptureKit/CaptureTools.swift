@@ -82,7 +82,7 @@ enum CaptureTools {
     /// under it so N slow captures (each ≤ per-capture timeout, plus OCR) can't wedge the relay.
     static let overallBudgetSeconds: TimeInterval = 45
     static let perCaptureTimeout: TimeInterval = 10
-    private static let permissionError = #"{"success":false,"error":"screen_recording_not_granted","howToFix":"Grant Screen Recording to the host in System Settings ‣ Privacy & Security ‣ Screen Recording","deepLink":"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"}"#
+    private static let permissionError = #"{"error":"screen_recording_not_granted","howToFix":"Grant Screen Recording to the host in System Settings ‣ Privacy & Security ‣ Screen Recording","deepLink":"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"}"#
 
     static func screenRecordingError() -> String { permissionError }
 
@@ -245,11 +245,11 @@ public struct ScreenshotAppWindowTool: Tool {
         let outputDir: URL
         switch CaptureTools.resolveOutputDirectory(arguments["targetFolder"] as? String) {
         case .ok(let dir, _): outputDir = dir
-        case .failed(let reason): return JSONText.from(["success": false, "error": reason])
+        case .failed(let reason): return JSONText.from(["error": reason])
         }
 
         guard let content = SCKCapture.shareableContent() else {
-            return JSONText.from(["success": false, "error": "capture_unavailable",
+            return JSONText.from(["error": "capture_unavailable",
                                   "howToFix": "Could not read the window list (Screen Recording may be denied or the capture service is unavailable)."])
         }
         let displays = CaptureTools.displayInfos(from: content)
@@ -272,7 +272,7 @@ public struct ScreenshotAppWindowTool: Tool {
             }
 
         guard !candidates.isEmpty else {
-            return JSONText.from(["success": false, "error": "no_match",
+            return JSONText.from(["error": "no_match",
                                   "howToFix": "No window matched appMatch/windowMatch. Use list_app_windows to see what's open."])
         }
         let selected = Array(candidates.prefix(limit))
@@ -309,10 +309,11 @@ public struct ScreenshotAppWindowTool: Tool {
             screenshots.append(entry)
         }
 
-        // Top-level `success` means "matched and attempted" (per the tool contract); `succeeded`
-        // is the count that actually produced an image, so automation can tell an all-failed run
-        // from a clean one without walking every entry.
-        var out: [String: Any] = ["success": true, "screenshots": screenshots,
+        // A match returns a `screenshots` array (no top-level success flag); `succeeded` is the count
+        // that actually produced an image, so automation can tell an all-failed run from a clean one
+        // without walking every entry. Whole-call failures (no match, bad folder) return `error` and
+        // no `screenshots` key instead — presence of `screenshots` IS the "we matched something" signal.
+        var out: [String: Any] = ["screenshots": screenshots,
                                    "succeeded": screenshots.filter { ($0["success"] as? Bool) == true }.count]
         if dropped > 0 { out["truncated"] = ["matched": candidates.count, "captured": selected.count, "dropped": dropped] }
         if budgetSkipped > 0 { out["budgetSkipped"] = budgetSkipped }
@@ -353,11 +354,11 @@ public struct ScreenshotFullDisplayTool: Tool {
         let outputDir: URL
         switch CaptureTools.resolveOutputDirectory(arguments["targetFolder"] as? String) {
         case .ok(let dir, _): outputDir = dir
-        case .failed(let reason): return JSONText.from(["success": false, "error": reason])
+        case .failed(let reason): return JSONText.from(["error": reason])
         }
 
         guard let content = SCKCapture.shareableContent() else {
-            return JSONText.from(["success": false, "error": "capture_unavailable"])
+            return JSONText.from(["error": "capture_unavailable"])
         }
         let displays = CaptureTools.displayInfos(from: content)
         let matched = displays.enumerated().filter { index, info in
@@ -368,7 +369,7 @@ public struct ScreenshotFullDisplayTool: Tool {
         }
 
         guard !matched.isEmpty else {
-            return JSONText.from(["success": false, "error": "no_match",
+            return JSONText.from(["error": "no_match",
                                   "howToFix": "No display matched. Use list_connected_displays to see ids/names."])
         }
 
@@ -386,7 +387,7 @@ public struct ScreenshotFullDisplayTool: Tool {
             }
             screenshots.append(entry)
         }
-        return JSONText.from(["success": true, "screenshots": screenshots])
+        return JSONText.from(["screenshots": screenshots])
     }
 }
 
@@ -409,7 +410,7 @@ public struct ListConnectedDisplaysTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard hasScreenRecording() else { return CaptureTools.screenRecordingError() }
         guard let content = SCKCapture.shareableContent() else {
-            return JSONText.from(["success": false, "error": "capture_unavailable"])
+            return JSONText.from(["error": "capture_unavailable"])
         }
         let mainID = CGMainDisplayID()
         let displays = CaptureTools.displayInfos(from: content).enumerated().map { index, info -> [String: Any] in
@@ -423,7 +424,7 @@ public struct ListConnectedDisplaysTool: Tool {
                 "pixelWidth": info.display.width, "pixelHeight": info.display.height
             ]
         }
-        return JSONText.from(["success": true, "displays": displays])
+        return JSONText.from(["displays": displays])
     }
 }
 
@@ -448,7 +449,7 @@ public struct ListAppWindowsTool: Tool {
         guard hasScreenRecording() else { return CaptureTools.screenRecordingError() }
         let appMatch = CaptureTools.matcherArgument(arguments, "appMatch")
         guard let content = SCKCapture.shareableContent() else {
-            return JSONText.from(["success": false, "error": "capture_unavailable"])
+            return JSONText.from(["error": "capture_unavailable"])
         }
         let displays = CaptureTools.displayInfos(from: content)
         let windows = content.windows
@@ -477,7 +478,7 @@ public struct ListAppWindowsTool: Tool {
                 if let display = CaptureTools.displayName(for: window, in: displays) { entry["display"] = display }
                 return entry
             }
-        return JSONText.from(["success": true, "windows": windows])
+        return JSONText.from(["windows": windows])
     }
 }
 
@@ -512,7 +513,7 @@ public struct ScreenshotSimulatorTool: Tool {
         let outputDir: URL
         switch CaptureTools.resolveOutputDirectory(arguments["targetFolder"] as? String) {
         case .ok(let dir, _): outputDir = dir
-        case .failed(let reason): return JSONText.from(["success": false, "error": reason])
+        case .failed(let reason): return JSONText.from(["error": reason])
         }
 
         let booted = CaptureSupport.bootedSimulators().filter { sim in
@@ -521,7 +522,7 @@ public struct ScreenshotSimulatorTool: Tool {
                 || sim.name.range(of: match, options: .caseInsensitive) != nil
         }
         guard !booted.isEmpty else {
-            return JSONText.from(["success": false, "error": "no_match",
+            return JSONText.from(["error": "no_match",
                                   "howToFix": "No booted simulator matched. Boot one, or see list_simulators; \"\"/\"*\" captures all booted."])
         }
         let selected = Array(booted.prefix(limit))
@@ -566,7 +567,7 @@ public struct ScreenshotSimulatorTool: Tool {
             screenshots.append(entry)
         }
 
-        var out: [String: Any] = ["success": true, "screenshots": screenshots,
+        var out: [String: Any] = ["screenshots": screenshots,
                                    "succeeded": screenshots.filter { ($0["success"] as? Bool) == true }.count]
         if dropped > 0 { out["truncated"] = ["matched": booted.count, "captured": selected.count, "dropped": dropped] }
         if budgetSkipped > 0 { out["budgetSkipped"] = budgetSkipped }
