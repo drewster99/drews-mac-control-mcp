@@ -186,12 +186,27 @@ enum CaptureTools {
     }
 
     static func displayInfos(from content: SCShareableContent) -> [DisplayInfo] {
-        content.displays.map { display in
-            let name = NSScreen.screens.first {
-                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == display.displayID
-            }?.localizedName ?? "Display \(display.displayID)"
-            return DisplayInfo(display: display, name: name)
+        let names = localizedScreenNames()
+        return content.displays.map { display in
+            DisplayInfo(display: display, name: names[display.displayID] ?? "Display \(display.displayID)")
         }
+    }
+
+    /// Display-id → localized name (e.g. "Built-in Retina Display"). `NSScreen` is AppKit UI state
+    /// and must be read on the main thread; tool calls run on the host's background request queue, so
+    /// hop to main when we're not already there. (Deadlock-free: no host path ever blocks main on the
+    /// request queue.)
+    private static func localizedScreenNames() -> [CGDirectDisplayID: String] {
+        func collect() -> [CGDirectDisplayID: String] {
+            var map: [CGDirectDisplayID: String] = [:]
+            for screen in NSScreen.screens {
+                if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                    map[number] = screen.localizedName
+                }
+            }
+            return map
+        }
+        return Thread.isMainThread ? collect() : DispatchQueue.main.sync(execute: collect)
     }
 
     /// The display a window sits on: max frame-overlap wins (a window straddling two picks the one
@@ -373,21 +388,34 @@ public struct ScreenshotFullDisplayTool: Tool {
                                   "howToFix": "No display matched. Use list_connected_displays to see ids/names."])
         }
 
+        let overallDeadline = Date().addingTimeInterval(CaptureTools.overallBudgetSeconds)
+        var budgetSkipped = 0
         var screenshots: [[String: Any]] = []
         for (_, info) in matched {
             var entry: [String: Any] = ["display": info.name, "displayId": Int(info.display.displayID)]
-            do {
-                let filter = SCContentFilter(display: info.display, excludingWindows: [])
-                let image = try SCKCapture.capture(filter: filter, maxDimension: maxDimension)
-                let path = CaptureTools.outputPath(in: outputDir, prefix: "display_\(info.display.displayID)")
-                CaptureTools.writeAndOCR(image, to: path, performOCR: false, into: &entry)
-            } catch {
+            let remaining = overallDeadline.timeIntervalSinceNow
+            if remaining < 1 {
+                budgetSkipped += 1
                 entry["success"] = false
-                entry["error"] = "capture_failed: \(error.localizedDescription)"
+                entry["error"] = "skipped: overall capture budget exceeded"
+            } else {
+                do {
+                    let filter = SCContentFilter(display: info.display, excludingWindows: [])
+                    let image = try SCKCapture.capture(filter: filter, maxDimension: maxDimension,
+                                                       timeout: min(CaptureTools.perCaptureTimeout, remaining))
+                    let path = CaptureTools.outputPath(in: outputDir, prefix: "display_\(info.display.displayID)")
+                    CaptureTools.writeAndOCR(image, to: path, performOCR: false, into: &entry)
+                } catch {
+                    entry["success"] = false
+                    entry["error"] = "capture_failed: \(error.localizedDescription)"
+                }
             }
             screenshots.append(entry)
         }
-        return JSONText.from(["screenshots": screenshots])
+        var out: [String: Any] = ["screenshots": screenshots,
+                                   "succeeded": screenshots.filter { ($0["success"] as? Bool) == true }.count]
+        if budgetSkipped > 0 { out["budgetSkipped"] = budgetSkipped }
+        return JSONText.from(out)
     }
 }
 

@@ -117,7 +117,15 @@ enum CaptureSupport {
                 // zombie-reserved, and isRunning flips false at that reap — this closes the
                 // pid-reuse window down to the instructions between the read and the kill.
                 if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-                exited.wait()
+                // SIGKILL normally reaps within milliseconds. If the child is wedged in
+                // uninterruptible kernel sleep (D-state) it can ignore even SIGKILL, so bound the
+                // wait — nothing we do reaps it, but we mustn't pin this thread forever. Bail with a
+                // synthetic status: `terminationStatus` traps on a still-running process, and force-
+                // closing the read end unblocks the drain thread stuck on the child's open pipe.
+                if exited.wait(timeout: .now() + 2) == .timedOut {
+                    do { try readHandle?.close() } catch { /* best-effort unblock */ }
+                    return (-1, Data())
+                }
             }
         }
         // Bound the drain: a child that handed its stdout fd to a surviving grandchild keeps the
