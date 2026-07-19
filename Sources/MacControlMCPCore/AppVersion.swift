@@ -17,12 +17,12 @@ public enum AppVersion {
     /// Marketing version (`CFBundleShortVersionString`). The patch component is bumped on every
     /// install by `scripts/bump-version.sh` (0.2.0 → 0.2.1 → …); bump minor/major by hand for a
     /// real release. Kept in lockstep with project.yml's MARKETING_VERSION.
-    public static let marketingVersion = "0.2.10"
+    public static let marketingVersion = "0.2.11"
 
     /// Monotonic build number (`CFBundleVersion`), incremented on every install by
     /// `scripts/bump-version.sh` — never reused, so a higher number is always a newer install.
     /// Kept in lockstep with project.yml's CURRENT_PROJECT_VERSION.
-    public static let buildNumber = "12"
+    public static let buildNumber = "13"
 
     /// "0.2.1 (3)" — marketing version with the build number; both advance on every install.
     public static var displayString: String { "\(marketingVersion) (\(buildNumber))" }
