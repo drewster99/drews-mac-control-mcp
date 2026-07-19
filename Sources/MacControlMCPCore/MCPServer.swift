@@ -14,12 +14,17 @@ public final class MCPServer {
     /// The newest supported revision — offered when the client pins nothing (or something we don't speak).
     static let latestProtocolVersion = "2025-06-18"
 
+    /// Server-level guidance returned in the `initialize` result's `instructions` field — the
+    /// one-time orientation an MCP client shows/feeds its model before any tool call.
+    static let serverInstructions = "Drew's Mac Control MCP Server - Computer Control for MacOS: Use to inspect, understand, and control/interact with the user interface hierarchy of any app on this user's computer. Start with `app(\"Terminal\", window: \"My projects\")` to inspect an app by name (or bundle ID, process ID or window title) and optionally include the `window` parameter to get details and references to individual elements with which you can interact."
+
     private let tools: [Tool]
 
-    /// Appended to every tool response as a second content block so the driving model always knows
-    /// how idle the user is. Sampled AFTER the tool runs (so it reflects any input the tool just
-    /// posted, flagged via `mayReflectOwnInput`). Injected so it's testable and so the CLI/host can
-    /// wire it to the live `ActivityMonitor`; nil disables the header entirely.
+    /// Folded into every tool response as a top-level `userActivity` key so the driving model always
+    /// knows how idle the user is — a single JSON object, not a second content block. Sampled AFTER
+    /// the tool runs (so it reflects any input the tool just posted, flagged via `mayReflectOwnInput`).
+    /// Injected so it's testable and so the CLI/host can wire it to the live `ActivityMonitor`; nil
+    /// disables the header entirely.
     private let activityHeader: (@Sendable () -> [String: Any])?
 
     /// The connecting MCP client's self-reported identity ("name version"), captured from the
@@ -72,7 +77,8 @@ public final class MCPServer {
                 // which build answered and detect a stale host from an earlier install.
                 "serverInfo": ["name": "mac-control-mcp",
                                "version": AppVersion.marketingVersion,
-                               "buildId": BuildStamp.buildId]
+                               "buildId": BuildStamp.buildId],
+                "instructions": Self.serverInstructions
             ])
 
         case "notifications/initialized", "notifications/cancelled":
@@ -101,12 +107,35 @@ public final class MCPServer {
             return JSONRPC.errorData(id: request.id, code: -32602, message: "unknown tool: \(name)")
         }
         let text = tool.call(arguments)
+        // Fold the current user-idle snapshot into the tool's own JSON result as a top-level
+        // `userActivity` key, so the response is one object rather than two concatenated blobs.
+        // Skipped for check_user_activity (its whole payload IS this) and when no provider is wired.
         var content: [[String: Any]] = [["type": "text", "text": text]]
-        // Second block: how idle the user is now. Sampled after the tool ran. Skipped for
-        // check_user_activity (its whole payload IS this) and when no provider is wired.
         if name != "check_user_activity", let activityHeader {
-            content.append(["type": "text", "text": JSONText.from(["userActivity": activityHeader()])])
+            let activity = activityHeader()
+            if let merged = Self.merged(text, addingUserActivity: activity) {
+                content = [["type": "text", "text": merged]]
+            } else {
+                // Result isn't a JSON object (an array or bare value) — leave it intact and carry the
+                // activity in its own block rather than mangle it.
+                content = [["type": "text", "text": text],
+                           ["type": "text", "text": JSONText.from(["userActivity": activity])]]
+            }
         }
         return JSONRPC.responseData(id: request.id, result: ["content": content])
+    }
+
+    /// Return the tool's JSON result with a top-level `userActivity` key folded in, or nil when the
+    /// result isn't a JSON object (so the caller can fall back to a separate block without corrupting
+    /// a non-object payload). `userActivity` overwrites any collision — the server's live sample wins.
+    static func merged(_ toolText: String, addingUserActivity activity: [String: Any]) -> String? {
+        guard let data = toolText.data(using: .utf8) else { return nil }
+        do {
+            guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            object["userActivity"] = activity
+            return JSONText.from(object)
+        } catch {
+            return nil
+        }
     }
 }

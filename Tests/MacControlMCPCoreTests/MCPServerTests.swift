@@ -17,6 +17,9 @@ final class MCPServerTests: XCTestCase {
         let serverInfo = try XCTUnwrap(result["serverInfo"] as? [String: Any])
         XCTAssertEqual(serverInfo["name"] as? String, "mac-control-mcp")
         XCTAssertEqual(serverInfo["version"] as? String, AppVersion.marketingVersion)
+        let instructions = try XCTUnwrap(result["instructions"] as? String)
+        XCTAssertTrue(instructions.contains("Mac Control MCP"), instructions)
+        XCTAssertTrue(instructions.contains("app(\"Terminal\""), instructions)
     }
 
     func testInitializeCapturesClientInfo() throws {
