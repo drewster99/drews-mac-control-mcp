@@ -228,6 +228,13 @@ fi
 # deleting its bundle) so the next activation runs the new binary.
 pkill -x -U "$TARGET_UID" MacControlHost 2>/dev/null || true
 rm -rf "$OLD" 2>/dev/null || true
+
+# Drop stale relays so MCP clients pick up the freshly-installed relay binary without a manual
+# client restart. A running relay is pinned to the bundle it was spawned from (the swap above just
+# deleted that inode), so it can't self-update; killing it makes the client (Claude Code, etc.)
+# reconnect and spawn a fresh relay from $DEST on its next call. Relays are stateless forwarders —
+# this only drops the momentary connection, it does NOT touch the client process itself.
+pkill -x -U "$TARGET_UID" MacControlRelay 2>/dev/null || true
 trap - EXIT
 RELAY="$DEST/Contents/Helpers/MacControlRelay"
 info "$DEST"
