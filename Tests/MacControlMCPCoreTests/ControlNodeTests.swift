@@ -127,6 +127,54 @@ final class ControlNodeTests: XCTestCase {
         XCTAssertTrue(out.contains("\n  e2 button \"OK\" - press"))
     }
 
+    /// A tree past `maxLines` is cut, and the cut announces itself — silent truncation would read
+    /// as a complete tree and send a caller looking for elements that were simply dropped.
+    func testRenderMaxLinesElidesLoudly() {
+        let children = (0..<50).map { ControlNode(ref: "e\($0 + 2)", type: "button", label: "B\($0)") }
+        let root = ControlNode(ref: "e1", type: "window", label: "W", children: children)
+        let out = ControlRenderer.render(root, includeLegend: false, maxLines: 10)
+
+        XCTAssertTrue(out.contains("e2 button \"B0\""), "keeps the first lines")
+        XCTAssertFalse(out.contains("\"B45\""), "drops past the cap")
+        XCTAssertTrue(out.contains("showing 10 of 51 lines"), "states what was kept, of what total")
+        XCTAssertTrue(out.contains("`window`"), "points at the fix")
+    }
+
+    /// Characters, not lines, are what the client rejects. Per-node values are already capped at
+    /// 500 chars, so oversize comes from VOLUME — an unscoped app walk measured ~69k chars while
+    /// still sitting under a 1200-line cap, i.e. the line cap alone would have let it through.
+    func testRenderMaxCharsBoundsByTotalVolume() {
+        let children = (0..<400).map {
+            ControlNode(ref: "e\($0 + 2)", type: "textField", label: "field\($0)",
+                        textValue: String(repeating: "x", count: 400))
+        }
+        let root = ControlNode(ref: "e1", type: "window", label: "W", children: children)
+
+        let uncapped = ControlRenderer.render(root, includeLegend: false, maxLines: 1200)
+        XCTAssertGreaterThan(uncapped.count, 40_000, "line cap alone leaves it oversized")
+
+        let capped = ControlRenderer.render(root, includeLegend: false, maxLines: 1200, maxChars: 10_000)
+        XCTAssertLessThan(capped.count, 10_500, "char cap bounds it")
+        XCTAssertTrue(capped.contains("of 401 lines"), "reports the cut")
+    }
+
+    /// A single line larger than the whole budget must still yield the root ref, not an empty tree.
+    func testRenderMaxCharsKeepsRootWhenFirstLineOversized() {
+        let root = ControlNode(ref: "e1", type: "window", label: String(repeating: "W", count: 5000))
+        let out = ControlRenderer.render(root, includeLegend: false, maxChars: 500)
+        XCTAssertTrue(out.hasPrefix("e1 window"), "root ref survives")
+        XCTAssertLessThan(out.count, 800)
+    }
+
+    /// Under the cap, nothing is added — no elision note on a complete tree.
+    func testRenderMaxLinesNoOpWhenUnderCap() {
+        let root = ControlNode(ref: "e1", type: "window", label: "W",
+                               children: [ControlNode(ref: "e2", type: "button", label: "OK")])
+        let out = ControlRenderer.render(root, includeLegend: false, maxLines: 100)
+        XCTAssertFalse(out.contains("elided"))
+        XCTAssertEqual(out, ControlRenderer.render(root, includeLegend: false))
+    }
+
     func testCollectionShapeAndHeader() {
         let table = ControlNode(ref: "e30", type: "table", label: "Mailboxes",
                                 states: ["focused"], rowCount: 248, columnCount: 3,

@@ -51,6 +51,44 @@ final class AppSummaryTests: XCTestCase {
         XCTAssertEqual(groups["Text"]?.entries.map(\.detail), ["\"Some label\""])
     }
 
+    /// A subrole-carrying button (`AXButton` + `AXFullScreenButton`) groups under Buttons, not
+    /// Other. Regression: `type` is the humanized subrole, so classifying on it filed every
+    /// window-widget button as Other.
+    func testSubroleButtonsGroupAsButtons() {
+        let window = ControlNode(ref: "w1", type: "window", role: "window", label: "Main",
+                                 states: ["main"], children: [
+            ControlNode(ref: "b1", type: "fullScreenButton", role: "button",
+                        label: "this button also has an action to zoom the window",
+                        actions: ["press", "zoomWindow"]),
+            ControlNode(ref: "b2", type: "closeButton", role: "button", label: "close",
+                        actions: ["press"]),
+            // The point of classifying on role: a subrole no list has ever heard of still groups
+            // correctly, so a new macOS subrole can't silently refile a button as Other.
+            ControlNode(ref: "b3", type: "someUnknownFutureButton", role: "button",
+                        label: "novel", actions: ["press"])
+        ])
+        let tree = ControlNode(ref: "app", type: "application", label: "Terminal", children: [window])
+        let summary = AppProjection.project(tree: tree, name: "Terminal", pid: 1, bundleId: "com.apple.Terminal")
+        let groups = Dictionary(uniqueKeysWithValues: (summary.activeWindow?.groups ?? []).map { ($0.name, $0) })
+
+        XCTAssertEqual(groups["Buttons"]?.entries.map(\.ref), ["b1", "b2", "b3"])
+        XCTAssertNil(groups["Other"], "subrole buttons must not fall through to Other")
+    }
+
+    /// Nodes frozen before `role` existed carry only `type`, so the subrole spellings retained in
+    /// the role sets are what keeps them classified correctly.
+    func testSubroleButtonsGroupAsButtonsWithoutRole() {
+        let window = ControlNode(ref: "w1", type: "window", label: "Main", states: ["main"], children: [
+            ControlNode(ref: "b1", type: "fullScreenButton", label: "zoom", actions: ["press"])
+        ])
+        let tree = ControlNode(ref: "app", type: "application", label: "Terminal", children: [window])
+        let summary = AppProjection.project(tree: tree, name: "Terminal", pid: 1, bundleId: "com.apple.Terminal")
+        let groups = Dictionary(uniqueKeysWithValues: (summary.activeWindow?.groups ?? []).map { ($0.name, $0) })
+
+        XCTAssertEqual(groups["Buttons"]?.entries.map(\.ref), ["b1"])
+        XCTAssertNil(groups["Other"])
+    }
+
     func testRender() {
         let summary = AppProjection.project(tree: fixture(), name: "Notes", pid: 123, bundleId: "com.apple.Notes")
         let text = AppRenderer.render(summary)
@@ -61,7 +99,7 @@ final class AppSummaryTests: XCTestCase {
         XCTAssertTrue(text.contains("Menus:"))
         XCTAssertTrue(text.contains("  Menu 1 [e3]: File"))
         XCTAssertTrue(text.contains("  Menu 2 [e7]: Edit"))
-        XCTAssertTrue(text.contains("Active window: Vacation plan"))
+        XCTAssertTrue(text.contains("Active window [e10]: Vacation plan"))
         XCTAssertTrue(text.contains("  Buttons (2) [+1 unnamed]:"))    // elision on the header, not a trailing line
         XCTAssertTrue(text.contains("    Button 1 [e11]: Save"))
         XCTAssertTrue(text.contains("    Button 2 [e12]: Cancel"))
@@ -110,6 +148,6 @@ final class AppSummaryTests: XCTestCase {
         XCTAssertFalse(text.contains("Press\nMe"))                 // no RAW newline inside a label
         XCTAssertTrue(text.contains("contents: \"line1\\nline2\""))
         XCTAssertTrue(text.contains("Window 1 ACTIVE [e2]: Win\\nTwo"))
-        XCTAssertTrue(text.contains("Active window: Win\\nTwo"))
+        XCTAssertTrue(text.contains("Active window [e2]: Win\\nTwo"))
     }
 }

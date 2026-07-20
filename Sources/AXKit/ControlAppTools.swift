@@ -216,7 +216,9 @@ public struct ControlAppTool: Tool {
                 "properties": [
                     "identity": ["type": "string", "description": "App name, bundle id, pid, or a window-title substring."],
                     "window": ["type": "string", "description": "Optional exact (case-sensitive) window title to scope to one window."],
-                    "timeout": ["type": "number", "description": "Seconds to spend loading the tree (default 10). Unreached nodes show as [N hidden]."]
+                    "timeout": ["type": "number", "description": "Seconds to spend loading the tree (default 10). Unreached nodes show as [N hidden]."],
+                    "maxLines": ["type": "number", "description": "Max hierarchy lines to return (default 1200, max 20000). Any cut is reported inline. Prefer scoping with `window` over raising this."],
+                    "maxChars": ["type": "number", "description": "Max hierarchy characters to return (default 40000, max 500000). This is the cap that usually bites: one node can carry a huge value (a terminal's scrollback), so a small tree can still exceed what the client accepts."]
                 ],
                 "required": ["identity"]
             ]
@@ -233,6 +235,13 @@ public struct ControlAppTool: Tool {
         // Reserve the fixed 15s launch step so resolve-then-launch-then-walk stays under the relay
         // budget (control_app is non-mutating and gets re-run by the relay on a 60s timeout).
         let timeout = ToolTimeout.seconds(ToolArguments.double(arguments, for: "timeout"), default: 10, reserveSeconds: 15)
+        // Defaults live on ControlRenderer so every render path shares one set of bounds. Sized to
+        // stay under a typical MCP client's per-result token ceiling: an unscoped walk of an
+        // ordinary app was measured at ~69k characters, which the client rejected outright.
+        let maxLines = min(max(Int(ToolArguments.double(arguments, for: "maxLines")
+                                   ?? Double(ControlRenderer.defaultMaxLines)), 1), 20_000)
+        let maxChars = min(max(Int(ToolArguments.double(arguments, for: "maxChars")
+                                   ?? Double(ControlRenderer.defaultMaxChars)), 200), 500_000)
 
         func walkAndRespond(pid: pid_t, bundleId: String, name: String, launched: Bool, timing: [String: Any]?) -> String {
             let walkStart = Date()
@@ -242,7 +251,9 @@ public struct ControlAppTool: Tool {
                                            deadline: Date().addingTimeInterval(timeout), windowFilter: windowArg)
             registry.storeControlTree(tree, pid: pid)
             var obj: [String: Any] = ["success": true, "pid": Int(pid), "bundleId": bundleId, "name": name,
-                                      "hierarchy": ControlRenderer.render(tree, includeLegend: true)]
+                                      "hierarchy": ControlRenderer.render(tree, includeLegend: true,
+                                                                          maxLines: maxLines,
+                                                                          maxChars: maxChars)]
             if launched { obj["launched"] = true }
             if var timing {
                 timing["walkMs"] = Int(Date().timeIntervalSince(walkStart) * 1000)
@@ -253,7 +264,18 @@ public struct ControlAppTool: Tool {
 
         func appCase(_ pid: pid_t, _ bundleId: String, _ name: String) -> String {
             if let windowArg, !AppResolver.hasWindow(pid: pid, title: windowArg) {
-                return JSONText.from(["success": false, "error": "window_not_found"])
+                // Matching is exact and case-sensitive, but the titles a caller can easily obtain are
+                // elided for display — so hand back the full untruncated list to choose from rather
+                // than leaving them to guess which of the two rules they broke.
+                let available = AppResolver.windowTitles(pid: pid)
+                return JSONText.from([
+                    "success": false,
+                    "error": "window_not_found",
+                    "message": "No window of \(name) has the exact (case-sensitive) title '\(windowArg)'. "
+                             + "Pass one of `availableWindows` verbatim, or omit `window` for the whole app.",
+                    "requestedWindow": windowArg,
+                    "availableWindows": available
+                ])
             }
             return walkAndRespond(pid: pid, bundleId: bundleId, name: name, launched: false, timing: nil)
         }

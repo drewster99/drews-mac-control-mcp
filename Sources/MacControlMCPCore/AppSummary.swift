@@ -36,6 +36,7 @@ public struct AppSummary: Equatable, Sendable {
         public let title: String
     }
     public struct Window: Equatable, Sendable {
+        public let ref: String
         public let title: String
         public let groups: [Group]
     }
@@ -56,21 +57,41 @@ public enum AppProjection {
     static let windowTypes: Set<String> = ["window", "dialog", "sheet", "drawer", "popover",
                                            "floatingWindow", "systemDialog", "systemFloatingWindow"]
 
+    // Each set holds base roles first, then the subrole spellings the same control can surface as.
+    // Matching on the base role is what makes these correct; the subrole entries only cover nodes
+    // that predate `ControlNode.role` and so can only be matched by `type`.
     static let buttonRoles: Set<String> = ["button", "menuButton", "popUpButton", "radioButton",
-                                           "checkBox", "disclosureTriangle", "tab", "toolbarButton"]
-    static let textFieldRoles: Set<String> = ["textField", "textArea", "searchField", "comboBox", "secureTextField"]
+                                           "checkBox", "disclosureTriangle", "tab", "toolbarButton",
+                                           "fullScreenButton", "closeButton", "minimizeButton",
+                                           "zoomButton", "sortButton", "incrementArrow", "decrementArrow"]
+    static let textFieldRoles: Set<String> = ["textField", "textArea", "searchField", "comboBox",
+                                              "secureTextField"]
     static let staticTextRoles: Set<String> = ["staticText", "text", "heading"]
+
+    /// True when `node` is of one of `kinds`. Prefers the base role — the stable key — and falls
+    /// back to the display `type` for nodes frozen without a role.
+    static func isKind(_ node: ControlNode, _ kinds: Set<String>) -> Bool {
+        kinds.contains(node.role ?? node.type) || kinds.contains(node.type)
+    }
+
+    /// Append the node's `type` when it says something the group heading doesn't — i.e. when a
+    /// subrole made it more specific than the base role. A plain `button` under Buttons adds
+    /// nothing, but `fullScreenButton` distinguishes it from the other six untitled buttons.
+    static func qualified(_ detail: String, _ node: ControlNode) -> String {
+        guard let role = node.role, role != node.type else { return detail }
+        return "\(detail) (\(node.type))"
+    }
 
     public static func project(tree: ControlNode, name: String, pid: Int, bundleId: String,
                                activeWindowTitle: String? = nil) -> AppSummary {
-        let windowNodes = tree.children.filter { windowTypes.contains($0.type) }
+        let windowNodes = tree.children.filter { isKind($0, windowTypes) }
         let active = activeWindowNode(windowNodes, preferred: activeWindowTitle)
         let windows = windowNodes.map { node in
             AppSummary.WindowRef(ref: node.ref, title: oneLine(node.label ?? "(untitled)"),
                                  isActive: active.map { $0.ref == node.ref } ?? false)
         }
         let activeWindow = active.map {
-            AppSummary.Window(title: oneLine($0.label ?? "(untitled)"), groups: groups(in: $0))
+            AppSummary.Window(ref: $0.ref, title: oneLine($0.label ?? "(untitled)"), groups: groups(in: $0))
         }
         return AppSummary(name: name, pid: pid, bundleId: bundleId,
                           windows: windows, menus: menus(in: tree), activeWindow: activeWindow)
@@ -102,13 +123,15 @@ public enum AppProjection {
     static func groups(in window: ControlNode) -> [AppSummary.Group] {
         var buttons: [ControlNode] = [], fields: [ControlNode] = [], other: [ControlNode] = [], text: [ControlNode] = []
         collect(window) { node in
-            if buttonRoles.contains(node.type) { buttons.append(node) }
-            else if textFieldRoles.contains(node.type) { fields.append(node) }
-            else if staticTextRoles.contains(node.type) { if node.label?.isEmpty == false { text.append(node) } }
+            if isKind(node, buttonRoles) { buttons.append(node) }
+            else if isKind(node, textFieldRoles) { fields.append(node) }
+            else if isKind(node, staticTextRoles) { if node.label?.isEmpty == false { text.append(node) } }
             else if !node.actions.isEmpty || node.textValue != nil { other.append(node) }
         }
         var out: [AppSummary.Group] = []
-        out.append(group("Buttons", "Button", buttons) { $0.label.map { oneLine($0) } })
+        out.append(group("Buttons", "Button", buttons) { node in
+            node.label.map { label in qualified(oneLine(label), node) }
+        })
         // Text fields show title / placeholder / contents so an unlabeled field with text is still
         // usable (search boxes, code editors); only a fully-empty field falls through to `unnamed`.
         out.append(group("Text fields", "Text field", fields) { node in
@@ -201,7 +224,7 @@ public enum AppRenderer {
         }
 
         if let window = summary.activeWindow {
-            lines.append("Active window: \(window.title)")
+            lines.append("Active window [\(window.ref)]: \(window.title)")
             for group in window.groups {
                 // Fold the elision counts into the header (not a trailing line) so they're
                 // unambiguously scoped to this group and the group header has no sibling that looks

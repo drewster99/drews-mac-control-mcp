@@ -20,7 +20,14 @@ public enum HiddenCount: Equatable, Sendable {
 /// a pure formatter.
 public struct ControlNode: Equatable, Sendable {
     public let ref: String
+    /// Display type: the humanized SUBROLE when one exists, else the role — `AXButton` +
+    /// `AXFullScreenButton` renders as `fullScreenButton`. Specific, but unstable as a
+    /// classification key: every new subrole spells a familiar control a new way.
     public let type: String
+    /// Humanized BASE role, subrole ignored (`button` for the example above). Classification
+    /// keys off this so a control's group never depends on which subrole it happens to carry.
+    /// `nil` on nodes frozen before this was carried; callers fall back to `type`.
+    public let role: String?
     public let label: String?
     public let identifier: String?
     public let textValue: String?
@@ -42,6 +49,7 @@ public struct ControlNode: Equatable, Sendable {
     public init(
         ref: String,
         type: String,
+        role: String? = nil,
         label: String? = nil,
         identifier: String? = nil,
         textValue: String? = nil,
@@ -62,6 +70,7 @@ public struct ControlNode: Equatable, Sendable {
     ) {
         self.ref = ref
         self.type = type
+        self.role = role
         self.label = label
         self.identifier = identifier
         self.textValue = textValue
@@ -84,7 +93,7 @@ public struct ControlNode: Equatable, Sendable {
     /// Functional copy with replaced children — used when splicing expand/refresh results
     /// back into a persisted tree, preserving this node's own attributes verbatim.
     public func withChildren(_ newChildren: [ControlNode]) -> ControlNode {
-        ControlNode(ref: ref, type: type, label: label, identifier: identifier,
+        ControlNode(ref: ref, type: type, role: role, label: label, identifier: identifier,
                     textValue: textValue, numericValue: numericValue, minValue: minValue,
                     maxValue: maxValue, valueDescription: valueDescription, url: url,
                     placeholder: placeholder, states: states, actions: actions,
@@ -146,7 +155,13 @@ public enum RoleNames {
         if let subrole, !subrole.isEmpty {
             return aliases[subrole] ?? stripAX(subrole)
         }
-        return aliases[role] ?? stripAX(role)
+        return humanizeBaseRole(role)
+    }
+
+    /// The humanized role with any subrole deliberately ignored — the stable key for grouping
+    /// controls by kind. `AXButton` is `button` whether or not it carries `AXFullScreenButton`.
+    public static func humanizeBaseRole(_ role: String) -> String {
+        aliases[role] ?? stripAX(role)
     }
 }
 
@@ -334,10 +349,53 @@ public enum ControlRenderer {
     //       e40 table "Devices" [248 rows × 2 cols] cols=[Name,Kind] - [243 hidden]
     """
 
-    public static func render(_ root: ControlNode, includeLegend: Bool = true) -> String {
+    /// `maxLines` bounds the rendered tree. A whole-app walk of an ordinary multi-window app runs
+    /// to tens of thousands of characters — past what an MCP client will accept — and the caller
+    /// then gets nothing at all. Truncating is strictly better than that, but only if it says so:
+    /// the cut is always reported inline with the total and the way to see the rest, never silent.
+    /// Default bounds. These are the DEFAULTS, not opt-in: every render path (control_app, the
+    /// launch path, expand, subtree) reaches a client with the same per-result ceiling, so an
+    /// unbounded one is a latent failure waiting for a big enough app. Pass `nil` to opt out.
+    public static let defaultMaxLines = 1200
+    public static let defaultMaxChars = 40_000
+
+    public static func render(_ root: ControlNode, includeLegend: Bool = true,
+                              maxLines: Int? = defaultMaxLines,
+                              maxChars: Int? = defaultMaxChars) -> String {
         var lines: [String] = []
         emit(root, indent: 0, into: &lines)
-        let body = lines.joined(separator: "\n")
+        let totalLines = lines.count
+        var kept = lines
+        var cut = false
+        if let maxLines, maxLines > 0, kept.count > maxLines {
+            kept = Array(kept.prefix(maxLines))
+            cut = true
+        }
+        // The line cap alone does not bound the response: one node can carry a huge value (a
+        // terminal's whole scrollback is a single text-field line), so a tree well under the line
+        // cap can still exceed what the client accepts. Characters are the axis that actually
+        // matters — cut on a line boundary so the output stays parseable.
+        if let maxChars, maxChars > 0 {
+            var used = 0
+            var fitted: [String] = []
+            for line in kept {
+                let cost = line.count + 1
+                if used + cost > maxChars { cut = true; break }
+                used += cost
+                fitted.append(line)
+            }
+            // A single oversized line (a huge text value) must not reduce the tree to nothing:
+            // keep the root, hard-truncated, so the caller always gets a usable ref back.
+            if fitted.isEmpty, let first = kept.first {
+                fitted = [String(first.prefix(maxChars)) + "…"]
+            }
+            kept = fitted
+        }
+        var body = kept.joined(separator: "\n")
+        if cut {
+            body += "\n// [showing \(kept.count) of \(totalLines) lines — scope to one window with"
+                  + " `window`, or raise `maxLines`/`maxChars`]"
+        }
         return includeLegend ? legend + "\n//\n" + body : body
     }
 

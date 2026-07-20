@@ -197,6 +197,7 @@ public enum ControlWalker {
         ControlNode(
             ref: build.ref,
             type: RoleNames.humanize(role: build.role, subrole: build.subrole),
+            role: RoleNames.humanizeBaseRole(build.role),
             label: build.label,
             identifier: build.identifier,
             textValue: build.textValue,

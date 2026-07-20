@@ -224,26 +224,58 @@ if ! mv "$STAGE" "$DEST" 2>/dev/null; then
   fi
   die "Couldn't install to $DEST. Re-run with: sudo ./install.sh"
 fi
-# The Mach service may have relaunched the old host mid-swap; stop it (before
-# deleting its bundle) so the next activation runs the new binary.
+# The Mach service may have relaunched the old host mid-swap; stop it BEFORE deleting its bundle
+# so we never unlink a bundle out from under a running host. It gets cycled again after the launch
+# below (a second kill is a no-op) — that later one is what puts the new binary in place.
 pkill -x -U "$TARGET_UID" MacControlHost 2>/dev/null || true
 rm -rf "$OLD" 2>/dev/null || true
+trap - EXIT
+RELAY="$DEST/Contents/Helpers/MacControlRelay"
+info "$DEST"
+
+# ── 6. launch (self-bootstraps the host LaunchAgent + permission prompts) ─────
+# The app MUST come up before the host and relays are dropped below. Launching is what registers
+# the host LaunchAgent (SMAppService); kill the relays first and a client can reconnect, spawn a
+# fresh relay, and reach for a host that is not registered yet — which surfaces to the client as a
+# bare "host unavailable" it never recovers from without a manual restart.
+if [ "$LAUNCH" -eq 1 ]; then
+  step "Launching (registers the host LaunchAgent, prompts for permissions)"
+  as_user open "$DEST"
+  info "grant Accessibility (and Screen Recording for screenshots) when prompted"
+  # Wait for the app to actually be up, so the LaunchAgent registration has happened before the
+  # cycle below. Bounded — a wedged permission prompt must not hang the install.
+  for _ in $(seq 1 25); do
+    pgrep -x -U "$TARGET_UID" MacControlMCP >/dev/null 2>&1 && break
+    sleep 0.2
+  done
+fi
+
+# ── 6b. cycle host + relays onto the new binary ──────────────────────────────
+# The Mach service may have relaunched the old host mid-swap; stop it so the next activation runs
+# the new binary. Safe now that the app is up: the service relaunches the host on demand.
+pkill -x -U "$TARGET_UID" MacControlHost 2>/dev/null || true
 
 # Drop stale relays so MCP clients pick up the freshly-installed relay binary without a manual
 # client restart. A running relay is pinned to the bundle it was spawned from (the swap above just
 # deleted that inode), so it can't self-update; killing it makes the client (Claude Code, etc.)
 # reconnect and spawn a fresh relay from $DEST on its next call. Relays are stateless forwarders —
 # this only drops the momentary connection, it does NOT touch the client process itself.
+#
+# TERM alone is not enough: a relay that is stopped (state T) or blocked never services it, and
+# survivors accumulate across installs — they were observed surviving two in a row, the oldest six
+# days old. Escalate to KILL exactly as the front-end app above does, then report anything left
+# rather than swallowing it, so a leak is visible instead of silent.
 pkill -x -U "$TARGET_UID" MacControlRelay 2>/dev/null || true
-trap - EXIT
-RELAY="$DEST/Contents/Helpers/MacControlRelay"
-info "$DEST"
-
-# ── 6. launch (self-bootstraps the host LaunchAgent + permission prompts) ─────
-if [ "$LAUNCH" -eq 1 ]; then
-  step "Launching (registers the host LaunchAgent, prompts for permissions)"
-  as_user open "$DEST"
-  info "grant Accessibility (and Screen Recording for screenshots) when prompted"
+for _ in 1 2 3 4 5; do
+  pgrep -x -U "$TARGET_UID" MacControlRelay >/dev/null 2>&1 || break
+  sleep 0.2
+done
+if pgrep -x -U "$TARGET_UID" MacControlRelay >/dev/null 2>&1; then
+  pkill -9 -x -U "$TARGET_UID" MacControlRelay 2>/dev/null || true
+  sleep 0.2
+fi
+if pgrep -x -U "$TARGET_UID" MacControlRelay >/dev/null 2>&1; then
+  warn "relays still running after SIGKILL: $(pgrep -x -U "$TARGET_UID" MacControlRelay | tr '\n' ' ')"
 fi
 
 # ── 7. register MCP clients ──────────────────────────────────────────────────

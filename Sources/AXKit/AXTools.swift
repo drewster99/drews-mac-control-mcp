@@ -287,6 +287,11 @@ public struct ElementDetailTool: Tool {
             "subrole": element.subrole ?? "",
             "identifier": element.identifier ?? "",
             "title": element.title ?? "",
+            // The 2nd and 3rd label fallbacks (§7). Without them a caller can see a labelled element
+            // in the summary and find nothing in its detail that accounts for the label — every
+            // untitled control reads as anonymous here.
+            "description": element.axDescription ?? "",
+            "help": element.help ?? "",
             "value": value,
             "settable": element.isValueSettable,
             "actions": element.actions,
