@@ -191,6 +191,11 @@ func runRelay() {
     DebugLog.event("launch", "relay \(DebugLog.buildIdentity()) argv=\(CommandLine.arguments.joined(separator: " "))")
     let stdout = FileHandle.standardOutput
     var connection = makeConnection()
+    // Whether we've already tried the heavy cold-start bootstrap for the CURRENT outage. Re-armed
+    // (reset to false) on every successful reply below, so a *later* host cycle — the host crashing,
+    // being killed, or being replaced by a freshly-installed version — earns its own fresh bootstrap
+    // escalation. Without the reset it latches after the first bootstrap and a long-lived relay stops
+    // recovering on the second install of its lifetime.
     var bootstrapped = false
 
     while let line = readLine(strippingNewline: true) {
@@ -232,6 +237,10 @@ func runRelay() {
                 }
                 DebugLog.response(response)
                 responded = true
+                // Connectivity confirmed (even a JSON-RPC error reply means the host is reachable),
+                // so re-arm the bootstrap for the next outage. This is what lets a living relay
+                // recover across an unbounded number of host restarts/reinstalls without a client restart.
+                bootstrapped = false
                 break attemptLoop
 
             case .timedOut:
@@ -250,9 +259,10 @@ func runRelay() {
                 let mutating = isMutating(line)
 
                 // Cold start: if a plain reconnect didn't help (attempt ≥ 1), or this is a mutating
-                // call we won't retry, bring the host up once by launching the app to register the
-                // LaunchAgent. A registered host that merely re-exec'd (e.g. for a grant) recovers
-                // on the first plain reconnect without this.
+                // call we won't retry, bring the host up by launching the app to register the
+                // LaunchAgent — at most once per outage (the flag re-arms on the next success, and a
+                // persistently-dead host that never replies won't storm-launch). A registered host
+                // that merely re-exec'd (e.g. for a grant) recovers on the first plain reconnect.
                 if !bootstrapped && (attempt >= 1 || mutating) {
                     bootstrapped = true
                     bootstrapHost()
