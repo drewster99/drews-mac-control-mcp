@@ -21,9 +21,11 @@ struct MacControlApp: App {
         WindowGroup("MacControlMCP") {
             ContentView()
                 .frame(minWidth: 500, minHeight: 460)
-                .padding(20)
         }
-        .windowResizability(.contentSize)
+        // `.contentSize` pinned the window to its content's ideal height, so every update re-measured
+        // the whole tree — including all debug-monitor rows — to resize the window. `.contentMinSize`
+        // keeps the floor without making window size a function of unbounded content.
+        .windowResizability(.contentMinSize)
     }
 }
 
@@ -672,156 +674,159 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("MacControlMCP")
-                    .font(.largeTitle).bold()
-                Spacer()
-                Text("Version \(model.clientVersion.displayString) · build \(model.clientVersion.buildId)")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-            Text("An MCP server for driving macOS apps and the iOS Simulator.")
-                .foregroundStyle(.secondary)
-
-            GroupBox("1 · Host agent") {
-                VStack(alignment: .leading, spacing: 8) {
-                    if !model.runningFromApplications {
-                        Text("⚠︎ Run the notarized build from /Applications — an unsigned dev build can't register the host agent.")
-                            .font(.callout).foregroundStyle(.orange)
-                    }
-                    Text("Status: \(model.agentStatus)")
-                    Text(agentVersionText).foregroundStyle(agentVersionColor)
-                    if !model.lastMessage.isEmpty {
-                        Text(model.lastMessage).font(.callout).foregroundStyle(.red)
-                    }
-                    HStack {
-                        Button("Register") { model.register() }
-                        Button("Unregister") { model.unregister() }
-                        Button("Login Items…") { model.openLoginItems() }
-                    }
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            GroupBox("2 · Grant the host permissions") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Grant the host **Accessibility** (to drive apps) and **Screen Recording** (for screenshots).")
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        Button("Open Accessibility…") { model.openAccessibilitySettings() }
-                        Button("Open Screen Recording…") { model.openScreenRecordingSettings() }
-                    }
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            GroupBox("3 · Point your MCP client at the relay") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(model.relayPath)
-                        .font(.system(.caption, design: .monospaced))
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("MacControlMCP")
+                        .font(.largeTitle).bold()
+                    Spacer()
+                    Text("Version \(model.clientVersion.displayString) · build \(model.clientVersion.buildId)")
+                        .font(.callout).foregroundStyle(.secondary)
                         .textSelection(.enabled)
-                    Button("Copy config JSON") { model.copyConfig() }
                 }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+                Text("An MCP server for driving macOS apps and the iOS Simulator.")
+                    .foregroundStyle(.secondary)
 
-            GroupBox("4 · Debug — live MCP monitor") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Toggle("Monitor MCP calls", isOn: Binding(
-                        get: { model.debugMonitoring },
-                        set: { model.setDebugMonitoring($0) }))
-                    Toggle("Log full request/response bodies to maccontrol.log", isOn: Binding(
-                        get: { model.bodyLogging },
-                        set: { model.setBodyLogging($0) }))
-                    Text("Bodies can include typed text and clipboard contents. Applies immediately to the host and to running agent sessions (unless a session was launched with an explicit MACCONTROL_LOG_BODIES override).")
-                        .font(.caption2).foregroundStyle(.secondary)
-                    if model.debugEvents.isEmpty {
-                        Text(model.debugMonitoring ? "Monitoring — waiting for calls…" : "Off")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        ForEach(model.visibleDebugEvents) { event in
-                            DebugEventRow(event: event)
+                GroupBox("1 · Host agent") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !model.runningFromApplications {
+                            Text("⚠︎ Run the notarized build from /Applications — an unsigned dev build can't register the host agent.")
+                                .font(.callout).foregroundStyle(.orange)
                         }
-                        if model.debugEvents.count > 10 {
-                            Button(model.showAllDebugEvents
-                                   ? "Show fewer"
-                                   : "Show more (\(model.debugEvents.count - 10) earlier)") {
-                                model.toggleShowAllDebugEvents()
+                        Text("Status: \(model.agentStatus)")
+                        Text(agentVersionText).foregroundStyle(agentVersionColor)
+                        if !model.lastMessage.isEmpty {
+                            Text(model.lastMessage).font(.callout).foregroundStyle(.red)
+                        }
+                        HStack {
+                            Button("Register") { model.register() }
+                            Button("Unregister") { model.unregister() }
+                            Button("Login Items…") { model.openLoginItems() }
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("2 · Grant the host permissions") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Grant the host **Accessibility** (to drive apps) and **Screen Recording** (for screenshots).")
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("Open Accessibility…") { model.openAccessibilitySettings() }
+                            Button("Open Screen Recording…") { model.openScreenRecordingSettings() }
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("3 · Point your MCP client at the relay") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(model.relayPath)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                        Button("Copy config JSON") { model.copyConfig() }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("4 · Debug — live MCP monitor") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("Monitor MCP calls", isOn: Binding(
+                            get: { model.debugMonitoring },
+                            set: { model.setDebugMonitoring($0) }))
+                        Toggle("Log full request/response bodies to maccontrol.log", isOn: Binding(
+                            get: { model.bodyLogging },
+                            set: { model.setBodyLogging($0) }))
+                        Text("Bodies can include typed text and clipboard contents. Applies immediately to the host and to running agent sessions (unless a session was launched with an explicit MACCONTROL_LOG_BODIES override).")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        if model.debugEvents.isEmpty {
+                            Text(model.debugMonitoring ? "Monitoring — waiting for calls…" : "Off")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            ForEach(model.visibleDebugEvents) { event in
+                                DebugEventRow(event: event)
                             }
-                            .font(.caption)
+                            if model.debugEvents.count > 10 {
+                                Button(model.showAllDebugEvents
+                                       ? "Show fewer"
+                                       : "Show more (\(model.debugEvents.count - 10) earlier)") {
+                                    model.toggleShowAllDebugEvents()
+                                }
+                                .font(.caption)
+                            }
                         }
                     }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
 
-            GroupBox("5 · User activity — defer interrupting actions") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(String(format: "Mouse idle %.1fs · Keyboard idle %.1fs",
-                                model.liveMouseIdle, model.liveKeyboardIdle))
-                        .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                GroupBox("5 · User activity — defer interrupting actions") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(String(format: "Mouse idle %.1fs · Keyboard idle %.1fs",
+                                    model.liveMouseIdle, model.liveKeyboardIdle))
+                            .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
 
-                    if let failure = model.activityConfigFailure {
-                        HStack(spacing: 8) {
-                            Text(failure.message).font(.callout).foregroundStyle(.red)
-                            Button("Retry") { model.retryActivityConfig() }
-                        }
-                    }
-
-                    Group {
-                        HStack {
-                            Text("Wait for user idle")
-                            Slider(value: Binding(
-                                get: { Double(model.activityConfig.minIdleSeconds) },
-                                set: { model.activityConfig.minIdleSeconds = Int($0) }),
-                                in: 0...Double(ActivityConfig.minIdleCeiling),
-                                onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
-                            Text(model.activityConfig.minIdleSeconds == 0 ? "Off"
-                                 : "\(model.activityConfig.minIdleSeconds)s")
-                                .monospacedDigit().frame(width: 48, alignment: .trailing)
+                        if let failure = model.activityConfigFailure {
+                            HStack(spacing: 8) {
+                                Text(failure.message).font(.callout).foregroundStyle(.red)
+                                Button("Retry") { model.retryActivityConfig() }
+                            }
                         }
 
-                        HStack {
-                            Text("Defer up to")
-                            Slider(value: Binding(
-                                get: { Double(model.activityConfig.deferBudgetSeconds) },
-                                set: { model.activityConfig.deferBudgetSeconds = Int($0) }),
-                                in: 0...Double(ActivityConfig.deferBudgetCeiling),
-                                onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
-                            Text("\(model.activityConfig.deferBudgetSeconds)s")
-                                .monospacedDigit().frame(width: 48, alignment: .trailing)
-                        }
-                        .disabled(model.activityConfig.minIdleSeconds == 0)
+                        Group {
+                            HStack {
+                                Text("Wait for user idle")
+                                Slider(value: Binding(
+                                    get: { Double(model.activityConfig.minIdleSeconds) },
+                                    set: { model.activityConfig.minIdleSeconds = Int($0) }),
+                                    in: 0...Double(ActivityConfig.minIdleCeiling),
+                                    onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
+                                Text(model.activityConfig.minIdleSeconds == 0 ? "Off"
+                                     : "\(model.activityConfig.minIdleSeconds)s")
+                                    .monospacedDigit().frame(width: 48, alignment: .trailing)
+                            }
 
-                        Picker("When defer time is reached", selection: Binding(
-                            get: { model.activityConfig.onDeferTimeout },
-                            set: { model.activityConfig.onDeferTimeout = $0; model.saveActivityConfig() })) {
-                            Text("Execute anyway").tag(OnDeferTimeout.executeAnyway)
-                            Text("Report user busy").tag(OnDeferTimeout.reportBusy)
-                        }
-                        .pickerStyle(.segmented)
-                        .disabled(model.activityConfig.minIdleSeconds == 0)
-
-                        Toggle("Also defer app-launch / open / focus tools", isOn: Binding(
-                            get: { model.activityConfig.deferFocusTools },
-                            set: { model.activityConfig.deferFocusTools = $0; model.saveActivityConfig() }))
+                            HStack {
+                                Text("Defer up to")
+                                Slider(value: Binding(
+                                    get: { Double(model.activityConfig.deferBudgetSeconds) },
+                                    set: { model.activityConfig.deferBudgetSeconds = Int($0) }),
+                                    in: 0...Double(ActivityConfig.deferBudgetCeiling),
+                                    onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
+                                Text("\(model.activityConfig.deferBudgetSeconds)s")
+                                    .monospacedDigit().frame(width: 48, alignment: .trailing)
+                            }
                             .disabled(model.activityConfig.minIdleSeconds == 0)
-                    }
-                    // Editing is meaningless until the host's real settings have arrived — and
-                    // saving before then could clobber them with the placeholder default.
-                    .disabled(!model.activityConfigLoaded)
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
 
-            Spacer()
-            Button("Refresh") { model.refresh() }
+                            Picker("When defer time is reached", selection: Binding(
+                                get: { model.activityConfig.onDeferTimeout },
+                                set: { model.activityConfig.onDeferTimeout = $0; model.saveActivityConfig() })) {
+                                Text("Execute anyway").tag(OnDeferTimeout.executeAnyway)
+                                Text("Report user busy").tag(OnDeferTimeout.reportBusy)
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(model.activityConfig.minIdleSeconds == 0)
+
+                            Toggle("Also defer app-launch / open / focus tools", isOn: Binding(
+                                get: { model.activityConfig.deferFocusTools },
+                                set: { model.activityConfig.deferFocusTools = $0; model.saveActivityConfig() }))
+                                .disabled(model.activityConfig.minIdleSeconds == 0)
+                        }
+                        // Editing is meaningless until the host's real settings have arrived — and
+                        // saving before then could clobber them with the placeholder default.
+                        .disabled(!model.activityConfigLoaded)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Button("Refresh") { model.refresh() }
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onAppear {
             model.refresh()
