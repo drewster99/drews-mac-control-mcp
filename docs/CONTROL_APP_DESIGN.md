@@ -132,6 +132,15 @@ collection whose total exceeds the rendered rows. The count is **unknowable** �
 exposes neither a count attribute nor an enumerable rows/children array. The detection rule is
 simply *"did the count read succeed?"*
 
+**Output is also size-bounded, not just time-bounded.** The rendered `hierarchy` is capped by
+`maxChars` (default 40k) and `maxLines` (default 1200) — an unscoped walk of an ordinary
+multi-window app was measured at ~69k characters, which the client rejects outright, handing the
+caller *nothing*. `maxChars` is the cap that usually bites: per-node values are already truncated
+(~500 chars, §7), so oversize comes from *volume*, and a tree well under the line cap can still
+exceed the character budget. Any cut is reported inline (`// [showing N of M lines — scope with
+`window`, or raise `maxLines`/`maxChars`]`) — never silently — so a truncated tree can't be
+mistaken for a complete one. Prefer scoping to one `window` over raising the caps.
+
 ---
 
 ## 6. Response envelope
@@ -377,8 +386,25 @@ two apps back-to-back with no collisions; each app keeps its own tree side-by-si
 **Eviction is by liveness, never by the clock.** A 1-hour-old ref to a live window is valid; a
 1-second-old ref to a closed dialog is dead — only liveness distinguishes them, checked lazily
 at use-time. Trees/handles are evicted when the **app terminates** (`evictDeadApps`, a
-`kill(pid,0)` sweep run at each `control_app`) or under size pressure (the dead-handle prune).
-Nothing is force-refreshed or TTL-evicted.
+`kill(pid,0)` sweep run at each `control_app`), under size pressure (the dead-handle prune), or
+**at point of use** — when a verb resolves a ref whose element is destroyed, `evict(ref)` drops
+that one handle immediately (freeing the leaked `AXUIElement` proxy) rather than waiting for a
+sweep. Point-of-use eviction deliberately keeps the ref's persisted parent link — that link is a
+tiny string, not the proxy that leaks, and parent-climb recovery (above) reads it, so a
+descendant of a dead element must still be able to climb through it to a live ancestor. Nothing
+is force-refreshed or TTL-evicted.
+
+**Resolution is three-way, not binary.** A ref's element is `ready`, `dead`, or `hollow`, read
+from one `AXRole` query (`AXElement.readiness`) — the same single cross-process call the old
+liveness check made:
+- **ready** (role present) → act on it.
+- **dead** (`kAXErrorInvalidUIElement`) → evict the handle, fail loud with `stale_ref`.
+- **hollow** (alive but role not yet readable) → a just-inserted control is briefly hollow while
+  layout completes, then populates *on the same ref*. Acting on it would target an empty element;
+  evicting it would discard a ref about to become usable. So a control verb polls briefly
+  (wall-clock–bounded, so a hung app costs at most one blocking read) and acts once it populates;
+  if it stays hollow past the deadline, it returns the **retryable** `element_not_ready`. Every
+  real control carries a role, so only transients (pre-layout / mid-teardown) are ever hollow.
 
 **Rename (done):** `AXSession` → **`ElementRegistry`** (`AX*` read as an Apple type and it's a
 ref registry, not a "session"). `AXElement` keeps its name — it genuinely wraps `AXUIElement`.
@@ -407,9 +433,10 @@ ref registry, not a "session"). `AXElement` keeps its name — it genuinely wrap
 | No Accessibility grant | existing `accessibility_not_granted` (with `howToFix`/`deepLink`) |
 | Identity matched nothing | `{ success:false, error:"no_match" }` |
 | Identity matched >1 app | `{ success:false, error:"ambiguous", candidates:[…] }` |
-| `window` not found | `{ success:false, error:"window_not_found" }` |
+| `window` not found | `{ success:false, error:"window_not_found", requestedWindow, availableWindows:[…] }` — matching is exact and case-sensitive; the untruncated titles are returned since displayed titles are elided |
 | `change_value` rejected | one of `out_of_range` (with `given`/`min`/`max`), `not_settable`, `not_numeric`, `write_failed` |
 | Stale `ref` (no live ancestor) | `{ success:false, error:"stale_ref" }` — otherwise recovered by parent-climb with `resolvedFrom` (§12) |
+| Ref alive but not yet populated | `{ success:false, error:"element_not_ready" }` — a control mid-appear/animate; retryable (§12) |
 | `action` with unknown action | `{ success:false, error:"no_such_action", valid:[…] }` |
 
 ---

@@ -68,7 +68,7 @@ Why this matters: you grant Accessibility **once, to the host**, and every MCP c
 
 | Tool | What it does |
 | --- | --- |
-| `control_app(identity, window?, timeout?)` | Resolve by name/bundle id/pid/window-title → ref-bearing tree. Auto-launches if not running. |
+| `control_app(identity, window?, timeout?, maxLines?, maxChars?)` | Resolve by name/bundle id/pid/window-title → ref-bearing tree. Auto-launches if not running. Output is size-bounded (`maxChars` default 40k, `maxLines` default 1200); any cut is reported inline. |
 | `launch_app(app, activate?, timeout?)` | Launch by `.app` path **or** bundle id, wait for the first window, return the tree. |
 | `action(ref, action, refresh?)` | Perform an AX action: `press`, `menu`, `inc`, `dec`, `disclose`, `collapse`, or a custom-action label. |
 | `click(ref, count?, refresh?)` | Real click at the element (brings its app frontmost). `count:2` double-clicks. |

@@ -1,6 +1,6 @@
-fg# MacControlMCP — Tool Reference
+# MacControlMCP — Tool Reference
 
-_Server `mac-control-mcp` v0.2.11 · MCP protocol 2025-06-18 · generated from a live `tools/list`._
+_Server `mac-control-mcp` v0.2.26 · MCP protocol 2025-06-18 · generated from a live `tools/list`._
 
 > This file is generated from the server's own `tools/list` output. Regenerate after changing any tool descriptor.
 
@@ -15,7 +15,9 @@ Two cross-cutting behaviors are not visible in the schemas but govern every call
 - **Idle-deferred input.** Tools that drive synthetic input or steal focus (click/type/key/drag/scroll/window/menu_pick, and the `batch` scope) defer while the user is active and restore the mouse/focus afterward; read-only and semantic tools never defer.
 
 
-`serverInfo` at generation time: `name=mac-control-mcp`, `version=0.2.11`, `buildId=581ff942cd17-dirty+2026-07-19T20:57:21Z`.
+`serverInfo` at generation time: `name=mac-control-mcp`, `version=0.2.26`. (The `buildId` is a
+per-build git-sha+timestamp reported live by the `version` tool; it advances on every install and
+is intentionally not pinned here.)
 
 
 ## All tools
@@ -251,9 +253,11 @@ Resolve an app by name, bundle id, pid, or window title and return a compact, re
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `window` | string | no | Optional exact (case-sensitive) window title to scope to one window. |
+| `window` | string | no | Optional exact (case-sensitive) window title to scope to one window. On miss, the error carries `availableWindows` with the untruncated titles. |
 | `identity` | string | yes | App name, bundle id, pid, or a window-title substring. |
 | `timeout` | number | no | Seconds to spend loading the tree (default 10). Unreached nodes show as [N hidden]. |
+| `maxLines` | number | no | Max hierarchy lines to return (default 1200, max 20000). Any cut is reported inline. Prefer scoping with `window` over raising this. |
+| `maxChars` | number | no | Max hierarchy characters to return (default 40000, max 500000). This is the cap that usually bites: one node can carry a large value (a terminal's scrollback), so a small tree can still exceed what the client accepts. |
 
 ### `launch_app`
 
