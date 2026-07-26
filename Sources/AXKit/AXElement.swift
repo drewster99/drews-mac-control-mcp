@@ -379,6 +379,22 @@ public struct AXElement: @unchecked Sendable {
         return AXUIElementCopyAttributeValue(raw, kAXRoleAttribute as CFString, &value) != .invalidUIElement
     }
 
+    /// Three-way liveness for the control path, from the SAME single role read `isAlive` makes.
+    /// A control that was just inserted is briefly alive-but-`hollow` — its role not yet readable
+    /// while layout completes (empirically observed: a fresh AppKit control reads an empty/absent
+    /// role for a tick, then populates). A destroyed control is `dead` and never recovers. This
+    /// lets a verb wait out the transient instead of acting on an empty element or discarding a
+    /// ref that is about to become usable.
+    public enum Readiness: Equatable, Sendable { case dead, hollow, ready }
+
+    public var readiness: Readiness {
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(raw, kAXRoleAttribute as CFString, &value)
+        if status == .invalidUIElement { return .dead }
+        if status == .success, let role = value as? String, !role.isEmpty { return .ready }
+        return .hollow   // alive but not yet populated: empty/absent role, or a transient error
+    }
+
     // MARK: - Mutators (effect-causing — semantic AX, no synthetic events)
 
     @discardableResult

@@ -361,6 +361,22 @@ public final class ElementRegistry {
         return nil
     }
 
+    /// Drop a single ref and its element from the tables at point of use — called when a verb finds
+    /// the element destroyed (`.invalidUIElement`), so dead proxies don't linger until the batched
+    /// pruning sweep. Frees the leaked object (the AXElement proxy in `storage`/`elementToRef`);
+    /// idempotent.
+    ///
+    /// Deliberately keeps this ref's `controlParents` link, unlike the whole-app `evictDeadApps`.
+    /// That link is a tiny String→String entry, not the proxy that leaks, and `liveAncestor` climbs
+    /// through it: a DESCENDANT of this ref recovers to a live ancestor only if the chain stays
+    /// intact. Since a single dead element sits inside an otherwise-live tree, the link is still
+    /// true and is reclaimed later by `storeControlTree` (re-walk drops absent links) or app death.
+    public func evict(_ ref: String) {
+        guard let stored = storage[ref] else { return }
+        elementToRef[stored.element] = nil
+        storage[ref] = nil
+    }
+
     /// Evict trees/handles for apps that have exited — junk data once the pid is gone.
     public func evictDeadApps() {
         let deadPids = Set(controlTrees.keys.filter { !Self.processIsAlive($0) })
@@ -391,7 +407,10 @@ public final class ElementRegistry {
             return .stale
         }
         if stored.element.isAlive { return .resolved(stored.element) }
-        guard let locator = stored.locator, let pid = stored.pid else { return .stale }
+        // Dead and unrecoverable (no locator to re-resolve from): drop the handle now rather than
+        // leaving a dead proxy for the batched sweep. A ref WITH a locator is kept — recovery below
+        // deliberately re-resolves it — so eviction only touches refs nothing can rescue.
+        guard let locator = stored.locator, let pid = stored.pid else { evict(ref); return .stale }
 
         let app = AXElement.application(pid: pid)
         app.setMessagingTimeout(5)

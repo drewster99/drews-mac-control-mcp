@@ -29,12 +29,39 @@ private enum ResolvedRef {
 /// every mutating verb, attaches locators to control refs), which would mean acting on the wrong
 /// element. The spec forbids that: recovery is parent-climb, read-only. A dead ref here is a
 /// loud `stale_ref` — you can't act on an element that's gone.
+///
+/// Three outcomes, from a bounded readiness poll (see `AXElement.readiness`):
+///   • ready  → act on it.
+///   • dead   → `.invalidUIElement`; evict the handle and fail loud with `stale_ref`.
+///   • hollow → alive but not yet populated (a just-inserted control mid-layout). Poll briefly;
+///              if it populates, act; if it stays hollow past the deadline, return the retryable
+///              `element_not_ready` rather than acting on an empty element or evicting a ref that
+///              is merely appearing.
+private let controlReadinessWait: TimeInterval = 0.3
+
+private func staleRefError(_ ref: String) -> String {
+    JSONText.from(["success": false, "error": "stale_ref", "ref": ref,
+                   "howToFix": "Re-run control_app to refresh refs."])
+}
+
 private func resolveRef(_ registry: ElementRegistry, _ ref: String) -> ResolvedRef {
-    guard let element = registry.element(for: ref), element.isAlive else {
-        return .error(JSONText.from(["success": false, "error": "stale_ref", "ref": ref,
-                                   "howToFix": "Re-run control_app to refresh refs."]))
+    guard let element = registry.element(for: ref) else { return .error(staleRefError(ref)) }
+    let deadline = Date().addingTimeInterval(controlReadinessWait)
+    while true {
+        switch element.readiness {
+        case .ready:
+            return .element(element)
+        case .dead:
+            registry.evict(ref)
+            return .error(staleRefError(ref))
+        case .hollow:
+            if Date() >= deadline {
+                return .error(JSONText.from(["success": false, "error": "element_not_ready", "ref": ref,
+                    "howToFix": "The element is mid-update (appearing or animating). Retry in a moment."]))
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
     }
-    return .element(element)
 }
 
 /// Toggle an outline row's disclosure: prefer the settable `AXDisclosing` attribute, fall
