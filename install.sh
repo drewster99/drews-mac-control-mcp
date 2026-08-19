@@ -27,6 +27,9 @@
 #   --clients LIST     Comma-separated MCP clients to register: claude,codex.
 #                      "auto" (default) registers whichever are on your PATH.
 #                      "none" skips client registration.
+#   --install-deps     Install missing build dependencies (currently xcodegen,
+#                      via Homebrew) without asking. Without it, an interactive
+#                      run offers to install; a non-interactive one fails.
 #   --no-launch        Build/sign/install but don't open the app.
 #   -h, --help         Show this help and exit.
 #
@@ -40,6 +43,7 @@ PROFILE="${NOTARY_PROFILE:-ncc-cli-notarytool}"
 PREFIX="/Applications"
 CLIENTS="auto"
 LAUNCH=1
+INSTALL_DEPS=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -49,6 +53,7 @@ while [ $# -gt 0 ]; do
     --prefix)     PREFIX="${2:?--prefix needs a value}"; shift ;;
     --clients)    CLIENTS="${2:?--clients needs a value}"; shift ;;
     --no-launch)  LAUNCH=0 ;;
+    --install-deps) INSTALL_DEPS=1 ;;
     -h|--help)    sed -n '2,/^set -euo/{/^set -euo/!p;}' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)            echo "Unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
@@ -82,6 +87,52 @@ as_user() {
 # sessions aren't killed by an install.
 TARGET_UID="$(id -u "${SUDO_USER:-$(id -un)}" 2>/dev/null || id -u)"
 
+# Homebrew's own path, not the caller's: sudo resets PATH, so `command -v brew` can come up
+# empty in a run that a plain shell would have found brew in. Both standard prefixes are
+# checked (Apple silicon first, then Intel).
+find_brew() {
+  if command -v brew >/dev/null 2>&1; then command -v brew; return 0; fi
+  local candidate
+  for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
+  done
+  return 1
+}
+
+# xcodegen generates MacControlMCP.xcodeproj from project.yml, so the build can't start without
+# it. Offer to install it via Homebrew rather than just failing: --install-deps says yes up front,
+# an interactive run asks, and a non-interactive one without the flag fails as before.
+ensure_xcodegen() {
+  command -v xcodegen >/dev/null 2>&1 && return 0
+
+  local brew reply
+  brew=$(find_brew) || die "xcodegen not found, and Homebrew isn't available to install it. \
+Install XcodeGen (https://github.com/yonsei/XcodeGen), or install Homebrew (https://brew.sh) \
+and re-run with --install-deps."
+
+  if [ "$INSTALL_DEPS" -eq 1 ]; then
+    reply=y
+  elif [ -t 0 ]; then
+    printf "    xcodegen not found. Install it now with '%s install xcodegen'? [y/N] " "$brew"
+    read -r reply || reply=""
+  else
+    die "xcodegen not found. Install it: brew install xcodegen (or re-run with --install-deps)."
+  fi
+  case "$reply" in
+    y|Y|yes|Yes|YES) ;;
+    *) die "xcodegen is required to generate the Xcode project from project.yml." ;;
+  esac
+
+  step "Installing xcodegen (Homebrew)"
+  # Homebrew refuses to run as root; as_user drops back to the human who invoked sudo.
+  as_user "$brew" install xcodegen || die "'brew install xcodegen' failed."
+  # A fresh Homebrew prefix may not be on this shell's PATH yet — add brew's bin dir so the
+  # newly-installed binary is visible to the rest of the run.
+  command -v xcodegen >/dev/null 2>&1 || PATH="$(dirname "$brew"):$PATH"
+  command -v xcodegen >/dev/null 2>&1 || die "xcodegen still not on PATH after installing it."
+  info "xcodegen: $(command -v xcodegen)"
+}
+
 # ── preflight ────────────────────────────────────────────────────────────────
 step "Preflight"
 [ "$(uname)" = "Darwin" ] || die "MacControlMCP only runs on macOS."
@@ -108,7 +159,7 @@ esac
 # resolves to `/`), then re-reject the root against the resolved path.
 PREFIX=$(cd "$PREFIX" && pwd -P) || die "--prefix could not be resolved"
 [ "$PREFIX" != "/" ] || die "--prefix cannot be the filesystem root."
-command -v xcodegen  >/dev/null || die "xcodegen not found. Install it: brew install xcodegen"
+ensure_xcodegen
 command -v xcodebuild >/dev/null || die "xcodebuild not found. Install the Xcode command-line tools / full Xcode."
 
 if [ -z "$IDENTITY" ]; then
