@@ -40,6 +40,11 @@ public enum AppResolver {
 
     /// A caller has to be able to read the list and pick from it; forty rows is not a choice.
     private static let maxAmbiguousCandidates = 10
+    /// How large a tie the frontmost app may break. Among two or three equally good matches, "the
+    /// one you are looking at" is a real signal. Among thirteen — what "apple" ties on a typical
+    /// Mac — it is noise, and using it would make the same identity resolve to a different app
+    /// depending on what happened to have focus.
+    private static let maxTieForFrontmostToDecide = 3
     /// Each window-title read is an AX round-trip with a 2s messaging timeout, so a wide substring
     /// match must not turn into a minute of blocking calls. Past this many candidates the names
     /// and bundle ids alone have to be enough to choose by.
@@ -160,9 +165,12 @@ public enum AppResolver {
         let tiedAtTop = matches.filter { $0.strength == best.strength }
         if tiedAtTop.count == 1 { return resolved(best.app, by: .substring) }
 
-        // Equally strong matches, but the user is looking at exactly one of them.
+        // Equally strong matches, but the user is looking at exactly one of them — decisive only
+        // while the tie is small enough for focus to mean something.
         let frontmost = tiedAtTop.filter { $0.app.isFrontmost }
-        if frontmost.count == 1 { return resolved(frontmost[0].app, by: .substring) }
+        if tiedAtTop.count <= maxTieForFrontmostToDecide, frontmost.count == 1 {
+            return resolved(frontmost[0].app, by: .substring)
+        }
 
         // Genuinely undecidable — hand back every match, best guess first.
         return .ambiguous(candidates: bounded(matches.map(\.app)), total: matches.count)
@@ -187,7 +195,13 @@ public enum AppResolver {
     /// The tiers as pure logic over a supplied app list, so they can be exercised without a live
     /// machine. Tier 4 still reads window titles over AX, hence `includeWindowTitle: false` for
     /// offline callers.
-    static func resolve(identity: String, includeWindowTitle: Bool, apps: [RunningApp]) -> Resolution {
+    static func resolve(identity rawIdentity: String, includeWindowTitle: Bool, apps: [RunningApp]) -> Resolution {
+        // Copy-paste picks up stray whitespace, and "com.apple.dt.Devices " should not miss what
+        // "com.apple.dt.Devices" hits. Empty after trimming matches nothing: apps that report no
+        // bundle id carry "", so an empty identity would otherwise select one of them.
+        let identity = rawIdentity.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !identity.isEmpty else { return .noMatch }
+
         // 1. all-digits → pid
         if identity.allSatisfy({ $0.isWholeNumber }), let pidInt = Int(identity) {
             guard pidInt > 0, pidInt <= Int(Int32.max),

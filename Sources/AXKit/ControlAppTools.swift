@@ -281,7 +281,8 @@ public struct ControlAppTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return controlPermissionError }
         registry.evictDeadApps()
-        guard let identity = (arguments["identity"] as? String), !identity.isEmpty else {
+        guard let identity = (arguments["identity"] as? String),
+              !identity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return JSONText.from(["success": false, "error": "missing_identity"])
         }
         let windowArg = (arguments["window"] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -321,7 +322,9 @@ public struct ControlAppTool: Tool {
             if !pending.isEmpty { obj["guidance"] = Guidance.pendingContentLines(pending) }
             if launched { obj["launched"] = true }
             if let matchedBy { obj["matchedBy"] = matchedBy.rawValue }
-            if matchedBy == .windowTitle { obj["note"] = AppResolver.windowTitleMatchWarning(name: name) }
+            if matchedBy == .windowTitle {
+                obj["notes"] = [AppResolver.windowTitleMatchWarning(name: name)]
+            }
             if var timing {
                 timing["walkMs"] = Int(Date().timeIntervalSince(walkStart) * 1000)
                 obj["_timing"] = timing
@@ -1321,7 +1324,8 @@ public struct AppTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return controlPermissionError }
-        guard let identity = (arguments["identity"] as? String), !identity.isEmpty else {
+        guard let identity = (arguments["identity"] as? String),
+              !identity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return JSONText.from(["success": false, "error": "missing_identity"])
         }
         let windowArgument = (arguments["window"] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -1331,11 +1335,12 @@ public struct AppTool: Tool {
         // Resolve fast first (pid/bundle/name). Only if that misses, retry with the slow
         // window-title tier — and when THAT matches, use the identity as the active-window hint so
         // we summarize the window the caller named, not just the main/focused one.
-        var matchedByWindowTitle = false
+        // Fast tiers first; only then pay for the window-title scan. How it matched comes back on
+        // the resolution itself — tracking it separately here would be a second source of truth for
+        // the same fact, free to drift from the first.
         var resolution = AppResolver.resolve(identity: identity, includeWindowTitle: false)
         if case .noMatch = resolution {
             resolution = AppResolver.resolve(identity: identity, includeWindowTitle: true)
-            if case .app = resolution { matchedByWindowTitle = true }
         }
 
         switch resolution {
@@ -1358,7 +1363,7 @@ public struct AppTool: Tool {
                 return appUnreachableError(pid: pid, name: name)
             }
             registry.storeControlTree(tree, pid: pid)   // prime refs so a follow-up action(ref) resolves
-            let activeHint = windowArgument ?? (matchedByWindowTitle ? identity : nil)
+            let activeHint = windowArgument ?? (matchedBy == .windowTitle ? identity : nil)
             let summary = AppProjection.project(tree: tree, name: name, pid: Int(pid), bundleId: bundleId,
                                                 activeWindowTitle: activeHint)
             var response: [String: Any] = ["success": true, "pid": Int(pid), "name": name,
@@ -1366,8 +1371,9 @@ public struct AppTool: Tool {
                                 "summary": AppRenderer.render(summary),
                                 "guidance": Guidance.forAppSummary(summary,
                                                                    pending: Guidance.pendingContent(in: tree))]
+            var notes: [String] = []
             if matchedBy == .windowTitle {
-                response["note"] = AppResolver.windowTitleMatchWarning(name: name)
+                notes.append(AppResolver.windowTitleMatchWarning(name: name))
             }
             // The `window` hint is a substring, so it can fit several windows; the first is used.
             // Silently choosing one of three is exactly the kind of thing a caller cannot see.
@@ -1375,11 +1381,12 @@ public struct AppTool: Tool {
                 let windowNodes = tree.children.filter { AppProjection.windowTypes.contains($0.type) }
                 let fits = AppProjection.windowsMatching(windowNodes, hint: windowArgument)
                 if fits > 1 {
-                    response["note"] = "window \"\(windowArgument)\" fits \(fits) windows; using "
+                    notes.append("window \"\(windowArgument)\" fits \(fits) windows; using "
                         + "\(summary.activeWindow.map { "\"\($0.title)\"" } ?? "the first"). "
-                        + "Pass a longer title to choose a different one."
+                        + "Pass a longer title to choose a different one.")
                 }
             }
+            if !notes.isEmpty { response["notes"] = notes }
             return JSONText.from(response)
         }
     }

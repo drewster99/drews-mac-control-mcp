@@ -264,4 +264,50 @@ final class AppResolverTests: XCTestCase {
             XCTAssertEqual(matchedBy, expected, identity)
         }
     }
+
+    /// A vague identity ties many apps at the same strength. Picking whichever is frontmost would
+    /// make the same call answer differently minute to minute, so past a small tie the honest
+    /// answer is the ordered list — even though exactly one of them IS frontmost.
+    func testVagueIdentityTyingManyAppsStaysAmbiguousDespiteAFrontmostOne() {
+        let names = ["Activity Monitor", "App Store", "Calculator", "Device Hub", "Finder",
+                     "Keychain Access", "Messages", "Notes", "Preview", "Safari", "Terminal",
+                     "TextEdit", "Xcode"]
+        let apps = names.enumerated().map { index, name in
+            RunningApp(pid: pid_t(100 + index),
+                       bundleId: "com.apple.\(name.replacingOccurrences(of: " ", with: ""))",
+                       name: name, isRegular: true, isFrontmost: name == "Safari")
+        }
+        guard case .ambiguous(let candidates, let total) = resolve("apple", apps) else {
+            return XCTFail("13 apps sharing an 'apple' bundle component is not a decision")
+        }
+        XCTAssertEqual(total, 13)
+        XCTAssertEqual(candidates.first?.name, "Safari", "the frontmost app should still lead the list")
+    }
+
+    /// A small tie is different: focus genuinely disambiguates two or three plausible matches.
+    func testFrontmostStillDecidesASmallTie() {
+        let apps = [app(1, "com.a.acme", "Acme One"),
+                    app(2, "com.b.acme", "Acme Two", frontmost: true)]
+        XCTAssertEqual(resolvedPid(resolve("Acme", apps)), 2)
+    }
+
+    // MARK: identity hygiene
+
+    func testSurroundingWhitespaceDoesNotDefeatAnExactIdentity() {
+        let hub = app(5016, "com.apple.dt.Devices", "Device Hub")
+        XCTAssertEqual(resolvedPid(resolve("  com.apple.dt.Devices  ", [hub])), 5016)
+        XCTAssertEqual(resolvedPid(resolve("Device Hub\n", [hub])), 5016)
+    }
+
+    /// Apps with no bundle id carry "", so an empty or whitespace-only identity would otherwise
+    /// select one of them by "exact" bundle-id match.
+    func testWhitespaceOnlyIdentityMatchesNothing() {
+        let bundleless = RunningApp(pid: 7, bundleId: "", name: "Some Helper",
+                                    isRegular: true, isFrontmost: false)
+        for identity in ["", " ", "\n", "\t "] {
+            guard case .noMatch = resolve(identity, [bundleless]) else {
+                return XCTFail("identity \(identity.debugDescription) must match nothing")
+            }
+        }
+    }
 }

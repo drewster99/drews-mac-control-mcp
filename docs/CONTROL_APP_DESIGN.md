@@ -92,6 +92,19 @@ Rules:
   finds an app's windows and drives it — `"dt.Devices"` used to list two windows and resolve to
   nothing. They run AFTER the exact tiers, so a precise identity is never widened and an app named
   exactly what you asked for always beats one that merely contains it.
+- **The substring tier ranks rather than refusing.** Strongest first: a bundle-id component that IS
+  the string (`Devices` in `com.apple.dt.Devices`), a prefix, the start of a word in the name (`Hub`
+  in `Device Hub`), then a plain substring. Ties break toward the frontmost app — but only while the
+  tie is small (≤3). `"apple"` ties thirteen apps on a typical Mac; letting focus decide there would
+  make the same identity resolve differently minute to minute, so a wide tie returns the ordered
+  candidate list instead.
+- **Identities are trimmed, and a whitespace-only one matches nothing.** A pasted
+  `"com.apple.dt.Devices "` should hit what `"com.apple.dt.Devices"` hits; and since apps with no
+  bundle id carry `""`, an empty identity would otherwise "exactly" match one of them.
+- **Every success reports `matchedBy`** (`pid`/`bundleId`/`name`/`substring`/`windowTitle`). A
+  `windowTitle` match means the app was chosen only because one of its windows displays that text —
+  a browser tab containing "Simulator" makes `app("Simulator")` resolve to the browser — so those
+  responses also carry a `notes` entry saying so.
 - **Substring tiers consider foreground (`.regular`) apps only** — the one exception to the
   activation-policy rule above. With Safari closed, `"Safari"` is a substring of
   `com.apple.SafariBookmarksSyncAgent`; resolving to that would drive an invisible agent and, on the

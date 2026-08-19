@@ -780,7 +780,8 @@ public struct KillTool: Tool {
     }
 
     public func call(_ arguments: [String: Any]) -> String {
-        guard let identity = (arguments["identity"] as? String), !identity.isEmpty else {
+        guard let identity = (arguments["identity"] as? String),
+              !identity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return JSONText.from(["success": false, "error": "missing_identity"])
         }
         let pid: pid_t

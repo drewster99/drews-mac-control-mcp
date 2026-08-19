@@ -13,8 +13,14 @@ never widened.
 The substring tier **ranks** rather than giving up the moment two apps match. Strongest first:
 a bundle-id component that IS the string (`Devices` in `com.apple.dt.Devices`), then a prefix, then
 the start of a word in the name (`Hub` in `Device Hub`), then a plain substring. Ties break toward
-the frontmost app, then the shortest name. Only a genuine tie returns `ambiguous`, and then the
-candidates are ordered best-first with `matched` carrying the true total.
+the frontmost app — but only while the tie is small (≤3); `"apple"` ties thirteen apps on a typical
+Mac, and letting focus decide there would make the same identity resolve differently minute to
+minute. A wider tie returns `ambiguous` with the candidates ordered best-first and `matched`
+carrying the true total.
+
+Identities are trimmed, so a pasted `"com.apple.dt.Devices "` hits what the untrimmed form hits, and
+a whitespace-only identity is rejected as `missing_identity` rather than matching an app that
+reports no bundle id.
 
 Two deliberate limits:
 
@@ -25,7 +31,7 @@ Two deliberate limits:
 - Every success carries **`matchedBy`** (`pid` / `bundleId` / `name` / `substring` / `windowTitle`).
   Read it. A `windowTitle` match means the app was chosen only because one of its windows displays
   that text — a browser tab containing "Simulator" makes `app("Simulator")` resolve to the browser —
-  so those responses also carry a `note` saying so.
+  so those responses also carry a `notes` entry saying so. `notes` is a list because more than one caveat can apply at once — a window-title match and an ambiguous `window` hint are independent, and neither should displace the other.
 
 ## The `guidance` field
 
