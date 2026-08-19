@@ -181,4 +181,27 @@ final class GuidanceTests: XCTestCase {
             XCTAssertTrue(line.hasPrefix("//"), "legend line is indented: \(String(reflecting: String(line)))")
         }
     }
+
+    /// Regression: not every running app has a bundle id, and `identity: ""` fails with
+    /// missing_identity — so a bundle-less app used to be handed two calls that cannot work.
+    func testAppWithNoBundleIdIsGivenAnIdentityThatResolves() {
+        let tree = ControlNode(ref: "e1", type: "application", label: "Helper", children: [
+            ControlNode(ref: "e2", type: "window", label: "W", states: ["main"], children: [
+                ControlNode(ref: "e3", type: "button", label: "Go", actions: ["press"])
+            ])
+        ])
+        let summary = AppProjection.project(tree: tree, name: "Helper", pid: 909, bundleId: "")
+        let text = Guidance.nextSteps(for: summary).joined(separator: "\n")
+        XCTAssertFalse(text.contains(#"identity: """#), text)
+        XCTAssertTrue(text.contains(#"control_app(identity: "909")"#), text)
+    }
+
+    func testBundleIdIsPreferredAsTheIdentityWhenPresent() {
+        let tree = ControlNode(ref: "e1", type: "application", label: "Notes", children: [
+            ControlNode(ref: "e2", type: "window", label: "W", states: ["main"])
+        ])
+        let summary = AppProjection.project(tree: tree, name: "Notes", pid: 42, bundleId: "com.apple.Notes")
+        let text = Guidance.nextSteps(for: summary).joined(separator: "\n")
+        XCTAssertTrue(text.contains(#"control_app(identity: "com.apple.Notes")"#), text)
+    }
 }

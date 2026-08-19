@@ -160,7 +160,7 @@ public enum Guidance {
             lines.append("  Window \(AppProjection.quote(item.windowTitle)): call expand(ref: \"\(item.ref)\")   \(item.describedAs)")
         }
         if pending.contains(where: { !$0.isDeviceScreen }) {
-            lines.append("  If expand returns no more, the rows are virtualized — reveal(ref) or scroll first.")
+            lines.append(#"  If expand returns no more, the rows are virtualized — reveal(ref: "<ref>") or scroll first."#)
         }
         return lines
     }
@@ -175,6 +175,7 @@ extension Guidance {
     /// sense against the controls this very response listed.
     public static func forAppSummary(_ summary: AppSummary, pending: [PendingContent]) -> [String] {
         var lines = ["Every [ref] above is a handle — pass it whole, including the leading letter.",
+                     #"In the verb list below, replace "<ref>" with one of those refs."#,
                      "VERBS THAT TAKE A ref:"]
         lines += verbLines(refVerbs)
         lines.append("VERBS THAT TAKE THIS APP'S pid (\(summary.pid)):")
@@ -189,6 +190,11 @@ extension Guidance {
     /// to adapt is one more thing to get wrong.
     static func nextSteps(for summary: AppSummary) -> [String] {
         var steps: [GuidanceVerb] = []
+        // Not every running app has a bundle id (helpers and some agents report none), and
+        // `identity: ""` fails outright — the pid always resolves and can't be ambiguous.
+        let identity = summary.bundleId.isEmpty
+            ? AppProjection.quote(String(summary.pid))
+            : AppProjection.quote(summary.bundleId)
 
         if let window = summary.activeWindow {
             for group in window.groups {
@@ -223,15 +229,16 @@ extension Guidance {
         }
 
         if let other = summary.windows.first(where: { !$0.isActive }) {
-            steps.append(.init(call: #"app(identity: "\#(AppProjection.oneLine(summary.bundleId))", window: \#(AppProjection.quote(other.title)))"#,
+            steps.append(.init(call: "app(identity: \(identity), window: \(AppProjection.quote(other.title)))",
                                purpose: "summarize that window instead"))
             steps.append(.init(call: #"window(ref: "\#(other.ref)", action: "raise")"#, purpose: "bring it to the front"))
         }
 
-        steps.append(.init(call: #"control_app(identity: "\#(AppProjection.oneLine(summary.bundleId))")"#,
+        steps.append(.init(call: "control_app(identity: \(identity))",
                            purpose: "the full element tree when this summary isn't enough"))
 
-        return steps.isEmpty ? [] : ["NEXT STEPS FOR THIS APP:"] + verbLines(steps)
+        // `control_app` is appended unconditionally, so there is always at least one step.
+        return ["NEXT STEPS FOR THIS APP:"] + verbLines(steps)
     }
 }
 
