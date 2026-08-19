@@ -53,15 +53,15 @@ def main():
             print(f"  [FAIL] initialize via relay — {init}")
 
         try:
-            apps = s.call("list_apps", {})
+            apps = s.call("list_running_apps", {})
             if isinstance(apps, list):
-                print(f"  [PASS] list_apps via relay -> {len(apps)} apps (host is alive)")
+                print(f"  [PASS] list_running_apps via relay -> {len(apps)} apps (host is alive)")
             else:
                 ok = False
-                print(f"  [FAIL] list_apps via relay — {json.dumps(apps)}")
+                print(f"  [FAIL] list_running_apps via relay — {json.dumps(apps)}")
         except TestAbort as e:
             ok = False
-            print(f"  [FAIL] list_apps via relay — {e}")
+            print(f"  [FAIL] list_running_apps via relay — {e}")
 
         # Confirm the host actually holds the Accessibility grant (so AX tools will work).
         try:
