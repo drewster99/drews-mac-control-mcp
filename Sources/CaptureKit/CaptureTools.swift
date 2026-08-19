@@ -690,7 +690,11 @@ public struct ScreenshotSimulatorTool: Tool {
         case .failed(let reason): return JSONText.from(["error": reason])
         }
 
-        let booted = CaptureSupport.bootedSimulators().filter { sim in
+        // The deadline covers the LISTING too — a wedged CoreSimulator can hang `simctl list`, and
+        // starting the clock afterwards let that time escape the budget entirely.
+        let overallDeadline = Date().addingTimeInterval(CaptureTools.overallBudgetSeconds)
+        let booted = CaptureSupport.bootedSimulators(
+            timeout: min(CaptureSupport.defaultProcessTimeout, max(1, overallDeadline.timeIntervalSinceNow))).filter { sim in
             CaptureTools.matchesAll(match)
                 || sim.udid.compare(match, options: .caseInsensitive) == .orderedSame
                 || sim.name.range(of: match, options: .caseInsensitive) != nil
@@ -702,7 +706,6 @@ public struct ScreenshotSimulatorTool: Tool {
         let selected = Array(booted.prefix(limit))
         let dropped = booted.count - selected.count
 
-        let overallDeadline = Date().addingTimeInterval(CaptureTools.overallBudgetSeconds)
         var budgetSkipped = 0
         var screenshots: [[String: Any]] = []
         for sim in selected {

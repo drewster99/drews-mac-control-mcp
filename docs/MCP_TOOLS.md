@@ -4,6 +4,13 @@ _Server `mac-control-mcp` v0.2.26 · MCP protocol 2025-06-18 · generated from a
 
 > This file is generated from the server's own `tools/list` output. Regenerate after changing any tool descriptor.
 
+## `type` reports when it ran out of budget
+
+`type` may retry via the clipboard when keystrokes do not visibly land. That retry runs a second
+settle, and `type` is a MUTATING call the relay cannot safely re-run — so when too little of the
+call's budget remains, the retry is skipped and the result carries `retrySkipped: true` rather than
+starting work that would be cut off mid-flight. Re-read the field and retry if needed.
+
 ## Boolean arguments are strict
 
 `onScreenOnly`, `excludeZeroAlpha` and `performOCR` must be JSON booleans. A string (`"false"`) or a

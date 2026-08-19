@@ -76,4 +76,34 @@ final class ActToolsTests: XCTestCase {
         XCTAssertTrue(WindowTool(session: session, isTrusted: trusted).call(["ref": "never"]).contains("missing_ref_or_action"))
         XCTAssertTrue(OpenMenuTool(session: session, isTrusted: trusted).call(["pid": 1]).contains("missing_pid_or_path"))
     }
+
+    // MARK: stale refs from a process that is gone or recycled
+
+    /// A handle from an exited process answers `cannotComplete`, which `readiness` classifies as
+    /// `.hollow` — a RETRYABLE state. Before the owner-process check, every control verb told the
+    /// caller "the element is mid-update, retry in a moment" about a ref that could never work
+    /// again, and an agent would loop on it.
+    func testRefFromAnExitedProcessIsStaleNotRetryable() throws {
+        let registry = ElementRegistry()
+        // A pid that cannot be running: launch a child and let it exit, so the pid is genuinely
+        // gone rather than merely unlikely.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try process.run()
+        process.waitUntilExit()
+        let deadPid = process.processIdentifier
+
+        let ref = registry.handle(for: AXElement.application(pid: deadPid), pid: deadPid)
+        XCTAssertTrue(registry.ownerProcessIsGoneOrReplaced(ref),
+                      "a ref whose owning process exited must be reported as gone")
+    }
+
+    /// The live case must not be dragged down with it: a ref for this very test process is fine.
+    func testRefFromALiveProcessIsNotReportedGone() {
+        let registry = ElementRegistry()
+        let mine = ProcessInfo.processInfo.processIdentifier
+        let ref = registry.handle(for: AXElement.application(pid: mine), pid: mine)
+        XCTAssertFalse(registry.ownerProcessIsGoneOrReplaced(ref),
+                       "a live owning process must not be reported as gone")
+    }
 }

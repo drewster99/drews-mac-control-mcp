@@ -394,6 +394,26 @@ public final class ElementRegistry {
         }
     }
 
+    /// Whether the process that registered this ref has exited, or its pid has been recycled by a
+    /// different launch.
+    ///
+    /// `resolve` already rejects a recycled pid, but the control verbs deliberately do not go
+    /// through `resolve` (it can repoint a ref via its locator, which the spec forbids there) — so
+    /// they need this check on its own. Without it, a handle from an exited or wedged process
+    /// answers `kAXErrorCannotComplete`, which `readiness` classifies as `.hollow` — a RETRYABLE
+    /// state — and a caller retries a ref that can never work again.
+    public func ownerProcessIsGoneOrReplaced(_ ref: String) -> Bool {
+        guard let stored = storage[ref], let pid = stored.pid else { return false }
+        // Definitive: ESRCH means no such process. EPERM means it exists but isn't ours to signal,
+        // which is not a reason to call the ref dead.
+        if kill(pid, 0) == -1, errno == ESRCH { return true }
+        // Recycled: the pid is live but belongs to a different launch than the one we registered.
+        // An unreadable stamp on either side degrades to "unchanged", exactly as `resolve` does.
+        guard let launched = stored.processStartTime,
+              let current = Self.processStartTime(of: pid) else { return false }
+        return current != launched
+    }
+
     /// Resolve a ref to a live element, re-resolving via its locator if the element died.
     public func resolve(_ ref: String) -> RefResolution {
         guard let stored = storage[ref] else { return .unknown }

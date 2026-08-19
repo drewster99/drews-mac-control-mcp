@@ -54,8 +54,9 @@ enum CaptureSupport {
 
     /// Booted simulators in a deterministic order: iOS runtimes first, then the newest runtime
     /// (numeric compare), then lowest udid — so repeated calls list them the same way.
-    static func bootedSimulators() -> [SimulatorDevice] {
-        let output = shellOutput("/usr/bin/xcrun", ["simctl", "list", "devices", "booted", "-j"])
+    static func bootedSimulators(timeout: TimeInterval = defaultProcessTimeout) -> [SimulatorDevice] {
+        let output = shellOutput("/usr/bin/xcrun", ["simctl", "list", "devices", "booted", "-j"],
+                                 timeout: timeout)
         guard let data = output.data(using: .utf8),
               let root = JSONText.object(data) as? [String: Any],
               let devices = root["devices"] as? [String: Any] else { return [] }
@@ -81,8 +82,12 @@ enum CaptureSupport {
 
     /// Run a child (`simctl`) with a hard deadline so a wedged CoreSimulator can't block the host.
     /// Output is drained off-thread; on timeout the child is terminated then SIGKILLed.
+    /// Default hard deadline for a simctl child. Named because three helpers share it and the
+    /// capture tools clamp below it.
+    static let defaultProcessTimeout: TimeInterval = 30
+
     private static func runProcess(_ launchPath: String, _ arguments: [String],
-                                   capture: Bool, timeout: TimeInterval = 30) -> (status: Int32, data: Data) {
+                                   capture: Bool, timeout: TimeInterval = defaultProcessTimeout) -> (status: Int32, data: Data) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
@@ -138,12 +143,17 @@ enum CaptureSupport {
         return (process.terminationStatus, box.data)
     }
 
-    static func runProcessStatus(_ launchPath: String, _ arguments: [String]) -> Int32 {
-        runProcess(launchPath, arguments, capture: false).status
+    /// `timeout` lets a caller clamp the child to what remains of its own budget. Without it a
+    /// wedged `simctl` runs the full default while the relay's ceiling passes, and the result the
+    /// caller would have received is discarded — after the files were already written.
+    static func runProcessStatus(_ launchPath: String, _ arguments: [String],
+                                 timeout: TimeInterval = defaultProcessTimeout) -> Int32 {
+        runProcess(launchPath, arguments, capture: false, timeout: timeout).status
     }
 
-    static func shellOutput(_ launchPath: String, _ arguments: [String]) -> String {
-        String(decoding: runProcess(launchPath, arguments, capture: true).data, as: UTF8.self)
+    static func shellOutput(_ launchPath: String, _ arguments: [String],
+                            timeout: TimeInterval = defaultProcessTimeout) -> String {
+        String(decoding: runProcess(launchPath, arguments, capture: true, timeout: timeout).data, as: UTF8.self)
     }
 
     /// Best-effort cleanup of stale screenshot PNGs this server wrote into the temp dir, so

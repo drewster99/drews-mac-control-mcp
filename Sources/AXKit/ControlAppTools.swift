@@ -71,6 +71,14 @@ private func appUnreachableError(pid: pid_t, name: String) -> String {
 
 private func resolveRef(_ registry: ElementRegistry, _ ref: String) -> ResolvedRef {
     guard let element = registry.element(for: ref) else { return .error(staleRefError(ref)) }
+    // The owning process is authoritative, and it is checked BEFORE readiness: a handle from an
+    // exited process (or one whose pid was recycled) answers `cannotComplete`, which reads as
+    // `.hollow` — a retryable state — so without this the caller retries forever a ref that can
+    // never work again, or worse, acts on the app that inherited the pid.
+    if registry.ownerProcessIsGoneOrReplaced(ref) {
+        registry.evict(ref)
+        return .error(staleRefError(ref))
+    }
     let deadline = Date().addingTimeInterval(controlReadinessWait)
     while true {
         switch element.readiness {
@@ -81,6 +89,11 @@ private func resolveRef(_ registry: ElementRegistry, _ ref: String) -> ResolvedR
             return .error(staleRefError(ref))
         case .hollow:
             if Date() >= deadline {
+                // It may have exited DURING the poll — that is a stale ref, not a slow one.
+                if registry.ownerProcessIsGoneOrReplaced(ref) {
+                    registry.evict(ref)
+                    return .error(staleRefError(ref))
+                }
                 return .error(JSONText.from(["success": false, "error": "element_not_ready", "ref": ref,
                     "howToFix": "The element is mid-update (appearing or animating). Retry in a moment."]))
             }
@@ -737,6 +750,12 @@ private func valueMoved(_ element: AXElement, from baseline: String, within wind
 }
 
 public struct TypeTool: Tool {
+    /// What a second settle plus its snapshot needs before it is worth starting. `type` is the one
+    /// verb that can run two full settles (keys, then a paste retry); back to back with the
+    /// value-moved poll and the closing refresh they can pass the relay's ceiling — on a MUTATING
+    /// call the relay cannot safely re-run.
+    static let retryBudgetSeconds: TimeInterval = 20
+
     private let registry: ElementRegistry
     private let isTrusted: @Sendable () -> Bool
     private let type: ControlType
@@ -770,6 +789,9 @@ public struct TypeTool: Tool {
     }
 
     public func call(_ arguments: [String: Any]) -> String {
+        // One wall clock for the whole verb, so the retry decision below is made against what is
+        // actually left rather than assumed.
+        let typeDeadline = Date().addingTimeInterval(ToolTimeout.seconds(nil, default: 30, reserveSeconds: 0))
         guard isTrusted() else { return controlPermissionError }
         guard CGPreflightPostEventAccess() else { return controlPostEventError }
         guard let text = arguments["text"] as? String else {
@@ -839,8 +861,19 @@ public struct TypeTool: Tool {
             // or jumped by the click before we ever typed.
             let isTextInputRole = element.role.map(textInputRoles.contains) ?? false
             let safeToClick = isTextInputRole || element.actions.isEmpty
-            if let point = clickable, safeToClick {
-                _ = click(Double(point.x), Double(point.y), 1) // raises app to key + focuses a field
+            // A misbehaving app can report a NaN/infinite activation point (a field scrolled out of
+            // a virtualized list reports a null frame). ClickRefTool screens for exactly this; not
+            // screening here meant posting a real click at an undefined screen location — possibly
+            // in another app — and then typing there.
+            let pointIsUsable = clickable.map {
+                UntrustedNumeric.int($0.x) != nil && UntrustedNumeric.int($0.y) != nil
+            } ?? false
+            if let point = clickable, safeToClick, pointIsUsable {
+                guard click(Double(point.x), Double(point.y), 1) else {
+                    return JSONText.from(["success": false, "error": "event_creation_failed", "ref": ref,
+                        "howToFix": "The focus click could not be posted, so nothing was typed. "
+                                  + "Check that the host still holds Accessibility."])
+                }
                 Thread.sleep(forTimeInterval: 0.25)
             } else {
                 element.window?.perform("AXRaise")             // make the window key for setFocused
@@ -878,24 +911,38 @@ public struct TypeTool: Tool {
             // would double-type. Secure fields are excluded by SUBROLE (their role is a plain
             // AXTextField): their AXValue is redacted, so "unchanged" is meaningless and a blind
             // ⌘V retry would double-enter the secret.
+            // The keystroke no-op check polls the element for up to 0.8s, so it is evaluated ONCE
+            // and its answer reused — asking twice would double the wait and could disagree.
+            var retrySkipped = false
             if !paste, canVerify, element.subrole != "AXSecureTextField", let baseline = before,
                !valueMoved(element, from: baseline, within: 0.8) {
-                // No consumption probe on the retry: the retry fires precisely because the target
-                // is draining events slowly, so a value-move probe can't tell OUR paste landing
-                // from the first attempt's late keystrokes — and a false "consumed" would restore
-                // the clipboard before ⌘V is serviced, making the target paste the OLD clipboard.
-                // The blind hold window (nil probe) is the safe choice for exactly this case.
-                if let pid = element.pid {
-                    _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { typeOutcome = type(text, true, nil) })
+                // Retry via paste only while the budget can still cover a second settle. `type` is
+                // the one verb that runs two of them, and it is MUTATING — being cut off mid-flight
+                // and re-driven by a relay retry is worse than reporting what actually landed.
+                if typeDeadline.timeIntervalSinceNow > TypeTool.retryBudgetSeconds {
+                    // No consumption probe on the retry: the retry fires precisely because the target
+                    // is draining events slowly, so a value-move probe can't tell OUR paste landing
+                    // from the first attempt's late keystrokes — and a false "consumed" would restore
+                    // the clipboard before ⌘V is serviced, making the target paste the OLD clipboard.
+                    // The blind hold window (nil probe) is the safe choice for exactly this case.
+                    if let pid = element.pid {
+                        _ = SettleEngine(session: registry).actAndSettle(pid: pid, action: { typeOutcome = type(text, true, nil) })
+                    } else {
+                        typeOutcome = type(text, true, nil)
+                    }
+                    usedVia = "paste_retry"
                 } else {
-                    typeOutcome = type(text, true, nil)
+                    retrySkipped = true
                 }
-                usedVia = "paste_retry"
             }
             let pasted = usedVia == "paste" || usedVia == "paste_retry"
             var base: [String: Any] = ["success": typeOutcome?.posted ?? false, "ref": ref,
                                        "chars": typeOutcome?.typedCharacters ?? text.count,
                                        "focused": focused, "via": usedVia]
+            // Its own field, not a `note`: the note chain below is a deliberate priority ladder
+            // (most actionable diagnosis wins), and this is an orthogonal fact about the budget —
+            // folding it in would either displace a better message or be displaced by one.
+            if retrySkipped { base["retrySkipped"] = true }
             if !focused {
                 base["note"] = "Typed after bringing the app forward, but this element isn't a focusable text field, so input went to the app's current key field (not necessarily this element). Verify via the hierarchy; target an {editable} ref for precise entry."
             }
