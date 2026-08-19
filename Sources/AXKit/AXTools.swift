@@ -87,7 +87,9 @@ private func matchJSON(_ match: ElementRegistry.Match) -> String {
         "title": match.title ?? "",
         "identifier": match.identifier ?? "",
         "actions": match.actions,
-        "frame": frameValue(match.frame)
+        "frame": frameValue(match.frame),
+        // The result is a bare ref; without this the caller has to guess which verb it accepts.
+        "guidance": Guidance.forElement(ref: match.ref, actions: match.actions, isSettable: false)
     ])
 }
 
@@ -212,7 +214,14 @@ public struct FindElementsTool: Tool {
             return row
         }
         let diagnostics = findDiagnostics(outcome.diagnostics, hadMatches: !rows.isEmpty)
-        return JSONText.from(["matches": rows, "count": rows.count, "diagnostics": diagnostics])
+        var result: [String: Any] = ["matches": rows, "count": rows.count, "diagnostics": diagnostics]
+        // A ref with no named verb is where callers stall; the first match's own actions say which
+        // verb applies, so spell it as a call rather than leaving it to be inferred.
+        if let first = outcome.matches.first {
+            result["guidance"] = Guidance.forElement(ref: first.ref, actions: first.actions,
+                                                     isSettable: false)
+        }
+        return JSONText.from(result)
     }
 
     /// Surface why the search stopped — so an empty result isn't read as "definitively absent" — and
@@ -305,6 +314,9 @@ public struct ElementDetailTool: Tool {
             detail["valueLength"] = rawValue.count
             detail["howToReadMore"] = "Re-call element_detail with a larger maxValueLength (up to 100000)."
         }
+        detail["guidance"] = Guidance.forElement(ref: ref,
+                                                 actions: element.actions.map { ActionVocab.displayLabel(forRaw: $0) },
+                                                 isSettable: element.isValueSettable)
         return JSONText.from(detail)
     }
 }

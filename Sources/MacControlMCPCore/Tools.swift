@@ -36,6 +36,19 @@ public enum JSONText {
         } catch { return "null" }
     }
 
+    /// A value wrapped as a quoted literal for embedding in a suggested call: newlines/tabs
+    /// collapsed, inner quotes escaped, so guidance stays copy-pasteable whatever an app named its
+    /// window or its custom action.
+    public static func quotedLiteral(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\n")
+            .replacingOccurrences(of: "\t", with: " ")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
     /// Decodes JSON bytes to a Foundation object graph, or nil when parsing fails.
     public static func object(_ data: Data) -> Any? {
         do { return try JSONSerialization.jsonObject(with: data) }
@@ -210,6 +223,9 @@ public struct ListAppsTool: Tool {
                     "frontmost": app.isFrontmost
                 ]
             }
+        // NOTE: this returns a bare JSON array, and that shape is load-bearing — MCPServer keeps the
+        // activity header as its own content block precisely because a key can't be folded into an
+        // array (see ActivityTests). Guidance would need a wrapper object, so it lives on `app`.
         return JSONText.from(rows)
     }
 }

@@ -4,6 +4,31 @@ _Server `mac-control-mcp` v0.2.26 · MCP protocol 2025-06-18 · generated from a
 
 > This file is generated from the server's own `tools/list` output. Regenerate after changing any tool descriptor.
 
+## The `guidance` field
+
+Several results carry a `guidance` array — plain lines naming the calls worth making next, built
+from the data that result just returned. It exists because the common failure mode is not a tool
+that misbehaves but a caller that has a ref and guesses which verb takes it.
+
+| Tool | What its guidance says |
+|---|---|
+| `app` | the ref verbs, the pid verbs (with this app's real pid), containers whose content isn't loaded, and next calls written against this app's own refs |
+| `control_app`, `launch_app` | only what the legend can't know: which containers in THIS tree are still holding content back |
+| `element_detail`, `focused_element`, `element_at`, `find_elements` | the verbs that element actually accepts, from the actions it reports (plus a write when its value is settable) |
+| `list_app_windows` | the `screenshot_app_window` / `app` call for a real row |
+| `screenshot_full_display` | the `ocr` call for the image just written |
+
+Verb signatures come from one catalog (`Guidance.refVerbs`), which also renders the `control_app`
+legend's DRIVE IT block — a verb cannot be documented two ways.
+
+**A device or simulator screen (`iOSContentGroup`) reports no hidden-child count**, so nothing else
+in a result hints that more can be loaded. Those are always named explicitly, per window, with the
+`expand(ref:)` that pulls their content in.
+
+`list_running_apps` and `list_simulators` return bare JSON arrays and so carry no guidance: an array
+can't hold a key, and that shape is load-bearing (the activity header stays its own content block
+because of it).
+
 ## Overall / server instructions
 
 The MCP `initialize` response returns `serverInfo`, `capabilities`, and `protocolVersion` but **no top-level `instructions` string** — this server ships no server-level instructions block (unlike, e.g., drews-xcode-mcp). Client-facing guidance lives entirely in the per-tool `description` fields below.
@@ -42,8 +67,8 @@ is intentionally not pinned here.)
 | 16 | `menu_pick` | Drive an app's menu bar by title path, e.g. ["File","Export…","PDF…"]. Requires Accessibility. |
 | 17 | `get_changes` | Diff the app's UI against the last get_changes/snapshot (added/removed/changed by ref). First call is the baseline. `partial: true` means the walk hit its time budget: removals are suppressed (unreached ≠ removed) and unreached elements may be missing. Requires Accessibility. |
 | 18 | `kill` | Terminate an app by `identity` (pid, app name, or bundle id). With no `signal`, escalates gracefully: SIGHUP → wait 2s → SIGTERM → wait 2s → SIGKILL, stopping as soon as it exits. With `signal` (SIGHUP/SIGINT/SIGTERM/SIGKILL or a number), sends only that one. No Accessibility required. |
-| 19 | `app` | Curated, name-first snapshot of an app: header (name/pid/bundle id), window titles, non-standard menus + items, and the ACTIVE window's controls grouped by kind — Buttons / Text fields (with values) / Other / Text — with [+N unnamed]/[+N more] elision so nothing is silently hidden. The compact alternative to control_app's full tree; collections are already bounded to visible rows. Resolves `identity` (app name, bundle id, pid, or window title) and brings the app to the front unless `activate:false`. Requires Accessibility. |
-| 20 | `control_app` | Resolve an app by name, bundle id, pid, or window title and return a compact, ref-bearing UI hierarchy to drive (with action/change_text/change_value/expand/refresh). If no running app matches, it will try to LAUNCH the identity (as a bundle id, app name, or .app path) and then drive it (response includes launched:true). Requires Accessibility. |
+| 19 | `app` | Curated, name-first snapshot of an app: header (name/pid/bundle id), window titles, non-standard menus + items, and the ACTIVE window's controls grouped by kind — Buttons / Text fields (with values) / Other / Text — with [+N unnamed]/[+N more] elision so nothing is silently hidden. The compact alternative to control_app's full tree; collections are already bounded to visible rows. Resolves `identity` (app name, bundle id, pid, or window title) and brings the app to the front unless `activate:false`. Also returns `guidance`: the verbs that take a ref, any container whose content is not loaded yet (a device/simulator screen announces nothing, so it is named explicitly with the expand call that loads it), and concrete next calls written against this app's own refs. Requires Accessibility. |
+| 20 | `control_app` | Resolve an app by name, bundle id, pid, or window title and return a compact, ref-bearing UI hierarchy to drive (with action/change_text/change_value/expand/refresh). If no running app matches, it will try to LAUNCH the identity (as a bundle id, app name, or .app path) and then drive it (response includes launched:true). When a container is still holding content back — a device/simulator screen, or children not yet loaded — a `guidance` block names it with the expand call that loads it. Requires Accessibility. |
 | 21 | `launch_app` | Launch an app and return the same ref-bearing hierarchy as control_app — ready to drive. `app` is a .app filesystem path (e.g. /Applications/Safari.app) or a bundle id (e.g. com.apple.Safari); whichever you pass, it's launched if not running (or reused if it is, launched:false), then walked once its first window appears. Use this when control_app returned no_match because the app isn't running. Requires Accessibility. |
 | 22 | `action` | Perform an action on a ref (press, menu, inc, dec, disclose, collapse, or a custom-action label), wait for the UI to settle, and return the updated hierarchy one level up. Requires Accessibility. |
 | 23 | `press` | Press a control by its visible NAME (a high-level shortcut for find_elements + action(press)). Finds the ENABLED, pressable element whose label matches `name` and presses it, then settles the UI. Exact label wins, then case-insensitive, then substring; if several equally-good enabled matches remain it returns them as `candidates` to disambiguate instead of guessing. `pid` comes from control_app. Requires Accessibility. |
@@ -238,7 +263,7 @@ Terminate an app by `identity` (pid, app name, or bundle id). With no `signal`, 
 
 ### `app`
 
-Curated, name-first snapshot of an app: header (name/pid/bundle id), window titles, non-standard menus + items, and the ACTIVE window's controls grouped by kind — Buttons / Text fields (with values) / Other / Text — with [+N unnamed]/[+N more] elision so nothing is silently hidden. The compact alternative to control_app's full tree; collections are already bounded to visible rows. Resolves `identity` (app name, bundle id, pid, or window title) and brings the app to the front unless `activate:false`. Requires Accessibility.
+Curated, name-first snapshot of an app: header (name/pid/bundle id), window titles, non-standard menus + items, and the ACTIVE window's controls grouped by kind — Buttons / Text fields (with values) / Other / Text — with [+N unnamed]/[+N more] elision so nothing is silently hidden. The compact alternative to control_app's full tree; collections are already bounded to visible rows. Resolves `identity` (app name, bundle id, pid, or window title) and brings the app to the front unless `activate:false`. Also returns `guidance`: the verbs that take a ref, any container whose content is not loaded yet (a device/simulator screen announces nothing, so it is named explicitly with the expand call that loads it), and concrete next calls written against this app's own refs. Requires Accessibility.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -249,7 +274,7 @@ Curated, name-first snapshot of an app: header (name/pid/bundle id), window titl
 
 ### `control_app`
 
-Resolve an app by name, bundle id, pid, or window title and return a compact, ref-bearing UI hierarchy to drive (with action/change_text/change_value/expand/refresh). If no running app matches, it will try to LAUNCH the identity (as a bundle id, app name, or .app path) and then drive it (response includes launched:true). Requires Accessibility.
+Resolve an app by name, bundle id, pid, or window title and return a compact, ref-bearing UI hierarchy to drive (with action/change_text/change_value/expand/refresh). If no running app matches, it will try to LAUNCH the identity (as a bundle id, app name, or .app path) and then drive it (response includes launched:true). When a container is still holding content back — a device/simulator screen, or children not yet loaded — a `guidance` block names it with the expand call that loads it. Requires Accessibility.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

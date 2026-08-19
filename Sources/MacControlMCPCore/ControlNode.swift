@@ -263,7 +263,13 @@ public enum TextDisplay {
 
 /// Renders a `ControlNode` tree to the §7 outline, prefixed once by the legend header.
 public enum ControlRenderer {
-    public static let legend = """
+    /// Rendered once from `Guidance.refVerbs` so a verb's signature is documented in exactly one
+    /// place — the sections below keep the longer-form advice the catalog has no room for.
+    public static let legend: String = legendHeader
+        + Guidance.verbLines(Guidance.refVerbs, indent: "//   ").joined(separator: "\n")
+        + "\n" + legendBody
+
+    private static let legendHeader = """
     // HIERARCHY — one element per line, indented by tree depth:
     //   <ref> type "label" #id ="value" [min–max] (valueDescription) url="…" placeholder="text" {states} - actions [N hidden]
     // Only the parts that apply are shown. <ref> (e.g. e10) is the handle for every call —
@@ -284,17 +290,10 @@ public enum ControlRenderer {
     //                 expand alone won't pull them: reveal(rowRef)/scroll to bring more on-screen first
     //
     // DRIVE IT — every verb takes a <ref>; control_app resolves the app and returns this tree:
-    //   action("e14", "press")               perform an action: press, menu, inc, dec, disclose,
-    //                                         collapse, or any custom-action label shown after the "-"
-    //   click("e30")                         real click at the element (brings its app frontmost) — use
-    //                                         when action/AXPress misbehaves (e.g. Catalyst cells)
-    //   change_text("e10", "My cool Mac")    set a field's value semantically (fast, non-disruptive)
-    //   type("hi", ref:"e10")                enter text into a field. Tries a direct AX insert first
-    //                                        (no click/clipboard), else clicks+types, else pastes.
-    //                                        Response `via` = "ax" | "keys" | "paste".
-    //   change_value("e14", 0.5)             set a numeric value (slider/scrollbar; 0–1 or min–max)
-    //   expand("e2", timeout: 2.0)           load [N hidden] descendants (breadth-first) until done/timeout
-    //   refresh("e2", timeout: 2.0)          discard + reload the subtree until done/timeout
+
+    """
+
+    private static let legendBody = """
     //
     // PICK A VERB (the two pairs are interchangeable — if one misbehaves, switch to its partner):
     //   open/activate a control → action(ref,"press") first (semantic, non-disruptive). If it does
@@ -333,7 +332,7 @@ public enum ControlRenderer {
     //     click(firstRowRef, count:2)
     //   Notes — find "Groceries" and append: control_app("Notes") →
     //     find_elements(pid,titleContains:"Groceries") → click(rowRef) →
-    //     type("\n- milk", ref: noteBodyRef)
+    //     type("\\n- milk", ref: noteBodyRef)
     //
     // expand/refresh return THIS SAME hierarchy rooted at the ref; action/change_* settle, then
     // return the updated hierarchy one level up.

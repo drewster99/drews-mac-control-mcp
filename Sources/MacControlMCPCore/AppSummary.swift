@@ -17,6 +17,10 @@ public struct AppSummary: Equatable, Sendable {
     public struct Entry: Equatable, Sendable {
         public let ref: String
         public let detail: String
+        /// The control's own name, when it has one — `detail` may be a compound rendering (a text
+        /// field shows title + placeholder + contents), and guidance needs the bare name to say
+        /// which control a suggested call would act on.
+        public let label: String?
     }
     public struct Group: Equatable, Sendable {
         public let name: String          // plural heading: "Buttons", "Text fields", "Other", "Text"
@@ -51,6 +55,13 @@ public struct AppSummary: Equatable, Sendable {
 
 public enum AppProjection {
     static let perGroupCap = 60
+
+    /// Group headings. Named because the guidance builder keys its suggested verb off the group a
+    /// control landed in — a heading renamed in one place only would silently stop matching.
+    static let buttonsGroup = (plural: "Buttons", singular: "Button")
+    static let textFieldsGroup = (plural: "Text fields", singular: "Text field")
+    static let otherGroup = (plural: "Other", singular: "Other")
+    static let textGroup = (plural: "Text", singular: "Text")
 
     /// Top-level window-like containers. A window's humanized `type` reflects its SUBROLE, so a
     /// Safari window with subrole AXDialog renders as `dialog`, not `window` — match all of them.
@@ -129,30 +140,30 @@ public enum AppProjection {
             else if !node.actions.isEmpty || node.textValue != nil { other.append(node) }
         }
         var out: [AppSummary.Group] = []
-        out.append(group("Buttons", "Button", buttons) { node in
+        out.append(group(buttonsGroup, buttons) { node in
             node.label.map { label in qualified(oneLine(label), node) }
         })
         // Text fields show title / placeholder / contents so an unlabeled field with text is still
         // usable (search boxes, code editors); only a fully-empty field falls through to `unnamed`.
-        out.append(group("Text fields", "Text field", fields) { node in
+        out.append(group(textFieldsGroup, fields) { node in
             let title = node.label ?? ""
             let placeholder = node.placeholder ?? ""
             let contents = node.textValue ?? ""
             if title.isEmpty && placeholder.isEmpty && contents.isEmpty { return nil }
             return "title \(quote(title)), placeholder \(quote(placeholder)), contents: \(quote(contents))"
         })
-        out.append(group("Other", "Other", other) { node in
+        out.append(group(otherGroup, other) { node in
             guard let label = node.label, !label.isEmpty else { return nil }
             return "\(oneLine(label)) (\(node.type))"
         })
-        out.append(group("Text", "Text", text) { node in node.label.map(quote) })
+        out.append(group(textGroup, text) { node in node.label.map(quote) })
         return out.filter { !$0.entries.isEmpty || $0.unnamed > 0 }
     }
 
     /// Build a rendered group from nodes: dedup identical rendered details (many apps repeat the same
     /// "Copy code" button / message row), keeping the first node's ref, then cap. `total` is the
     /// distinct count.
-    static func group(_ name: String, _ itemLabel: String, _ nodes: [ControlNode],
+    static func group(_ heading: (plural: String, singular: String), _ nodes: [ControlNode],
                       render: (ControlNode) -> String?) -> AppSummary.Group {
         var entries: [AppSummary.Entry] = []
         var unnamed = 0
@@ -160,12 +171,15 @@ public enum AppProjection {
         for node in nodes {
             guard let detail = render(node) else { unnamed += 1; continue }
             if seen.insert(detail).inserted {   // drop exact duplicates, keep the first ref
-                entries.append(AppSummary.Entry(ref: node.ref, detail: detail))
+                // Placeholder stands in for a field with no title — it is what the user sees in it.
+                let label = [node.label, node.placeholder].compactMap { $0 }.first { !$0.isEmpty }
+                entries.append(AppSummary.Entry(ref: node.ref, detail: detail,
+                                                label: label.map { oneLine($0, limit: 40) }))
             }
         }
         let total = entries.count
         let more = max(0, total - perGroupCap)
-        return AppSummary.Group(name: name, itemLabel: itemLabel,
+        return AppSummary.Group(name: heading.plural, itemLabel: heading.singular,
                                 entries: Array(entries.prefix(perGroupCap)),
                                 unnamed: unnamed, more: more, total: total)
     }

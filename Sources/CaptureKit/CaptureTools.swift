@@ -133,6 +133,13 @@ enum CaptureTools {
                                  + "Use \"*\" to deliberately match every app."])
     }
 
+    /// The `screenshot_app_window` call that captures one listed window, with both matchers quoted
+    /// so a title containing a quote still yields something the caller can paste verbatim.
+    static func screenshotCallExample(bundleId: String, windowTitle: String) -> String {
+        let windowArgument = windowTitle.isEmpty ? "" : ", windowMatch: \(JSONText.quotedLiteral(windowTitle))"
+        return "screenshot_app_window(appMatch: \(JSONText.quotedLiteral(bundleId))\(windowArgument))"
+    }
+
     /// Per-window alpha, keyed by `CGWindowID`. ScreenCaptureKit's `SCWindow` carries no alpha, so
     /// it comes from a separate CoreGraphics window-list snapshot joined on `SCWindow.windowID`
     /// (which IS `kCGWindowNumber`). One sub-millisecond call; needs no Screen Recording grant.
@@ -405,6 +412,12 @@ public struct ScreenshotAppWindowTool: Tool {
         // no `screenshots` key instead — presence of `screenshots` IS the "we matched something" signal.
         var out: [String: Any] = ["screenshots": screenshots,
                                    "succeeded": screenshots.filter { ($0["success"] as? Bool) == true }.count]
+        // A saved PNG is a dead end unless the caller knows the image can be read back as text.
+        if !performOCR, let path = screenshots.compactMap({ $0["path"] as? String }).first {
+            out["guidance"] = Guidance.forListing([
+                .init(call: #"ocr(path: "\#(path)")"#, purpose: "read the text in that image (Vision), no grant needed")
+            ])
+        }
         if dropped > 0 { out["truncated"] = ["matched": candidates.count, "captured": selected.count, "dropped": dropped] }
         if budgetSkipped > 0 { out["budgetSkipped"] = budgetSkipped }
         return JSONText.from(out)
@@ -489,6 +502,13 @@ public struct ScreenshotFullDisplayTool: Tool {
         }
         var out: [String: Any] = ["screenshots": screenshots,
                                    "succeeded": screenshots.filter { ($0["success"] as? Bool) == true }.count]
+        // This tool deliberately offers no OCR of its own, so the path is only useful to a caller
+        // who knows it can be read back as text.
+        if let path = screenshots.compactMap({ $0["path"] as? String }).first {
+            out["guidance"] = Guidance.forListing([
+                .init(call: #"ocr(path: "\#(path)")"#, purpose: "read the text in that image (Vision), no grant needed")
+            ])
+        }
         if budgetSkipped > 0 { out["budgetSkipped"] = budgetSkipped }
         return JSONText.from(out)
     }
@@ -602,7 +622,18 @@ public struct ListAppWindowsTool: Tool {
                 if let alpha = alphas[window.windowID] { entry["alpha"] = alpha }
                 return entry
             }
-        return JSONText.from(["windows": windows])
+        // The whole point of this listing is to feed screenshot_app_window / app; write those calls
+        // out against a row the caller can actually use rather than describing them.
+        var steps: [GuidanceVerb] = []
+        if let first = windows.first,
+           let bundleId = first["bundleId"] as? String, !bundleId.isEmpty {
+            let title = (first["title"] as? String) ?? ""
+            steps.append(.init(call: CaptureTools.screenshotCallExample(bundleId: bundleId, windowTitle: title),
+                               purpose: "capture that window — add performOCR: true to read its text"))
+            steps.append(.init(call: "app(identity: \(JSONText.quotedLiteral(bundleId)))",
+                               purpose: "drive it instead of capturing it — refs for its controls"))
+        }
+        return JSONText.from(["windows": windows, "guidance": Guidance.forListing(steps)])
     }
 }
 
@@ -693,6 +724,12 @@ public struct ScreenshotSimulatorTool: Tool {
 
         var out: [String: Any] = ["screenshots": screenshots,
                                    "succeeded": screenshots.filter { ($0["success"] as? Bool) == true }.count]
+        // A saved PNG is a dead end unless the caller knows the image can be read back as text.
+        if !performOCR, let path = screenshots.compactMap({ $0["path"] as? String }).first {
+            out["guidance"] = Guidance.forListing([
+                .init(call: #"ocr(path: "\#(path)")"#, purpose: "read the text in that image (Vision), no grant needed")
+            ])
+        }
         if dropped > 0 { out["truncated"] = ["matched": booted.count, "captured": selected.count, "dropped": dropped] }
         if budgetSkipped > 0 { out["budgetSkipped"] = budgetSkipped }
         return JSONText.from(out)

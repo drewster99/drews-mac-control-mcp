@@ -181,4 +181,23 @@ final class CaptureToolsTests: XCTestCase {
         let unmatchable = ListAppWindowsTool().call(["appMatch": "*", "windowMatch": "no-such-window-title-zzz"])
         XCTAssertTrue(unmatchable.contains("\"windows\" : [\n\n  ]") || unmatchable.contains("\"windows\" : []"), unmatchable)
     }
+
+    // MARK: guidance examples must be pasteable
+
+    func testScreenshotCallExampleIsWellFormed() {
+        let withTitle = CaptureTools.screenshotCallExample(bundleId: "com.apple.Safari", windowTitle: "Docs")
+        XCTAssertEqual(withTitle, #"screenshot_app_window(appMatch: "com.apple.Safari", windowMatch: "Docs")"#)
+
+        let noTitle = CaptureTools.screenshotCallExample(bundleId: "com.apple.Safari", windowTitle: "")
+        XCTAssertEqual(noTitle, #"screenshot_app_window(appMatch: "com.apple.Safari")"#)
+
+        // A quote in a window title must not end the argument early.
+        let quoted = CaptureTools.screenshotCallExample(bundleId: "com.x", windowTitle: #"say "hi""#)
+        XCTAssertEqual(quoted, #"screenshot_app_window(appMatch: "com.x", windowMatch: "say \"hi\"")"#)
+
+        for example in [withTitle, noTitle, quoted] {
+            XCTAssertEqual(example.filter { $0 == "(" }.count, example.filter { $0 == ")" }.count, example)
+            XCTAssertTrue(example.hasSuffix(")"), example)
+        }
+    }
 }

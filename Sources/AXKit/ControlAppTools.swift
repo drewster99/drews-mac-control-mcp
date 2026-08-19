@@ -256,7 +256,7 @@ public struct ControlAppTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Resolve an app by name, bundle id, pid, or window title and return a compact, ref-bearing UI hierarchy to drive (with action/change_text/change_value/expand/refresh). If no running app matches, it will try to LAUNCH the identity (as a bundle id, app name, or .app path) and then drive it (response includes launched:true). Requires Accessibility.",
+            "description": "Resolve an app by name, bundle id, pid, or window title and return a compact, ref-bearing UI hierarchy to drive (with action/change_text/change_value/expand/refresh). If no running app matches, it will try to LAUNCH the identity (as a bundle id, app name, or .app path) and then drive it (response includes launched:true). When a container is still holding content back — a device/simulator screen, or children not yet loaded — a `guidance` block names it with the expand call that loads it. Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -306,6 +306,10 @@ public struct ControlAppTool: Tool {
                                       "hierarchy": ControlRenderer.render(tree, includeLegend: true,
                                                                           maxLines: maxLines,
                                                                           maxChars: maxChars)]
+            // The legend covers the verbs; what it can't know is which containers in THIS tree are
+            // still holding content back — a device screen looks complete and says nothing.
+            let pending = Guidance.pendingContent(in: tree)
+            if !pending.isEmpty { obj["guidance"] = Guidance.pendingContentLines(pending) }
             if launched { obj["launched"] = true }
             if var timing {
                 timing["walkMs"] = Int(Date().timeIntervalSince(walkStart) * 1000)
@@ -1142,9 +1146,12 @@ public struct LaunchAppTool: Tool {
         let tree = ControlWalker.build(root: app, registry: registry, pid: pid,
                                        deadline: Date().addingTimeInterval(10))
         registry.storeControlTree(tree, pid: pid)
-        return JSONText.from(["success": true, "pid": Int(pid), "bundleId": bundleId, "name": name,
-                            "launched": launched, "ready": ready,
-                            "hierarchy": ControlRenderer.render(tree, includeLegend: true)])
+        var obj: [String: Any] = ["success": true, "pid": Int(pid), "bundleId": bundleId, "name": name,
+                                  "launched": launched, "ready": ready,
+                                  "hierarchy": ControlRenderer.render(tree, includeLegend: true)]
+        let pending = Guidance.pendingContent(in: tree)
+        if !pending.isEmpty { obj["guidance"] = Guidance.pendingContentLines(pending) }
+        return JSONText.from(obj)
     }
 }
 
@@ -1284,7 +1291,7 @@ public struct AppTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Curated, name-first snapshot of an app: header (name/pid/bundle id), window titles, non-standard menus + items, and the ACTIVE window's controls grouped by kind — Buttons / Text fields (with values) / Other / Text — with [+N unnamed]/[+N more] elision so nothing is silently hidden. The compact alternative to control_app's full tree; collections are already bounded to visible rows. Resolves `identity` (app name, bundle id, pid, or window title) and brings the app to the front unless `activate:false`. Requires Accessibility.",
+            "description": "Curated, name-first snapshot of an app: header (name/pid/bundle id), window titles, non-standard menus + items, and the ACTIVE window's controls grouped by kind — Buttons / Text fields (with values) / Other / Text — with [+N unnamed]/[+N more] elision so nothing is silently hidden. The compact alternative to control_app's full tree; collections are already bounded to visible rows. Resolves `identity` (app name, bundle id, pid, or window title) and brings the app to the front unless `activate:false`. Also returns `guidance`: the verbs that take a ref, any container whose content is not loaded yet (a device/simulator screen announces nothing, so it is named explicitly with the expand call that loads it), and concrete next calls written against this app's own refs. Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -1340,7 +1347,9 @@ public struct AppTool: Tool {
             let summary = AppProjection.project(tree: tree, name: name, pid: Int(pid), bundleId: bundleId,
                                                 activeWindowTitle: activeHint)
             return JSONText.from(["success": true, "pid": Int(pid), "name": name, "bundleId": bundleId,
-                                "summary": AppRenderer.render(summary)])
+                                "summary": AppRenderer.render(summary),
+                                "guidance": Guidance.forAppSummary(summary,
+                                                                   pending: Guidance.pendingContent(in: tree))])
         }
     }
 }
