@@ -106,4 +106,79 @@ final class CaptureToolsTests: XCTestCase {
         XCTAssertTrue(out.contains("\"displays\""), out)
         XCTAssertTrue(out.contains("\"isMain\""), out)
     }
+
+    // MARK: appMatch is required (a malformed matcher must not widen to every window)
+
+    func testListWindowsRequiresAppMatch() {
+        let out = ListAppWindowsTool(hasScreenRecording: { true }).call([:])
+        XCTAssertTrue(out.contains("missing_appMatch"), out)
+    }
+
+    func testScreenshotRequiresAppMatch() {
+        let dir = NSTemporaryDirectory() + "maccontrol-test-\(UUID().uuidString)"
+        let out = ScreenshotAppWindowTool(hasScreenRecording: { true }).call(["targetFolder": dir])
+        XCTAssertTrue(out.contains("missing_appMatch"), out)
+    }
+
+    func testAppMatchRejectsNonTextValues() {
+        for value in [true, [1, 2], ["a": "b"]] as [Any] {
+            let out = ListAppWindowsTool(hasScreenRecording: { true }).call(["appMatch": value])
+            XCTAssertTrue(out.contains("invalid_appMatch"), "\(value) -> \(out)")
+        }
+    }
+
+    func testAppMatchAcceptsExplicitWildcardAndPidNumber() {
+        XCTAssertEqual(CaptureTools.requiredMatcher(["appMatch": "*"], "appMatch"), .pattern("*"))
+        XCTAssertEqual(CaptureTools.requiredMatcher(["appMatch": ""], "appMatch"), .pattern(""))
+        XCTAssertEqual(CaptureTools.requiredMatcher(["appMatch": 5016], "appMatch"), .pattern("5016"))
+        XCTAssertEqual(CaptureTools.requiredMatcher([:], "appMatch"), .missing)
+        XCTAssertEqual(CaptureTools.requiredMatcher(["appMatch": true], "appMatch"), .invalid)
+    }
+
+    // MARK: bundle id matches as a substring, not only whole-string
+
+    func testBundleIdMatchesAsCaseInsensitiveSubstring() {
+        XCTAssertTrue(CaptureTools.appMatches("torusknot", appName: "Sourcetree",
+                                              bundleId: "com.torusknot.SourceTreeNotMAS", pid: 42))
+        XCTAssertTrue(CaptureTools.appMatches("APPLE.DT", appName: "Device Hub",
+                                              bundleId: "com.apple.dt.Devices", pid: 42))
+        XCTAssertFalse(CaptureTools.appMatches("com.google", appName: "Safari",
+                                               bundleId: "com.apple.Safari", pid: 42))
+    }
+
+    // MARK: alpha filter
+
+    func testZeroAlphaWindowsAreExcludedByDefaultAndKeptWhenUnknown() {
+        XCTAssertFalse(CaptureTools.passesAlphaFilter(0, excludeZeroAlpha: true))
+        XCTAssertTrue(CaptureTools.passesAlphaFilter(0.5, excludeZeroAlpha: true))
+        XCTAssertTrue(CaptureTools.passesAlphaFilter(1, excludeZeroAlpha: true))
+        XCTAssertTrue(CaptureTools.passesAlphaFilter(0, excludeZeroAlpha: false))
+        // Unknown alpha (window closed between the two snapshots) is kept, never assumed zero.
+        XCTAssertTrue(CaptureTools.passesAlphaFilter(nil, excludeZeroAlpha: true))
+    }
+
+    // MARK: descriptors for the new arguments
+
+    func testWindowDescriptorsExposeNewArguments() {
+        for schema in [ScreenshotAppWindowTool().descriptor["inputSchema"] as? [String: Any],
+                       ListAppWindowsTool().descriptor["inputSchema"] as? [String: Any]] {
+            let properties = schema?["properties"] as? [String: Any]
+            XCTAssertNotNil(properties?["appMatch"])
+            XCTAssertNotNil(properties?["windowMatch"])
+            XCTAssertNotNil(properties?["onScreenOnly"])
+            XCTAssertNotNil(properties?["excludeZeroAlpha"])
+            XCTAssertEqual(schema?["required"] as? [String], ["appMatch"])
+            XCTAssertNil(properties?["excludeDesktopElements"])
+        }
+    }
+
+    // MARK: live
+
+    func testLiveListWindowsReportsAlphaAndHonorsWindowMatch() throws {
+        try XCTSkipUnless(CGPreflightScreenCaptureAccess(), "needs Screen Recording grant")
+        let all = ListAppWindowsTool().call(["appMatch": "*"])
+        XCTAssertTrue(all.contains("\"windows\""), all)
+        let unmatchable = ListAppWindowsTool().call(["appMatch": "*", "windowMatch": "no-such-window-title-zzz"])
+        XCTAssertTrue(unmatchable.contains("\"windows\" : [\n\n  ]") || unmatchable.contains("\"windows\" : []"), unmatchable)
+    }
 }

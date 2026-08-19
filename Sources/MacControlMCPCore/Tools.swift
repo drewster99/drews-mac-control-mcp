@@ -193,21 +193,21 @@ public struct ListAppsTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "List running GUI apps (regular activation policy): pid, name, bundleId, frontmost.",
+            "description": "List running GUI apps (regular activation policy): pid, name, bundleId, frontmost. Only apps macOS reports a usable process id for — an app with no pid cannot be driven by any other tool.",
             "inputSchema": ["type": "object", "properties": [String: Any]()]
         ]
     }
 
     public func call(_ arguments: [String: Any]) -> String {
-        let rows = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }
-            .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
+        let rows = RunningApps.current()
+            .filter { $0.isRegular }
+            .sorted { $0.name < $1.name }
             .map { app -> [String: Any] in
                 [
-                    "pid": Int(app.processIdentifier),
-                    "name": app.localizedName ?? "(unknown)",
-                    "bundleId": app.bundleIdentifier ?? "",
-                    "frontmost": app.isActive
+                    "pid": Int(app.pid),
+                    "name": app.name,
+                    "bundleId": app.bundleId,
+                    "frontmost": app.isFrontmost
                 ]
             }
         return JSONText.from(rows)

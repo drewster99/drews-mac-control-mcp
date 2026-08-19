@@ -84,6 +84,18 @@ Rules:
 - **Matching is intentionally asymmetric.** The title fallback (step 4) is case-insensitive
   *substring* (forgiving discovery); the explicit `window` arg (§4) is case-sensitive *exact*
   (precise selection). This can surprise callers — it's deliberate, not an oversight.
+- **Every candidate carries a drivable pid.** The cascade runs over `RunningApps.current()`, not
+  `NSWorkspace.shared.runningApplications` directly, because AppKit does not always report a pid:
+  Xcode's Device Hub, launched from a non-standard Xcode bundle, appears with the right name and
+  bundle id but `processIdentifier == -1` (and `NSRunningApplication(processIdentifier:)` on its
+  real pid returns that same record, still reporting -1). That one app's pid is repaired from the
+  window server's `kCGWindowOwnerPID`; any record still lacking a usable pid is dropped, since AX
+  addresses an app solely by pid and would answer every read with `kAXErrorInvalidUIElement`.
+- **A resolved app that answers nothing is an error, not an empty success.** When the walk returns
+  no children AND the app element is not `ready`, `app`/`control_app` return
+  `{ "success": false, "error": "app_unreachable", "pid": … }` rather than a `success: true`
+  carrying an empty hierarchy, which reads identically to an app that genuinely has no windows.
+  A just-launched app is exempt — it can legitimately be mid-layout with nothing drawn yet.
 
 ```json
 { "success": false, "error": "ambiguous",

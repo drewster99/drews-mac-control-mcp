@@ -24,7 +24,7 @@ is intentionally not pinned here.)
 
 | # | Tool | Description |
 |---|------|-------------|
-| 1 | `list_running_apps` | List running GUI apps (regular activation policy): pid, name, bundleId, frontmost. |
+| 1 | `list_running_apps` | List running GUI apps (regular activation policy): pid, name, bundleId, frontmost. Only apps macOS reports a usable process id for — an app with no pid cannot be driven by any other tool. |
 | 2 | `list_simulators` | List booted simulators via simctl: udid, name, os, state. |
 | 3 | `sim` | Drive a simulator via simctl: openurl/appearance/statusbar/statusbar_clear/launch/terminate/pbpaste. udid defaults to the booted device. No grant. |
 | 4 | `open` | Open a file, folder, URL, or application with the macOS `open` command. `target` is a file/folder path, a URL (https, mailto, custom scheme, …), an app name, a bundle identifier, or a path to a .app. Optionally open `target` with a specific `application`. No grant. |
@@ -53,11 +53,11 @@ is intentionally not pinned here.)
 | 27 | `type` | Enter text into a field. With `ref`: first tries a direct Accessibility insert (replaces the selection / inserts at the caret — no click, no clipboard); if the element doesn't support that, it clicks the field to focus it (so don't point it at buttons — a click would press them) and types keystrokes, falling back to clipboard paste if the keystrokes don't register (AppKit text views). The response's `via` says which path ran: "ax" (Accessibility insert), "keys" (synthetic keystrokes), "paste" (clipboard ⌘V), or "paste_retry" (the keystrokes read as a no-op, so the clipboard ⌘V fallback fired); `focused` reports whether the element held focus on the keystroke path. Without `ref`: types into whatever is currently focused. via=paste forces the clipboard path. Requires Accessibility. |
 | 28 | `expand` | Load only the not-yet-loaded ([N hidden]) descendants under a ref, reusing already-loaded nodes, until done or the timeout. Returns the updated subtree. Requires Accessibility. |
 | 29 | `refresh` | Discard and re-read the whole subtree under a ref (authoritative), until done or the timeout. Returns the updated subtree. Requires Accessibility. |
-| 30 | `screenshot_app_window` | Screenshot specific app window(s) with ScreenCaptureKit (captures even occluded/off-screen windows). appMatch: bundle id, pid, or case-insensitive app-name substring — "" or "*" = all apps. windowMatch: case-insensitive window-title substring — "" or "*" = all windows (on-screen preferred). Optionally OCRs each image. maxScreenshots caps the count (server cap 10). Needs Screen Recording. |
+| 30 | `screenshot_app_window` | Screenshot specific app window(s) with ScreenCaptureKit (captures even occluded/off-screen windows). appMatch (REQUIRED): exact pid, or a case-insensitive substring of the bundle id or app name — "" or "*" = all apps. windowMatch: case-insensitive window-title substring — "" or "*" = all windows (on-screen preferred). onScreenOnly limits to on-screen windows (default false, so minimized/hidden windows still capture). excludeZeroAlpha drops fully transparent windows (default true). Optionally OCRs each image. maxScreenshots caps the count (server cap 10). Needs Screen Recording. |
 | 31 | `screenshot_full_display` | Screenshot whole display(s). displayMatch: display id, 0-based index, or name substring — "" or "*" = all displays. No OCR (use the ocr tool on the returned path if needed). Needs Screen Recording. |
 | 32 | `screenshot_simulator` | Screenshot booted iOS simulator device(s) via simctl (no Screen Recording grant needed). match: a simulator UDID or case-insensitive device-name substring — "" or "*" = all booted. Optionally OCRs each. maxScreenshots caps the count (server cap 10). |
 | 33 | `list_connected_displays` | List connected displays (id, name, index, frame in points, pixel size). Feed id/index/name to screenshot_full_display. Needs Screen Recording. |
-| 34 | `list_app_windows` | List on-screen and off-screen app windows (id, title, app, bundle id, pid, frame, display, onScreen). appMatch (bundle id/pid/app-name substring, ""/"*" = all) filters. Feed matches to screenshot_app_window. Window titles need Screen Recording. |
+| 34 | `list_app_windows` | List app windows (id, title, app, bundle id, pid, frame, display, onScreen, alpha). appMatch (REQUIRED): exact pid, or a case-insensitive substring of the bundle id or app name — "" or "*" = all apps. windowMatch: case-insensitive window-title substring — ""/"*" = all. onScreenOnly limits to on-screen windows (default true; pass false to include minimized/hidden ones). excludeZeroAlpha drops fully transparent windows (default true). Feed matches to screenshot_app_window. Window titles need Screen Recording. |
 | 35 | `ocr` | Recognize text in an image file (e.g. a screenshot path) via Vision. No permission required. |
 | 36 | `click_point` | Synthetic mouse click at raw screen coordinates (global top-left). AVOID unless you have an explicit coordinate to hit — to click a UI element, use `click(ref)`, which targets the element and brings its app frontmost. Rides the Accessibility grant. |
 | 37 | `scroll` | Synthetic scroll wheel by pixel deltas (dy negative scrolls down). Rides the Accessibility grant. |
@@ -70,7 +70,7 @@ is intentionally not pinned here.)
 
 ### `list_running_apps`
 
-List running GUI apps (regular activation policy): pid, name, bundleId, frontmost.
+List running GUI apps (regular activation policy): pid, name, bundleId, frontmost. Only apps macOS reports a usable process id for — an app with no pid cannot be driven by any other tool.
 
 _No parameters._
 
@@ -351,13 +351,15 @@ Discard and re-read the whole subtree under a ref (authoritative), until done or
 
 ### `screenshot_app_window`
 
-Screenshot specific app window(s) with ScreenCaptureKit (captures even occluded/off-screen windows). appMatch: bundle id, pid, or case-insensitive app-name substring — "" or "*" = all apps. windowMatch: case-insensitive window-title substring — "" or "*" = all windows (on-screen preferred). Optionally OCRs each image. maxScreenshots caps the count (server cap 10). Needs Screen Recording.
+Screenshot specific app window(s) with ScreenCaptureKit (captures even occluded/off-screen windows). appMatch (REQUIRED): exact pid, or a case-insensitive substring of the bundle id or app name — "" or "*" = all apps. windowMatch: case-insensitive window-title substring — "" or "*" = all windows (on-screen preferred). onScreenOnly limits to on-screen windows (default false, so minimized/hidden windows still capture). excludeZeroAlpha drops fully transparent windows (default true). Optionally OCRs each image. maxScreenshots caps the count (server cap 10). Needs Screen Recording.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `performOCR` | boolean | no | OCR each screenshot and include the text (default false). |
+| `appMatch` | string | **yes** | Exact pid, or a case-insensitive substring of the bundle id or app name. ""/"*" = all. |
 | `windowMatch` | string | no | Window-title substring. ""/"*" = all. |
-| `appMatch` | string | no | Bundle id, pid, or app-name substring. ""/"*" = all. |
+| `onScreenOnly` | boolean | no | Only windows currently on screen (default false — minimized/hidden windows capture too). |
+| `excludeZeroAlpha` | boolean | no | Drop fully transparent (alpha 0) windows (default true). |
+| `performOCR` | boolean | no | OCR each screenshot and include the text (default false). |
 | `maxScreenshots` | integer | no | Max screenshots to take (default 5, server cap 10). |
 | `targetFolder` | string | no | Absolute folder to save PNGs (created if missing, never auto-deleted). Omit for a temporary location. |
 
@@ -390,11 +392,14 @@ _No parameters._
 
 ### `list_app_windows`
 
-List on-screen and off-screen app windows (id, title, app, bundle id, pid, frame, display, onScreen). appMatch (bundle id/pid/app-name substring, ""/"*" = all) filters. Feed matches to screenshot_app_window. Window titles need Screen Recording.
+List app windows (id, title, app, bundle id, pid, frame, display, onScreen, alpha). appMatch (REQUIRED): exact pid, or a case-insensitive substring of the bundle id or app name — "" or "*" = all apps. windowMatch: case-insensitive window-title substring — ""/"*" = all. onScreenOnly limits to on-screen windows (default true; pass false to include minimized/hidden ones). excludeZeroAlpha drops fully transparent windows (default true). Feed matches to screenshot_app_window. Window titles need Screen Recording.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `appMatch` | string | no | Bundle id, pid, or app-name substring. ""/"*" = all. |
+| `appMatch` | string | **yes** | Exact pid, or a case-insensitive substring of the bundle id or app name. ""/"*" = all. |
+| `windowMatch` | string | no | Window-title substring. ""/"*" = all. |
+| `onScreenOnly` | boolean | no | Only windows currently on screen (default true). |
+| `excludeZeroAlpha` | boolean | no | Drop fully transparent (alpha 0) windows (default true). |
 
 ### `ocr`
 

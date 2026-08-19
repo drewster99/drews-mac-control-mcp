@@ -44,6 +44,24 @@ private func staleRefError(_ ref: String) -> String {
                    "howToFix": "Re-run control_app to refresh refs."])
 }
 
+/// An app macOS reports as running but gives no process id for — and that owns no window to
+/// recover one from. Accessibility addresses an app solely by pid, so there is nothing to drive.
+private func pidlessAppError(name: String, bundleId: String) -> String {
+    JSONText.from(["success": false, "error": "app_pid_unavailable", "name": name, "bundleId": bundleId,
+                   "howToFix": "\(name) is running but macOS reports no process id for it, and it owns no "
+                             + "window to recover one from. Quit and relaunch it, then retry."])
+}
+
+/// An app that resolved but whose accessibility interface answers nothing — the process quit
+/// between resolution and the walk, or the pid never addressed a live app at all. Reported instead
+/// of a `success: true` carrying an empty hierarchy, which reads identically to an app that
+/// genuinely has no windows.
+private func appUnreachableError(pid: pid_t, name: String) -> String {
+    JSONText.from(["success": false, "error": "app_unreachable", "pid": Int(pid), "name": name,
+                   "howToFix": "\(name) resolved to pid \(pid) but its accessibility interface returned nothing. "
+                             + "Confirm it is still running (list_running_apps), then retry."])
+}
+
 private func resolveRef(_ registry: ElementRegistry, _ ref: String) -> ResolvedRef {
     guard let element = registry.element(for: ref) else { return .error(staleRefError(ref)) }
     let deadline = Date().addingTimeInterval(controlReadinessWait)
@@ -200,10 +218,11 @@ private func launchAndAwait(identity: String, deadline: Date, timing: inout [Str
         let match = targetBundleId.flatMap { id in apps.first { $0.bundleIdentifier == id } }
             ?? apps.first { $0.localizedName == identity }
             ?? apps.first { $0.localizedName?.lowercased() == identity.lowercased() }
-        if let app = match {
+        // A freshly launched app can be listed before it owns the window a withheld pid is
+        // recovered from, so an unusable pid keeps polling rather than ending the wait.
+        if let app = match, let pid = RunningApps.usablePid(for: app) {
             timing["matchedAtMs"] = ms(since: t0)
             timing["iterations"] = iterations
-            let pid = app.processIdentifier
             let axApp = AXElement.application(pid: pid)
             axApp.setMessagingTimeout(2)
             let graceEnd = min(deadline, Date().addingTimeInterval(4))
@@ -276,6 +295,12 @@ public struct ControlAppTool: Tool {
             app.setMessagingTimeout(5)
             let tree = ControlWalker.build(root: app, registry: registry, pid: pid,
                                            deadline: Date().addingTimeInterval(timeout), windowFilter: windowArg)
+            // An empty tree is ambiguous — a menu-bar-only app looks the same as a pid that answers
+            // nothing — so only an empty tree whose app element is ALSO unready is an error. A
+            // just-launched app is exempt: it can legitimately be mid-layout with nothing drawn yet.
+            if !launched, tree.children.isEmpty, app.readiness != .ready {
+                return appUnreachableError(pid: pid, name: name)
+            }
             registry.storeControlTree(tree, pid: pid)
             var obj: [String: Any] = ["success": true, "pid": Int(pid), "bundleId": bundleId, "name": name,
                                       "hierarchy": ControlRenderer.render(tree, includeLegend: true,
@@ -1037,10 +1062,14 @@ public struct LaunchAppTool: Tool {
 
         // Already running? Reuse it (don't spawn a second instance); optionally bring it forward.
         if let running = runningInstance(bundleId: targetBundleId, bundleURL: url) {
+            let name = running.localizedName ?? "(unknown)"
+            guard let pid = RunningApps.usablePid(for: running) else {
+                return pidlessAppError(name: name, bundleId: running.bundleIdentifier ?? (targetBundleId ?? ""))
+            }
             if activate { running.activate() }
-            return buildAndStore(pid: running.processIdentifier,
+            return buildAndStore(pid: pid,
                                  bundleId: running.bundleIdentifier ?? (targetBundleId ?? ""),
-                                 name: running.localizedName ?? "(unknown)",
+                                 name: name,
                                  launched: false, readinessDeadline: Date().addingTimeInterval(timeout))
         }
 
@@ -1066,10 +1095,26 @@ public struct LaunchAppTool: Tool {
             return JSONText.from(["success": false, "error": "launch_failed"])
         }
 
-        return buildAndStore(pid: launchedApp.processIdentifier,
+        let launchedName = launchedApp.localizedName ?? "(unknown)"
+        let readinessDeadline = Date().addingTimeInterval(timeout)
+        guard let launchedPid = awaitUsablePid(for: launchedApp, deadline: readinessDeadline) else {
+            return pidlessAppError(name: launchedName, bundleId: launchedApp.bundleIdentifier ?? (targetBundleId ?? ""))
+        }
+        return buildAndStore(pid: launchedPid,
                              bundleId: launchedApp.bundleIdentifier ?? (targetBundleId ?? ""),
-                             name: launchedApp.localizedName ?? "(unknown)",
-                             launched: true, readinessDeadline: Date().addingTimeInterval(timeout))
+                             name: launchedName,
+                             launched: true, readinessDeadline: readinessDeadline)
+    }
+
+    /// Poll until the app yields a pid we can drive. A just-launched app can be reported running
+    /// before it owns the window that a withheld pid is recovered from, so this waits rather than
+    /// failing on the first look.
+    private func awaitUsablePid(for app: NSRunningApplication, deadline: Date) -> pid_t? {
+        while true {
+            if let pid = RunningApps.usablePid(for: app) { return pid }
+            if Date() >= deadline { return nil }
+            Thread.sleep(forTimeInterval: 0.15)
+        }
     }
 
     /// A live instance of this app, matched by bundle id first, then by bundle URL (covers
@@ -1285,6 +1330,11 @@ public struct AppTool: Tool {
             app.setMessagingTimeout(5)
             let tree = ControlWalker.build(root: app, registry: registry, pid: pid,
                                            deadline: Date().addingTimeInterval(timeout), windowFilter: nil)
+            // See ControlAppTool: an empty tree alone isn't proof of trouble, an empty tree from an
+            // app element that won't answer is.
+            if tree.children.isEmpty, app.readiness != .ready {
+                return appUnreachableError(pid: pid, name: name)
+            }
             registry.storeControlTree(tree, pid: pid)   // prime refs so a follow-up action(ref) resolves
             let activeHint = windowArgument ?? (matchedByWindowTitle ? identity : nil)
             let summary = AppProjection.project(tree: tree, name: name, pid: Int(pid), bundleId: bundleId,

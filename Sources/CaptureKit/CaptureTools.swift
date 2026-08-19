@@ -24,14 +24,17 @@ enum SCKCapture {
     private final class FilterBox: @unchecked Sendable { let filter: SCContentFilter; init(_ f: SCContentFilter) { filter = f } }
 
     /// Sync-bridged shareable content (windows + displays). Needs Screen Recording; nil on
-    /// timeout/failure. Includes off-screen windows so we can capture minimized/occluded ones.
-    static func shareableContent(timeout: TimeInterval = 5) -> SCShareableContent? {
+    /// timeout/failure. `onScreenWindowsOnly` is ScreenCaptureKit's own filter (the analog of
+    /// `kCGWindowListOptionOnScreenOnly`); the default includes off-screen windows so minimized and
+    /// hidden ones can still be captured, and display enumeration — which ignores the window list —
+    /// has no reason to narrow it.
+    static func shareableContent(onScreenWindowsOnly: Bool = false, timeout: TimeInterval = 5) -> SCShareableContent? {
         let box = ContentBox()
         let semaphore = DispatchSemaphore(value: 0)
         let task = Task {
             do {
                 box.content = try await SCShareableContent.excludingDesktopWindows(
-                    true, onScreenWindowsOnly: false)
+                    true, onScreenWindowsOnly: onScreenWindowsOnly)
             } catch { box.error = error }
             semaphore.signal()
         }
@@ -99,18 +102,75 @@ enum CaptureTools {
         return ""
     }
 
+    /// A matcher the caller MUST supply. Absent and unusable are distinct outcomes: a missing key
+    /// is a caller that forgot to choose, while a bool/null/collection is a caller that chose
+    /// something meaningless — neither may quietly become "" (match everything), which is how a
+    /// malformed `appMatch` used to widen a call to every window on the machine.
+    enum RequiredMatcher: Equatable {
+        case pattern(String)
+        case missing
+        case invalid
+    }
+
+    static func requiredMatcher(_ arguments: [String: Any], _ key: String) -> RequiredMatcher {
+        guard let value = arguments[key] else { return .missing }
+        if let string = value as? String { return .pattern(string) }
+        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            return .pattern(number.stringValue)
+        }
+        return .invalid
+    }
+
+    static func missingMatcherError(_ key: String) -> String {
+        JSONText.from(["error": "missing_\(key)",
+                       "howToFix": "Pass \(key) — an exact pid, or a substring of a bundle id or app name. "
+                                 + "Use \"*\" to deliberately match every app."])
+    }
+
+    static func invalidMatcherError(_ key: String) -> String {
+        JSONText.from(["error": "invalid_\(key)",
+                       "howToFix": "\(key) must be a string (or a pid as a number). "
+                                 + "Use \"*\" to deliberately match every app."])
+    }
+
+    /// Per-window alpha, keyed by `CGWindowID`. ScreenCaptureKit's `SCWindow` carries no alpha, so
+    /// it comes from a separate CoreGraphics window-list snapshot joined on `SCWindow.windowID`
+    /// (which IS `kCGWindowNumber`). One sub-millisecond call; needs no Screen Recording grant.
+    static func windowAlphas() -> [CGWindowID: Double] {
+        let info = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+        var alphas: [CGWindowID: Double] = [:]
+        for window in info {
+            guard let number = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let alpha = (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue else { continue }
+            alphas[CGWindowID(number)] = alpha
+        }
+        return alphas
+    }
+
+    /// A fully transparent window cannot be seen, so it is dropped by default. Measured rare among
+    /// the layer-0 windows these tools list (transparent windows mostly sit at other layers, which
+    /// the layer filter already excludes), so this trims rather than transforms a result. A window absent from the alpha snapshot is KEPT: the two lists
+    /// are taken a moment apart, and an unknown alpha is not evidence of a zero one — dropping it
+    /// would hide a real window on a race.
+    static func passesAlphaFilter(_ alpha: Double?, excludeZeroAlpha: Bool) -> Bool {
+        guard excludeZeroAlpha, let alpha else { return true }
+        return alpha > 0
+    }
+
     /// `""`/`"*"` match everything; otherwise a case-insensitive substring test.
     static func matchesAll(_ pattern: String) -> Bool { pattern.isEmpty || pattern == "*" }
     static func substringMatch(_ pattern: String, _ value: String) -> Bool {
         matchesAll(pattern) || value.range(of: pattern, options: .caseInsensitive) != nil
     }
 
-    /// An app matcher: bundle id (exact, case-insensitive), pid (exact), or app-name substring.
+    /// An app matcher: pid (exact), or a case-insensitive substring of either the bundle id or the
+    /// app name. Substring on the bundle id means `com.apple` reaches every Apple app — deliberate,
+    /// and safe only because `appMatch` is required, so no caller lands there by omission.
     static func appMatches(_ pattern: String, appName: String, bundleId: String, pid: pid_t) -> Bool {
         if matchesAll(pattern) { return true }
-        if bundleId.compare(pattern, options: .caseInsensitive) == .orderedSame { return true }
         if let asPid = pid_t(pattern), asPid == pid { return true }
-        return appName.range(of: pattern, options: .caseInsensitive) != nil
+        return bundleId.range(of: pattern, options: .caseInsensitive) != nil
+            || appName.range(of: pattern, options: .caseInsensitive) != nil
     }
 
     static func clampMaxScreenshots(_ raw: Int?) -> Int {
@@ -236,24 +296,28 @@ public struct ScreenshotAppWindowTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Screenshot specific app window(s) with ScreenCaptureKit (captures even occluded/off-screen windows). appMatch: bundle id, pid, or case-insensitive app-name substring — \"\" or \"*\" = all apps. windowMatch: case-insensitive window-title substring — \"\" or \"*\" = all windows (on-screen preferred). Optionally OCRs each image. maxScreenshots caps the count (server cap 10). Needs Screen Recording.",
+            "description": "Screenshot specific app window(s) with ScreenCaptureKit (captures even occluded/off-screen windows). appMatch (REQUIRED): exact pid, or a case-insensitive substring of the bundle id or app name — \"\" or \"*\" = all apps. windowMatch: case-insensitive window-title substring — \"\" or \"*\" = all windows (on-screen preferred). onScreenOnly limits to on-screen windows (default false, so minimized/hidden windows still capture). excludeZeroAlpha drops fully transparent windows (default true). Optionally OCRs each image. maxScreenshots caps the count (server cap 10). Needs Screen Recording.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
-                    "appMatch": ["type": "string", "description": "Bundle id, pid, or app-name substring. \"\"/\"*\" = all."],
+                    "appMatch": ["type": "string", "description": "REQUIRED. Exact pid, or a case-insensitive substring of the bundle id or app name. \"\"/\"*\" = all."],
                     "windowMatch": ["type": "string", "description": "Window-title substring. \"\"/\"*\" = all."],
+                    "onScreenOnly": ["type": "boolean", "description": "Only windows currently on screen (default false — minimized/hidden windows capture too)."],
+                    "excludeZeroAlpha": ["type": "boolean", "description": "Drop fully transparent (alpha 0) windows (default true)."],
                     "performOCR": ["type": "boolean", "description": "OCR each screenshot and include the text (default false)."],
                     "maxScreenshots": ["type": "integer", "description": "Max screenshots to take (default 5, server cap 10)."],
                     "targetFolder": ["type": "string", "description": "Absolute folder to save PNGs (created if missing, never auto-deleted). Omit for a temporary location."]
-                ]
+                ],
+                "required": ["appMatch"]
             ]
         ]
     }
 
     public func call(_ arguments: [String: Any]) -> String {
         guard hasScreenRecording() else { return CaptureTools.screenRecordingError() }
-        let appMatch = CaptureTools.matcherArgument(arguments, "appMatch")
         let windowMatch = CaptureTools.matcherArgument(arguments, "windowMatch")
+        let onScreenOnly = (arguments["onScreenOnly"] as? Bool) ?? false
+        let excludeZeroAlpha = (arguments["excludeZeroAlpha"] as? Bool) ?? true
         let performOCR = (arguments["performOCR"] as? Bool) ?? false
         let limit = CaptureTools.clampMaxScreenshots(ToolArguments.strictNumber(arguments, for: "maxScreenshots")?.intValue)
 
@@ -263,15 +327,26 @@ public struct ScreenshotAppWindowTool: Tool {
         case .failed(let reason): return JSONText.from(["error": reason])
         }
 
-        guard let content = SCKCapture.shareableContent() else {
+        // Checked after the output folder: an unusable folder fails the call no matter what
+        // appMatch says, so it is the more useful of two errors to report first.
+        let appMatch: String
+        switch CaptureTools.requiredMatcher(arguments, "appMatch") {
+        case .pattern(let pattern): appMatch = pattern
+        case .missing: return CaptureTools.missingMatcherError("appMatch")
+        case .invalid: return CaptureTools.invalidMatcherError("appMatch")
+        }
+
+        guard let content = SCKCapture.shareableContent(onScreenWindowsOnly: onScreenOnly) else {
             return JSONText.from(["error": "capture_unavailable",
                                   "howToFix": "Could not read the window list (Screen Recording may be denied or the capture service is unavailable)."])
         }
         let displays = CaptureTools.displayInfos(from: content)
+        let alphas = CaptureTools.windowAlphas()
 
         // Normal app windows only (layer 0 with an owning app); on-screen first, then app + title.
         let candidates = content.windows
             .filter { $0.windowLayer == 0 && $0.owningApplication != nil }
+            .filter { CaptureTools.passesAlphaFilter(alphas[$0.windowID], excludeZeroAlpha: excludeZeroAlpha) }
             .filter { window in
                 guard let app = window.owningApplication else { return false }
                 return CaptureTools.appMatches(appMatch, appName: app.applicationName,
@@ -468,24 +543,42 @@ public struct ListAppWindowsTool: Tool {
 
     public var descriptor: [String: Any] {
         ["name": name,
-         "description": "List on-screen and off-screen app windows (id, title, app, bundle id, pid, frame, display, onScreen). appMatch (bundle id/pid/app-name substring, \"\"/\"*\" = all) filters. Feed matches to screenshot_app_window. Window titles need Screen Recording.",
+         "description": "List app windows (id, title, app, bundle id, pid, frame, display, onScreen, alpha). appMatch (REQUIRED): exact pid, or a case-insensitive substring of the bundle id or app name — \"\" or \"*\" = all apps. windowMatch: case-insensitive window-title substring — \"\"/\"*\" = all. onScreenOnly limits to on-screen windows (default true; pass false to include minimized/hidden ones). excludeZeroAlpha drops fully transparent windows (default true). Feed matches to screenshot_app_window. Window titles need Screen Recording.",
          "inputSchema": ["type": "object",
-                         "properties": ["appMatch": ["type": "string", "description": "Bundle id, pid, or app-name substring. \"\"/\"*\" = all."]]]]
+                         "properties": [
+                            "appMatch": ["type": "string", "description": "REQUIRED. Exact pid, or a case-insensitive substring of the bundle id or app name. \"\"/\"*\" = all."],
+                            "windowMatch": ["type": "string", "description": "Window-title substring. \"\"/\"*\" = all."],
+                            "onScreenOnly": ["type": "boolean", "description": "Only windows currently on screen (default true)."],
+                            "excludeZeroAlpha": ["type": "boolean", "description": "Drop fully transparent (alpha 0) windows (default true)."]
+                         ],
+                         "required": ["appMatch"]]]
     }
 
     public func call(_ arguments: [String: Any]) -> String {
         guard hasScreenRecording() else { return CaptureTools.screenRecordingError() }
-        let appMatch = CaptureTools.matcherArgument(arguments, "appMatch")
-        guard let content = SCKCapture.shareableContent() else {
+        let appMatch: String
+        switch CaptureTools.requiredMatcher(arguments, "appMatch") {
+        case .pattern(let pattern): appMatch = pattern
+        case .missing: return CaptureTools.missingMatcherError("appMatch")
+        case .invalid: return CaptureTools.invalidMatcherError("appMatch")
+        }
+        let windowMatch = CaptureTools.matcherArgument(arguments, "windowMatch")
+        let onScreenOnly = (arguments["onScreenOnly"] as? Bool) ?? true
+        let excludeZeroAlpha = (arguments["excludeZeroAlpha"] as? Bool) ?? true
+
+        guard let content = SCKCapture.shareableContent(onScreenWindowsOnly: onScreenOnly) else {
             return JSONText.from(["error": "capture_unavailable"])
         }
         let displays = CaptureTools.displayInfos(from: content)
+        let alphas = CaptureTools.windowAlphas()
         let windows = content.windows
             .filter { $0.windowLayer == 0 && $0.owningApplication != nil }
+            .filter { CaptureTools.passesAlphaFilter(alphas[$0.windowID], excludeZeroAlpha: excludeZeroAlpha) }
             .filter { window in
                 guard let app = window.owningApplication else { return false }
                 return CaptureTools.appMatches(appMatch, appName: app.applicationName,
                                                bundleId: app.bundleIdentifier, pid: app.processID)
+                    && CaptureTools.substringMatch(windowMatch, window.title ?? "")
             }
             .sorted { lhs, rhs in
                 if lhs.isOnScreen != rhs.isOnScreen { return lhs.isOnScreen }
@@ -504,6 +597,9 @@ public struct ListAppWindowsTool: Tool {
                               "width": Int(window.frame.width), "height": Int(window.frame.height)]
                 ]
                 if let display = CaptureTools.displayName(for: window, in: displays) { entry["display"] = display }
+                // Omitted rather than defaulted when the window is missing from the alpha snapshot:
+                // "we did not observe it" must not read as "it is opaque".
+                if let alpha = alphas[window.windowID] { entry["alpha"] = alpha }
                 return entry
             }
         return JSONText.from(["windows": windows])
