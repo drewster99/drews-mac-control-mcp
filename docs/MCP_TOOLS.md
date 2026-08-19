@@ -4,6 +4,29 @@ _Server `mac-control-mcp` v0.2.26 · MCP protocol 2025-06-18 · generated from a
 
 > This file is generated from the server's own `tools/list` output. Regenerate after changing any tool descriptor.
 
+## How `identity` resolves, and how to read `matchedBy`
+
+`app`, `control_app` and `kill` share one cascade: **exact pid → exact bundle id → exact app name →
+substring of bundle id or app name → window title**. Exact tiers run first, so a precise identity is
+never widened.
+
+The substring tier **ranks** rather than giving up the moment two apps match. Strongest first:
+a bundle-id component that IS the string (`Devices` in `com.apple.dt.Devices`), then a prefix, then
+the start of a word in the name (`Hub` in `Device Hub`), then a plain substring. Ties break toward
+the frontmost app, then the shortest name. Only a genuine tie returns `ambiguous`, and then the
+candidates are ordered best-first with `matched` carrying the true total.
+
+Two deliberate limits:
+
+- The substring tier considers **foreground apps only**. With Safari closed, `"Safari"` is a
+  substring of `com.apple.SafariBookmarksSyncAgent`; resolving to that would drive an invisible
+  agent and, on the `control_app` path, silently replace the launch you wanted. Agents remain
+  reachable by exact name, exact bundle id, or window title.
+- Every success carries **`matchedBy`** (`pid` / `bundleId` / `name` / `substring` / `windowTitle`).
+  Read it. A `windowTitle` match means the app was chosen only because one of its windows displays
+  that text — a browser tab containing "Simulator" makes `app("Simulator")` resolve to the browser —
+  so those responses also carry a `note` saying so.
+
 ## The `guidance` field
 
 Several results carry a `guidance` array — plain lines naming the calls worth making next, built
@@ -278,7 +301,7 @@ Curated, name-first snapshot of an app: header (name/pid/bundle id), window titl
 |-----------|------|----------|-------------|
 | `identity` | string | **yes** | Exact pid, or a case-insensitive substring of the bundle id or app name (same matching as `list_app_windows` appMatch), or a window-title substring. Exact matches win; several matches return `ambiguous` with candidates. |
 | `activate` | boolean | no | Bring the app to the front + focus (default true). Set false to read without stealing focus. |
-| `window` | string | no | Optional window title to treat as the active window (else main/focused/first). |
+| `window` | string | no | Optional window title to treat as the active window (else main/focused/first). Exact title first, else a CASE-SENSITIVE substring; if several windows fit, the first is used and the response says so. |
 | `timeout` | number | no | Seconds to read the tree (default 10). |
 
 ### `control_app`
@@ -287,7 +310,7 @@ Resolve an app by exact pid, a case-insensitive substring of its bundle id or ap
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `window` | string | no | Optional exact (case-sensitive) window title to scope to one window. On miss, the error carries `availableWindows` with the untruncated titles. |
+| `window` | string | no | Optional window title to scope to one window — EXACT and case-sensitive here (unlike `app`, which also accepts a substring). On miss, the error carries `availableWindows` with the untruncated titles. |
 | `identity` | string | **yes** | Exact pid, or a case-insensitive substring of the bundle id or app name (same matching as `list_app_windows` appMatch), or a window-title substring. Exact matches win; several matches return `ambiguous` with candidates. |
 | `timeout` | number | no | Seconds to spend loading the tree (default 10). Unreached nodes show as [N hidden]. |
 | `maxLines` | number | no | Max hierarchy lines to return (default 1200, max 20000). Any cut is reported inline. Prefer scoping with `window` over raising this. |

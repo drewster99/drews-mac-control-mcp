@@ -268,7 +268,7 @@ public struct ControlAppTool: Tool {
                 "type": "object",
                 "properties": [
                     "identity": ["type": "string", "description": "Exact pid, or a case-insensitive substring of the bundle id or app name (same matching as list_app_windows appMatch), or a window-title substring. Exact matches win; several matches return `ambiguous` with candidates."],
-                    "window": ["type": "string", "description": "Optional exact (case-sensitive) window title to scope to one window."],
+                    "window": ["type": "string", "description": "Optional window title to scope to one window — EXACT and case-sensitive here (unlike `app`, which also accepts a substring). A miss returns window_not_found with the available titles."],
                     "timeout": ["type": "number", "description": "Seconds to spend loading the tree (default 10). Unreached nodes show as [N hidden]."],
                     "maxLines": ["type": "number", "description": "Max hierarchy lines to return (default 1200, max 20000). Any cut is reported inline. Prefer scoping with `window` over raising this."],
                     "maxChars": ["type": "number", "description": "Max hierarchy characters to return (default 40000, max 500000). This is the cap that usually bites: one node can carry a huge value (a terminal's scrollback), so a small tree can still exceed what the client accepts."]
@@ -296,7 +296,9 @@ public struct ControlAppTool: Tool {
         let maxChars = min(max(Int(ToolArguments.double(arguments, for: "maxChars")
                                    ?? Double(ControlRenderer.defaultMaxChars)), 200), 500_000)
 
-        func walkAndRespond(pid: pid_t, bundleId: String, name: String, launched: Bool, timing: [String: Any]?) -> String {
+        func walkAndRespond(pid: pid_t, bundleId: String, name: String, launched: Bool,
+                            timing: [String: Any]?,
+                            matchedBy: AppResolver.MatchedBy? = nil) -> String {
             let walkStart = Date()
             let app = AXElement.application(pid: pid)
             app.setMessagingTimeout(5)
@@ -318,6 +320,8 @@ public struct ControlAppTool: Tool {
             let pending = Guidance.pendingContent(in: tree)
             if !pending.isEmpty { obj["guidance"] = Guidance.pendingContentLines(pending) }
             if launched { obj["launched"] = true }
+            if let matchedBy { obj["matchedBy"] = matchedBy.rawValue }
+            if matchedBy == .windowTitle { obj["note"] = AppResolver.windowTitleMatchWarning(name: name) }
             if var timing {
                 timing["walkMs"] = Int(Date().timeIntervalSince(walkStart) * 1000)
                 obj["_timing"] = timing
@@ -325,7 +329,8 @@ public struct ControlAppTool: Tool {
             return JSONText.from(obj)
         }
 
-        func appCase(_ pid: pid_t, _ bundleId: String, _ name: String) -> String {
+        func appCase(_ pid: pid_t, _ bundleId: String, _ name: String,
+                     _ matchedBy: AppResolver.MatchedBy) -> String {
             if let windowArg, !AppResolver.hasWindow(pid: pid, title: windowArg) {
                 // Matching is exact and case-sensitive, but the titles a caller can easily obtain are
                 // elided for display — so hand back the full untruncated list to choose from rather
@@ -340,13 +345,14 @@ public struct ControlAppTool: Tool {
                     "availableWindows": available
                 ])
             }
-            return walkAndRespond(pid: pid, bundleId: bundleId, name: name, launched: false, timing: nil)
+            return walkAndRespond(pid: pid, bundleId: bundleId, name: name, launched: false,
+                                  timing: nil, matchedBy: matchedBy)
         }
 
         // Fast tiers first (pid / bundle id / name) — NOT the slow window-title scan yet.
         switch AppResolver.resolve(identity: identity, includeWindowTitle: false) {
-        case .app(let pid, let bundleId, let name):
-            return appCase(pid, bundleId, name)
+        case .app(let pid, let bundleId, let name, let matchedBy):
+            return appCase(pid, bundleId, name, matchedBy)
         case .ambiguous(let candidates, let total):
             return JSONText.from(["success": false, "error": "ambiguous", "matched": total,
                                 "candidates": candidates.map {
@@ -368,8 +374,8 @@ public struct ControlAppTool: Tool {
 
         // Launch failed (not an installed app) → maybe `identity` is a window-title substring of a
         // running app. Now do the slow tier as a last resort.
-        if case .app(let pid, let bundleId, let name) = AppResolver.resolve(identity: identity, includeWindowTitle: true) {
-            return appCase(pid, bundleId, name)
+        if case .app(let pid, let bundleId, let name, let matchedBy) = AppResolver.resolve(identity: identity, includeWindowTitle: true) {
+            return appCase(pid, bundleId, name, matchedBy)
         }
         return JSONText.from(["success": false, "error": "no_match", "_timing": timing,
                             "howToFix": "No running app matched, and launching \"\(identity)\" failed — check the app name, bundle id, or path."])
@@ -1304,7 +1310,7 @@ public struct AppTool: Tool {
                 "type": "object",
                 "properties": [
                     "identity": ["type": "string", "description": "Exact pid, or a case-insensitive substring of the bundle id or app name (same matching as list_app_windows appMatch), or a window-title substring. Exact matches win; several matches return `ambiguous` with candidates."],
-                    "window": ["type": "string", "description": "Optional window title to treat as the active window (else main/focused/first)."],
+                    "window": ["type": "string", "description": "Optional window title to treat as the active window (else main/focused/first). Exact title first, else a CASE-SENSITIVE substring; if several windows fit, the first is used and the response says so."],
                     "activate": ["type": "boolean", "description": "Bring the app to the front + focus (default true). Set false to read without stealing focus."],
                     "timeout": ["type": "number", "description": "Seconds to read the tree (default 10)."]
                 ],
@@ -1340,7 +1346,7 @@ public struct AppTool: Tool {
             return JSONText.from(["success": false, "error": "ambiguous", "matched": total,
                                 "candidates": candidates.map { ["pid": Int($0.pid), "name": $0.name, "bundleId": $0.bundleId] },
                                 "howToFix": ambiguityAdvice(shown: candidates.count, total: total)])
-        case .app(let pid, let bundleId, let name):
+        case .app(let pid, let bundleId, let name, let matchedBy):
             if activate { NSRunningApplication(processIdentifier: pid)?.activate() }
             let app = AXElement.application(pid: pid)
             app.setMessagingTimeout(5)
@@ -1355,10 +1361,26 @@ public struct AppTool: Tool {
             let activeHint = windowArgument ?? (matchedByWindowTitle ? identity : nil)
             let summary = AppProjection.project(tree: tree, name: name, pid: Int(pid), bundleId: bundleId,
                                                 activeWindowTitle: activeHint)
-            return JSONText.from(["success": true, "pid": Int(pid), "name": name, "bundleId": bundleId,
+            var response: [String: Any] = ["success": true, "pid": Int(pid), "name": name,
+                                "bundleId": bundleId, "matchedBy": matchedBy.rawValue,
                                 "summary": AppRenderer.render(summary),
                                 "guidance": Guidance.forAppSummary(summary,
-                                                                   pending: Guidance.pendingContent(in: tree))])
+                                                                   pending: Guidance.pendingContent(in: tree))]
+            if matchedBy == .windowTitle {
+                response["note"] = AppResolver.windowTitleMatchWarning(name: name)
+            }
+            // The `window` hint is a substring, so it can fit several windows; the first is used.
+            // Silently choosing one of three is exactly the kind of thing a caller cannot see.
+            if let windowArgument {
+                let windowNodes = tree.children.filter { AppProjection.windowTypes.contains($0.type) }
+                let fits = AppProjection.windowsMatching(windowNodes, hint: windowArgument)
+                if fits > 1 {
+                    response["note"] = "window \"\(windowArgument)\" fits \(fits) windows; using "
+                        + "\(summary.activeWindow.map { "\"\($0.title)\"" } ?? "the first"). "
+                        + "Pass a longer title to choose a different one."
+                }
+            }
+            return JSONText.from(response)
         }
     }
 }

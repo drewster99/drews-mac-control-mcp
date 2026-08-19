@@ -793,7 +793,7 @@ public struct KillTool: Tool {
             pid = parsed
         } else {
             switch AppResolver.resolve(identity: identity) {
-            case .app(let resolved, _, _):
+            case .app(let resolved, _, _, _):
                 pid = resolved
             case .ambiguous(let candidates, let total):
                 return JSONText.from(["success": false, "error": "ambiguous", "matched": total,

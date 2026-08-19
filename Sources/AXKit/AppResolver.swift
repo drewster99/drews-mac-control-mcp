@@ -23,8 +23,15 @@ public enum AppResolver {
         public let windowTitles: [String]
     }
 
+    /// How an identity was matched. Reported to the caller because the tiers are not equally
+    /// trustworthy: a window-title match can select an app that merely displays the word — a
+    /// browser tab containing "Simulator" makes `app("Simulator")` resolve to the browser.
+    public enum MatchedBy: String {
+        case pid, bundleId, name, substring, windowTitle
+    }
+
     public enum Resolution {
-        case app(pid: pid_t, bundleId: String, name: String)
+        case app(pid: pid_t, bundleId: String, name: String, matchedBy: MatchedBy)
         case noMatch
         /// `candidates` is capped for readability and cost; `total` is how many actually matched,
         /// so a caller is never told "3 matched" when 40 did.
@@ -59,30 +66,106 @@ public enum AppResolver {
         Candidate(pid: app.pid, name: app.name, bundleId: app.bundleId, windowTitles: windowTitles)
     }
 
-    private static func resolved(_ app: RunningApp) -> Resolution {
-        .app(pid: app.pid, bundleId: app.bundleId, name: app.name)
+    private static func resolved(_ app: RunningApp, by matchedBy: MatchedBy) -> Resolution {
+        .app(pid: app.pid, bundleId: app.bundleId, name: app.name, matchedBy: matchedBy)
     }
 
     /// One tier's verdict: exactly one match resolves, several are ambiguous, none lets the
     /// cascade continue. Foreground apps win a tie — a background helper that shares a name or a
     /// bundle-id prefix (Messages' AssistantExtension, Safari's PlatformSupport helper) must not
     /// shadow the app the caller meant.
-    private static func outcome(for matches: [RunningApp]) -> Resolution? {
+    private static func outcome(for matches: [RunningApp], by matchedBy: MatchedBy) -> Resolution? {
         guard !matches.isEmpty else { return nil }
         let regular = matches.filter(\.isRegular)
         let preferred = regular.isEmpty ? matches : regular
-        if preferred.count == 1 { return resolved(preferred[0]) }
-        return .ambiguous(candidates: bounded(preferred), total: preferred.count)
+        if preferred.count == 1 { return resolved(preferred[0], by: matchedBy) }
+        // Equally exact matches still deserve an order: the app in front first, then the shortest
+        // name, so the caller's first read is the likeliest answer.
+        let ordered = preferred.sorted { lhs, rhs in
+            if lhs.isFrontmost != rhs.isFrontmost { return lhs.isFrontmost }
+            if lhs.name.count != rhs.name.count { return lhs.name.count < rhs.name.count }
+            return lhs.pid < rhs.pid
+        }
+        return .ambiguous(candidates: bounded(ordered), total: ordered.count)
     }
 
-    /// A substring tier's verdict, foreground apps only. A loose match must never land on a
-    /// background helper: with Safari closed, "Safari" is a substring of
-    /// com.apple.SafariBookmarksSyncAgent, and resolving to that agent would drive an invisible
-    /// process — and on the control_app path would silently replace the launch the caller wanted.
-    /// Menu-bar and agent apps stay reachable the precise ways: exact name, exact bundle id, or a
-    /// window title.
-    private static func foregroundOutcome(for matches: [RunningApp]) -> Resolution? {
-        outcome(for: matches.filter(\.isRegular))
+    /// Said out loud whenever an app was chosen only because one of its windows displays the text.
+    /// Nothing else in the result would reveal that `app("Simulator")` landed on a browser showing
+    /// a tab with that word in its title.
+    public static func windowTitleMatchWarning(name: String) -> String {
+        "Matched \(name) only because one of its windows contains that text — a browser tab or "
+        + "document title can contain anything. If that is the wrong app, re-call with its name, "
+        + "bundle id, or pid."
+    }
+
+    /// How well an identity matches an app, strongest first. A substring can select a dozen apps,
+    /// so the difference between "Devices" naming a bundle component and merely appearing inside
+    /// some other app's id is the difference between an answer and a shrug.
+    enum MatchStrength: Int, Comparable {
+        case substring = 0      // "ice" in "Devices"
+        case wordBoundary       // "Hub" starts a word in "Device Hub"
+        case prefix             // "Device" starts "Device Hub", or a bundle component
+        case componentExact     // "Devices" IS a component of com.apple.dt.Devices
+
+        static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    }
+
+    /// The best way `identity` matches this app across its name and bundle id, or nil if it
+    /// doesn't. Case-insensitive throughout, like every other tier.
+    static func strength(of app: RunningApp, for identity: String) -> MatchStrength? {
+        let needle = identity.lowercased()
+        let name = app.name.lowercased()
+        let bundleComponents = app.bundleId.lowercased().split(separator: ".").map(String.init)
+
+        guard name.contains(needle) || app.bundleId.lowercased().contains(needle) else { return nil }
+
+        if bundleComponents.contains(needle) { return .componentExact }
+        if name.hasPrefix(needle) || bundleComponents.contains(where: { $0.hasPrefix(needle) }) {
+            return .prefix
+        }
+        // A word in the display name starting with the needle — "Hub" for "Device Hub". Split on
+        // the separators a human sees, so "iPhone-17" and "Photo Booth" both behave.
+        let words = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        if words.contains(where: { $0.hasPrefix(needle) }) { return .wordBoundary }
+        return .substring
+    }
+
+    /// Rank matches best-first: strength, then the app the user is looking at, then the tightest
+    /// match (a needle that covers more of a shorter name is likelier the one meant), then pid for
+    /// a stable order. Used both to pick a winner and to order the candidates when we can't.
+    static func ranked(_ apps: [RunningApp], for identity: String) -> [(app: RunningApp, strength: MatchStrength)] {
+        apps.compactMap { app in strength(of: app, for: identity).map { (app, $0) } }
+            .sorted { lhs, rhs in
+                if lhs.strength != rhs.strength { return lhs.strength > rhs.strength }
+                if lhs.app.isFrontmost != rhs.app.isFrontmost { return lhs.app.isFrontmost }
+                if lhs.app.name.count != rhs.app.name.count { return lhs.app.name.count < rhs.app.name.count }
+                return lhs.app.pid < rhs.app.pid
+            }
+    }
+
+    /// The substring tier: rank every foreground app that matches and pick a winner when there is
+    /// a reason to prefer one — a strictly stronger match, or, among equally strong ones, the single
+    /// app the user is actually looking at. Anything else is a coin flip, and driving the wrong app
+    /// is worse than asking which.
+    ///
+    /// Foreground apps only. A loose match must never land on a background helper: with Safari
+    /// closed, "Safari" is a substring of com.apple.SafariBookmarksSyncAgent, and resolving to that
+    /// would drive an invisible process — and on the control_app path would silently replace the
+    /// launch the caller wanted. Menu-bar and agent apps stay reachable the precise ways: exact
+    /// name, exact bundle id, or a window title.
+    private static func bestSubstringMatch(_ apps: [RunningApp], _ identity: String) -> Resolution? {
+        let matches = ranked(apps.filter(\.isRegular), for: identity)
+        guard let best = matches.first else { return nil }
+
+        let tiedAtTop = matches.filter { $0.strength == best.strength }
+        if tiedAtTop.count == 1 { return resolved(best.app, by: .substring) }
+
+        // Equally strong matches, but the user is looking at exactly one of them.
+        let frontmost = tiedAtTop.filter { $0.app.isFrontmost }
+        if frontmost.count == 1 { return resolved(frontmost[0].app, by: .substring) }
+
+        // Genuinely undecidable — hand back every match, best guess first.
+        return .ambiguous(candidates: bounded(matches.map(\.app)), total: matches.count)
     }
 
     /// Candidates for an ambiguous match, bounded twice: how many are listed, and how many are
@@ -109,33 +192,28 @@ public enum AppResolver {
         if identity.allSatisfy({ $0.isWholeNumber }), let pidInt = Int(identity) {
             guard pidInt > 0, pidInt <= Int(Int32.max),
                   let app = apps.first(where: { $0.pid == pid_t(pidInt) }) else { return .noMatch }
-            return resolved(app)
+            return resolved(app, by: .pid)
         }
 
         // 2. bundle id — exact, then case-insensitive. Duplicate instances via `open -n` are a
         //    real ambiguity: silently picking the first could drive the wrong window.
-        if let hit = outcome(for: apps.filter { $0.bundleId == identity })
-            ?? outcome(for: apps.filter { $0.bundleId.caseInsensitiveCompare(identity) == .orderedSame }) {
+        if let hit = outcome(for: apps.filter { $0.bundleId == identity }, by: .bundleId)
+            ?? outcome(for: apps.filter { $0.bundleId.caseInsensitiveCompare(identity) == .orderedSame }, by: .bundleId) {
             return hit
         }
 
         // 3. app name — exact, then case-insensitive.
-        if let hit = outcome(for: apps.filter { $0.name == identity })
-            ?? outcome(for: apps.filter { $0.name.caseInsensitiveCompare(identity) == .orderedSame }) {
+        if let hit = outcome(for: apps.filter { $0.name == identity }, by: .name)
+            ?? outcome(for: apps.filter { $0.name.caseInsensitiveCompare(identity) == .orderedSame }, by: .name) {
             return hit
         }
 
-        // 4/5. Case-insensitive SUBSTRING of bundle id, then of app name — the same flexibility
-        //    `list_app_windows`' appMatch has, so a matcher that finds an app's windows also
-        //    drives it ("dt.Devices" used to list two windows and resolve to nothing). These run
-        //    AFTER the exact tiers, so a precise identity is never widened, and an app named
-        //    exactly what you asked for always beats one that merely contains it.
-        if let hit = foregroundOutcome(for: apps.filter { $0.bundleId.range(of: identity, options: .caseInsensitive) != nil }) {
-            return hit
-        }
-        if let hit = foregroundOutcome(for: apps.filter { $0.name.range(of: identity, options: .caseInsensitive) != nil }) {
-            return hit
-        }
+        // 4. Case-insensitive SUBSTRING of the bundle id or the app name — the same flexibility
+        //    `list_app_windows`' appMatch has, so a matcher that finds an app's windows also drives
+        //    it ("dt.Devices" used to list two windows and resolve to nothing). Runs AFTER the exact
+        //    tiers, so a precise identity is never widened, and it RANKS rather than giving up the
+        //    moment two apps match (see `bestSubstringMatch`).
+        if let hit = bestSubstringMatch(apps, identity) { return hit }
 
         // 4. window-title fallback — case-insensitive substring (>1 → ambiguous). Restrict the
         // per-app AX scan to apps that actually own an on-screen window (cheap CGWindowList
@@ -152,7 +230,7 @@ public enum AppResolver {
                 matched.append((app: app, titles: titles))
             }
         }
-        if matched.count == 1 { return resolved(matched[0].app) }
+        if matched.count == 1 { return resolved(matched[0].app, by: .windowTitle) }
         if matched.count > 1 {
             return .ambiguous(candidates: matched.prefix(maxAmbiguousCandidates)
                                                  .map { candidate($0.app, windowTitles: $0.titles) },

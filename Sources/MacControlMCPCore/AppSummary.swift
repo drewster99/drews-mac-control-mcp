@@ -65,7 +65,7 @@ public enum AppProjection {
 
     /// Top-level window-like containers. A window's humanized `type` reflects its SUBROLE, so a
     /// Safari window with subrole AXDialog renders as `dialog`, not `window` — match all of them.
-    static let windowTypes: Set<String> = ["window", "dialog", "sheet", "drawer", "popover",
+    public static let windowTypes: Set<String> = ["window", "dialog", "sheet", "drawer", "popover",
                                            "floatingWindow", "systemDialog", "systemFloatingWindow"]
 
     // Each set holds base roles first, then the subrole spellings the same control can surface as.
@@ -106,6 +106,13 @@ public enum AppProjection {
         }
         return AppSummary(name: name, pid: pid, bundleId: bundleId,
                           windows: windows, menus: menus(in: tree), activeWindow: activeWindow)
+    }
+
+    /// How many windows a `window` hint fits. A hint that fits several is a coin flip the caller
+    /// cannot see from the result, so callers report it.
+    public static func windowsMatching(_ windows: [ControlNode], hint: String) -> Int {
+        let exact = windows.filter { $0.label == hint }.count
+        return exact > 0 ? exact : windows.filter { $0.label?.contains(hint) == true }.count
     }
 
     static func activeWindowNode(_ windows: [ControlNode], preferred: String?) -> ControlNode? {

@@ -24,7 +24,7 @@ final class AppResolverTests: XCTestCase {
     }
 
     private func resolvedPid(_ resolution: AppResolver.Resolution) -> pid_t? {
-        if case .app(let pid, _, _) = resolution { return pid }
+        if case .app(let pid, _, _, _) = resolution { return pid }
         return nil
     }
 
@@ -201,6 +201,67 @@ final class AppResolverTests: XCTestCase {
     func testSubstringThatMatchesNothingStillDoesNotResolve() {
         guard case .noMatch = resolve("zzz-not-a-substring", [safari, deviceHub]) else {
             return XCTFail("a substring matching nothing must not resolve")
+        }
+    }
+
+    // MARK: ranking — pick the smartest match, not merely a safe refusal
+
+    private func app(_ pid: pid_t, _ bundleId: String, _ name: String,
+                     regular: Bool = true, frontmost: Bool = false) -> RunningApp {
+        RunningApp(pid: pid, bundleId: bundleId, name: name, isRegular: regular, isFrontmost: frontmost)
+    }
+
+    /// "Devices" IS a component of com.apple.dt.Devices; another app merely containing the letters
+    /// must not tie with it.
+    func testBundleComponentMatchBeatsAPlainSubstring() {
+        let hub = app(1, "com.apple.dt.Devices", "Device Hub")
+        let noise = app(2, "com.example.mydevicesmanager", "Manager")
+        XCTAssertEqual(resolvedPid(resolve("Devices", [noise, hub])), 1)
+    }
+
+    func testPrefixBeatsAMidWordSubstring() {
+        let devices = app(1, "com.a.b", "Device Hub")          // "Device" starts the name
+        let midword = app(2, "com.c.d", "MyDeviceThing")       // contains it mid-word
+        XCTAssertEqual(resolvedPid(resolve("Device", [midword, devices])), 1)
+    }
+
+    func testWordBoundaryBeatsAMidWordSubstring() {
+        let hub = app(1, "com.a.b", "Device Hub")              // "Hub" starts a word
+        let midword = app(2, "com.c.d", "GitHubDesktop")       // contains it mid-word
+        XCTAssertEqual(resolvedPid(resolve("Hub", [midword, hub])), 1)
+    }
+
+    /// Equally strong matches, but the user is looking at one of them — that is a real signal, and
+    /// using it is the difference between an answer and a shrug.
+    func testFrontmostBreaksATieBetweenEquallyStrongMatches() {
+        let one = app(1, "com.a.acme", "Acme One")
+        let two = app(2, "com.b.acme", "Acme Two", frontmost: true)
+        XCTAssertEqual(resolvedPid(resolve("Acme", [one, two])), 2)
+    }
+
+    /// No signal to separate them: refuse, but hand back an ordered list rather than an arbitrary
+    /// one, so the caller's first read is the likeliest answer.
+    func testEquallyStrongWithNoFrontmostStaysAmbiguousButOrdered() {
+        // Neither name equals "Acme", so the exact tiers pass and both land as prefix matches.
+        let long = app(1, "com.a.acme", "Acme Enterprise Suite")
+        let short = app(2, "com.b.acme", "Acme One")
+        guard case .ambiguous(let candidates, let total) = resolve("Acme", [long, short]) else {
+            return XCTFail("two equally strong matches with nothing to separate them are ambiguous")
+        }
+        XCTAssertEqual(total, 2)
+        XCTAssertEqual(candidates.first?.pid, 2, "the tightest match should lead the list")
+    }
+
+    func testResolutionSaysHowItMatched() {
+        let hub = app(5016, "com.apple.dt.Devices", "Device Hub")
+        for (identity, expected) in [("5016", AppResolver.MatchedBy.pid),
+                                     ("com.apple.dt.Devices", .bundleId),
+                                     ("Device Hub", .name),
+                                     ("dt.Devices", .substring)] {
+            guard case .app(_, _, _, let matchedBy) = resolve(identity, [hub]) else {
+                return XCTFail("\(identity) should resolve")
+            }
+            XCTAssertEqual(matchedBy, expected, identity)
         }
     }
 }
