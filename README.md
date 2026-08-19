@@ -27,7 +27,7 @@ Point an MCP client (Claude Code, Codex, Gemini/Antigravity, the MCP Inspector, 
 - **macOS 14 (Sonoma) or later**, Apple Silicon or Intel.
 - **Accessibility** permission granted to the host (prompted on first use).
 - **Screen Recording** permission for the `screenshot` tool (prompted on first capture).
-- To build from source: **Xcode 16+**, and **[XcodeGen](https://github.com/yonsei/XcodeGen)** (`brew install xcodegen`, or let `install.sh` install it) to generate the project from `project.yml`.
+- To build from source: **Xcode 16+**, and **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** (`brew install xcodegen`, or let `install.sh` install it) to generate the project from `project.yml`.
 
 ---
 
@@ -109,7 +109,7 @@ Why this matters: you grant Accessibility **once, to the host**, and every MCP c
 
 That's the whole thing. `install.sh` generates the Xcode project, builds the Release app, code-signs it with your Developer ID, installs it to `/Applications`, launches it (which registers the host LaunchAgent and triggers the macOS permission prompts), and registers the relay with any MCP client (`claude`, `codex`) it finds on your `PATH`. When it finishes, grant **Accessibility** (and **Screen Recording** for screenshots) if you weren't already prompted, and you're ready.
 
-**Prerequisites:** macOS 14+, Xcode 16+, [XcodeGen](https://github.com/yonsei/XcodeGen), and a **Developer ID Application** signing identity in your keychain — the host's XPC Mach service is team-scoped, so ad-hoc signing won't work. If XcodeGen is missing, the script offers to `brew install xcodegen` for you (`--install-deps` accepts up front, for unattended runs).
+**Prerequisites:** macOS 14+, Xcode 16+, [XcodeGen](https://github.com/yonaskolb/XcodeGen), and a **Developer ID Application** signing identity in your keychain — the host's XPC Mach service is team-scoped, so ad-hoc signing won't work. If XcodeGen is missing, the script offers to `brew install xcodegen` for you (`--install-deps` accepts up front, for unattended runs).
 
 Useful flags:
 
