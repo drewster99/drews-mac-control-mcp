@@ -70,9 +70,11 @@ matcher in order," no heuristic type detection:
 1. **All-digits** → treat as `pid`; find the running app with that pid.
 2. **Bundle id** → exact match, then case-insensitive.
 3. **App name** (`localizedName`) → exact match, then case-insensitive.
-4. **Window-title fallback** → any running app owning a window whose title contains
+4. **Bundle id substring** → case-insensitive.
+5. **App name substring** → case-insensitive.
+6. **Window-title fallback** → any running app owning a window whose title contains
    `identity` (**case-insensitive substring**).
-5. No match → `{ "success": false, "error": "no_match" }`.
+7. No match → `{ "success": false, "error": "no_match" }`.
 
 Rules:
 - **Resolution searches all running apps regardless of activation policy** (not just
@@ -80,11 +82,26 @@ Rules:
   *display* filter — that's a display concern, not a resolution one.
 - **Running apps only (v1).** AX needs a live pid. Auto-launch-if-installed is a future
   option, explicitly out of scope now.
-- **Ambiguity is its own outcome.** If step 3 or 4 matches more than one app, return
-  `{ "success": false, "error": "ambiguous", "candidates": [ … ] }` so the model can re-call
-  with a pid. pid and bundle id cannot be ambiguous.
+- **Ambiguity is its own outcome.** If steps 2–6 match more than one app, return
+  `{ "success": false, "error": "ambiguous", "candidates": [ … ], "matched": N }` so the model can
+  re-call with a pid. Only a pid cannot be ambiguous: an exact bundle id can match two instances of
+  the same app (`open -n`), and a bundle-id substring can match many apps at once.
 - **All-digit app names are unreachable by name.** An app literally named `"1234"` is captured
   as a pid by step 1; use its bundle id or pid.
+- **Substring tiers (4–5) match what `list_app_windows`' `appMatch` matches**, so one matcher both
+  finds an app's windows and drives it — `"dt.Devices"` used to list two windows and resolve to
+  nothing. They run AFTER the exact tiers, so a precise identity is never widened and an app named
+  exactly what you asked for always beats one that merely contains it.
+- **Substring tiers consider foreground (`.regular`) apps only** — the one exception to the
+  activation-policy rule above. With Safari closed, `"Safari"` is a substring of
+  `com.apple.SafariBookmarksSyncAgent`; resolving to that would drive an invisible agent and, on the
+  `control_app` path, silently replace the launch the caller wanted. Agents remain reachable the
+  precise ways: exact name, exact bundle id, or window title.
+- **Ambiguity is bounded and says so.** A substring can select dozens of apps, and each candidate's
+  window titles cost an AX round-trip (2s messaging timeout), so the candidate list is capped and
+  titles are only read for a short list. The response carries `matched` — the true total — next to
+  the listed candidates, because "3 matched" when 40 did would send the caller picking from a
+  fabricated set.
 - **Matching is intentionally asymmetric.** The title fallback (step 4) is case-insensitive
   *substring* (forgiving discovery); the explicit `window` arg (§4) is case-sensitive *exact*
   (precise selection). This can surprise callers — it's deliberate, not an oversight.

@@ -44,6 +44,13 @@ private func staleRefError(_ ref: String) -> String {
                    "howToFix": "Re-run control_app to refresh refs."])
 }
 
+/// What to do about an ambiguous identity, saying plainly when the list was cut — a caller shown
+/// ten of forty candidates would otherwise read the ten as the whole set and pick from it.
+func ambiguityAdvice(shown: Int, total: Int) -> String {
+    let pick = "Re-call with a pid (unambiguous), or a longer identity that matches only one."
+    return shown < total ? "\(total) apps matched; \(shown) are listed. \(pick)" : pick
+}
+
 /// An app macOS reports as running but gives no process id for — and that owns no window to
 /// recover one from. Accessibility addresses an app solely by pid, so there is nothing to drive.
 private func pidlessAppError(name: String, bundleId: String) -> String {
@@ -256,11 +263,11 @@ public struct ControlAppTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Resolve an app by name, bundle id, pid, or window title and return a compact, ref-bearing UI hierarchy to drive (with action/change_text/change_value/expand/refresh). If no running app matches, it will try to LAUNCH the identity (as a bundle id, app name, or .app path) and then drive it (response includes launched:true). When a container is still holding content back — a device/simulator screen, or children not yet loaded — a `guidance` block names it with the expand call that loads it. Requires Accessibility.",
+            "description": "Resolve an app by exact pid, a case-insensitive substring of its bundle id or app name (the same matching `list_app_windows` uses), or a window title, and return a compact, ref-bearing UI hierarchy to drive (with action/change_text/change_value/expand/refresh). If no running app matches, it will try to LAUNCH the identity (as a bundle id, app name, or .app path) and then drive it (response includes launched:true). When a container is still holding content back — a device/simulator screen, or children not yet loaded — a `guidance` block names it with the expand call that loads it. Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
-                    "identity": ["type": "string", "description": "App name, bundle id, pid, or a window-title substring."],
+                    "identity": ["type": "string", "description": "Exact pid, or a case-insensitive substring of the bundle id or app name (same matching as list_app_windows appMatch), or a window-title substring. Exact matches win; several matches return `ambiguous` with candidates."],
                     "window": ["type": "string", "description": "Optional exact (case-sensitive) window title to scope to one window."],
                     "timeout": ["type": "number", "description": "Seconds to spend loading the tree (default 10). Unreached nodes show as [N hidden]."],
                     "maxLines": ["type": "number", "description": "Max hierarchy lines to return (default 1200, max 20000). Any cut is reported inline. Prefer scoping with `window` over raising this."],
@@ -340,11 +347,12 @@ public struct ControlAppTool: Tool {
         switch AppResolver.resolve(identity: identity, includeWindowTitle: false) {
         case .app(let pid, let bundleId, let name):
             return appCase(pid, bundleId, name)
-        case .ambiguous(let candidates):
-            return JSONText.from(["success": false, "error": "ambiguous",
+        case .ambiguous(let candidates, let total):
+            return JSONText.from(["success": false, "error": "ambiguous", "matched": total,
                                 "candidates": candidates.map {
                                     ["pid": Int($0.pid), "name": $0.name, "bundleId": $0.bundleId, "windowTitles": $0.windowTitles]
-                                }])
+                                },
+                                "howToFix": ambiguityAdvice(shown: candidates.count, total: total)])
         case .noMatch:
             break   // fall through: try launching, then (last resort) the window-title scan
         }
@@ -1291,11 +1299,11 @@ public struct AppTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Curated, name-first snapshot of an app: header (name/pid/bundle id), window titles, non-standard menus + items, and the ACTIVE window's controls grouped by kind — Buttons / Text fields (with values) / Other / Text — with [+N unnamed]/[+N more] elision so nothing is silently hidden. The compact alternative to control_app's full tree; collections are already bounded to visible rows. Resolves `identity` (app name, bundle id, pid, or window title) and brings the app to the front unless `activate:false`. Also returns `guidance`: the verbs that take a ref, any container whose content is not loaded yet (a device/simulator screen announces nothing, so it is named explicitly with the expand call that loads it), and concrete next calls written against this app's own refs. Requires Accessibility.",
+            "description": "Curated, name-first snapshot of an app: header (name/pid/bundle id), window titles, non-standard menus + items, and the ACTIVE window's controls grouped by kind — Buttons / Text fields (with values) / Other / Text — with [+N unnamed]/[+N more] elision so nothing is silently hidden. The compact alternative to control_app's full tree; collections are already bounded to visible rows. Resolves `identity` (exact pid, a case-insensitive substring of the bundle id or app name — the same matching `list_app_windows` uses — or a window title) and brings the app to the front unless `activate:false`. Also returns `guidance`: the verbs that take a ref, any container whose content is not loaded yet (a device/simulator screen announces nothing, so it is named explicitly with the expand call that loads it), and concrete next calls written against this app's own refs. Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
-                    "identity": ["type": "string", "description": "App name, bundle id, pid, or window-title substring."],
+                    "identity": ["type": "string", "description": "Exact pid, or a case-insensitive substring of the bundle id or app name (same matching as list_app_windows appMatch), or a window-title substring. Exact matches win; several matches return `ambiguous` with candidates."],
                     "window": ["type": "string", "description": "Optional window title to treat as the active window (else main/focused/first)."],
                     "activate": ["type": "boolean", "description": "Bring the app to the front + focus (default true). Set false to read without stealing focus."],
                     "timeout": ["type": "number", "description": "Seconds to read the tree (default 10)."]
@@ -1328,9 +1336,10 @@ public struct AppTool: Tool {
         case .noMatch:
             return JSONText.from(["success": false, "error": "no_match", "identity": identity,
                                 "howToFix": "Launch it first with launch_app, or pass a running app's name/bundle id/pid."])
-        case .ambiguous(let candidates):
-            return JSONText.from(["success": false, "error": "ambiguous",
-                                "candidates": candidates.map { ["pid": Int($0.pid), "name": $0.name, "bundleId": $0.bundleId] }])
+        case .ambiguous(let candidates, let total):
+            return JSONText.from(["success": false, "error": "ambiguous", "matched": total,
+                                "candidates": candidates.map { ["pid": Int($0.pid), "name": $0.name, "bundleId": $0.bundleId] },
+                                "howToFix": ambiguityAdvice(shown: candidates.count, total: total)])
         case .app(let pid, let bundleId, let name):
             if activate { NSRunningApplication(processIdentifier: pid)?.activate() }
             let app = AXElement.application(pid: pid)

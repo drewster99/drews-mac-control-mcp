@@ -767,11 +767,11 @@ public struct KillTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Terminate an app by `identity` (pid, app name, or bundle id). With no `signal`, escalates gracefully: SIGHUP → wait 2s → SIGTERM → wait 2s → SIGKILL, stopping as soon as it exits. With `signal` (SIGHUP/SIGINT/SIGTERM/SIGKILL or a number), sends only that one. No Accessibility required.",
+            "description": "Terminate an app by `identity` (exact pid, or a case-insensitive substring of the bundle id or app name — several matches return `ambiguous` and kill nothing). With no `signal`, escalates gracefully: SIGHUP → wait 2s → SIGTERM → wait 2s → SIGKILL, stopping as soon as it exits. With `signal` (SIGHUP/SIGINT/SIGTERM/SIGKILL or a number), sends only that one. No Accessibility required.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
-                    "identity": ["type": "string", "description": "pid, app name, or bundle id."],
+                    "identity": ["type": "string", "description": "Exact pid, or a case-insensitive substring of the bundle id or app name. Exact matches win; if more than one app matches, nothing is killed and the candidates are returned."],
                     "signal": ["type": "string", "description": "Optional single signal (e.g. SIGTERM, SIGKILL, or a number). Omit for graceful SIGHUP→SIGTERM→SIGKILL escalation."]
                 ],
                 "required": ["identity"]
@@ -795,9 +795,10 @@ public struct KillTool: Tool {
             switch AppResolver.resolve(identity: identity) {
             case .app(let resolved, _, _):
                 pid = resolved
-            case .ambiguous(let candidates):
-                return JSONText.from(["success": false, "error": "ambiguous",
-                                   "candidates": candidates.map { ["pid": Int($0.pid), "name": $0.name, "bundleId": $0.bundleId] }])
+            case .ambiguous(let candidates, let total):
+                return JSONText.from(["success": false, "error": "ambiguous", "matched": total,
+                                   "candidates": candidates.map { ["pid": Int($0.pid), "name": $0.name, "bundleId": $0.bundleId] },
+                                   "howToFix": ambiguityAdvice(shown: candidates.count, total: total)])
             case .noMatch:
                 return JSONText.from(["success": false, "error": "no_match", "identity": identity])
             }

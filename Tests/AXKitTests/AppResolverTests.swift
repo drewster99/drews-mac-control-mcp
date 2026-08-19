@@ -74,10 +74,11 @@ final class AppResolverTests: XCTestCase {
 
     func testSameNameOnTwoRegularAppsIsAmbiguous() {
         let second = RunningApp(pid: 99, bundleId: "com.other.devices", name: "Device Hub", isRegular: true, isFrontmost: false)
-        guard case .ambiguous(let candidates) = resolve("Device Hub", [deviceHub, second]) else {
+        guard case .ambiguous(let candidates, let total) = resolve("Device Hub", [deviceHub, second]) else {
             return XCTFail("two regular apps with one name must be ambiguous")
         }
         XCTAssertEqual(Set(candidates.map { $0.pid }), [5016, 99])
+        XCTAssertEqual(total, 2)
     }
 
     func testRegularAppPreferredOverAccessoryOfTheSameName() {
@@ -128,6 +129,78 @@ final class AppResolverTests: XCTestCase {
             } else if let usable {
                 XCTAssertGreaterThan(usable, 0, app.localizedName ?? "(unknown)")
             }
+        }
+    }
+
+    // MARK: substring matching — parity with list_app_windows' appMatch
+
+    /// The gap this closes: `list_app_windows(appMatch: "dt.Devices")` returned two windows while
+    /// `app(identity: "dt.Devices")` returned no_match, for the same app and the same string.
+    func testBundleIdSubstringResolves() {
+        XCTAssertEqual(resolvedPid(resolve("dt.Devices", [safari, deviceHub])), 5016)
+        XCTAssertEqual(resolvedPid(resolve("DT.DEVICES", [safari, deviceHub])), 5016)
+    }
+
+    func testAppNameSubstringResolves() {
+        XCTAssertEqual(resolvedPid(resolve("Hub", [safari, deviceHub])), 5016)
+        XCTAssertEqual(resolvedPid(resolve("safar", [safari, deviceHub])), 1356)
+    }
+
+    /// Precedence is the safety property: adding substring tiers must not let a loose match
+    /// outrank a precise one.
+    func testExactNameBeatsAnotherAppsSubstring() {
+        // "Notes" is this app's exact name, and also a substring of the other's bundle id.
+        let notes = RunningApp(pid: 10, bundleId: "com.apple.Notes", name: "Notes",
+                               isRegular: true, isFrontmost: false)
+        let decoy = RunningApp(pid: 11, bundleId: "com.example.NotesHelperKit", name: "Helper",
+                               isRegular: true, isFrontmost: false)
+        XCTAssertEqual(resolvedPid(resolve("Notes", [decoy, notes])), 10)
+    }
+
+    func testExactBundleIdBeatsASubstringOfAnother() {
+        let exact = RunningApp(pid: 20, bundleId: "com.acme.tool", name: "Tool",
+                               isRegular: true, isFrontmost: false)
+        let longer = RunningApp(pid: 21, bundleId: "com.acme.toolbox", name: "Toolbox",
+                                isRegular: true, isFrontmost: false)
+        XCTAssertEqual(resolvedPid(resolve("com.acme.tool", [longer, exact])), 20)
+    }
+
+    func testForegroundAppWinsOverABackgroundHelperMatchingTheSameSubstring() {
+        let helper = RunningApp(pid: 30, bundleId: "com.apple.SafariPlatformSupport.Helper",
+                                name: "AutoFill", isRegular: false, isFrontmost: false)
+        XCTAssertEqual(resolvedPid(resolve("Safari", [helper, safari])), 1356)
+    }
+
+    /// A substring must never land on a background helper. With Safari closed, "Safari" is a
+    /// substring of com.apple.SafariBookmarksSyncAgent — resolving to that would drive an invisible
+    /// agent, and on the control_app path would silently replace the launch the caller wanted.
+    func testSubstringNeverResolvesToABackgroundOnlyMatch() {
+        let agent = RunningApp(pid: 30, bundleId: "com.apple.SafariBookmarksSyncAgent",
+                               name: "SafariBookmarksSyncAgent", isRegular: false, isFrontmost: false)
+        guard case .noMatch = resolve("Safari", [agent]) else {
+            return XCTFail("a substring matching only a background app must not resolve")
+        }
+        // Precise identities still reach agents, as the design requires.
+        XCTAssertEqual(resolvedPid(resolve("com.apple.SafariBookmarksSyncAgent", [agent])), 30)
+        XCTAssertEqual(resolvedPid(resolve("SafariBookmarksSyncAgent", [agent])), 30)
+    }
+
+    func testSubstringMatchingSeveralAppsIsAmbiguousAndReportsTheTotal() {
+        let apps = (1...15).map {
+            RunningApp(pid: pid_t(100 + $0), bundleId: "com.acme.app\($0)", name: "Acme \($0)",
+                       isRegular: true, isFrontmost: false)
+        }
+        guard case .ambiguous(let candidates, let total) = resolve("com.acme", apps) else {
+            return XCTFail("a substring matching 15 apps must be ambiguous")
+        }
+        XCTAssertEqual(total, 15, "the caller must be told how many actually matched")
+        XCTAssertLessThanOrEqual(candidates.count, 10, "an unreadable list is not a choice")
+        XCTAssertFalse(candidates.isEmpty)
+    }
+
+    func testSubstringThatMatchesNothingStillDoesNotResolve() {
+        guard case .noMatch = resolve("zzz-not-a-substring", [safari, deviceHub]) else {
+            return XCTFail("a substring matching nothing must not resolve")
         }
     }
 }

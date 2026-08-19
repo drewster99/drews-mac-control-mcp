@@ -26,8 +26,17 @@ public enum AppResolver {
     public enum Resolution {
         case app(pid: pid_t, bundleId: String, name: String)
         case noMatch
-        case ambiguous([Candidate])
+        /// `candidates` is capped for readability and cost; `total` is how many actually matched,
+        /// so a caller is never told "3 matched" when 40 did.
+        case ambiguous(candidates: [Candidate], total: Int)
     }
+
+    /// A caller has to be able to read the list and pick from it; forty rows is not a choice.
+    private static let maxAmbiguousCandidates = 10
+    /// Each window-title read is an AX round-trip with a 2s messaging timeout, so a wide substring
+    /// match must not turn into a minute of blocking calls. Past this many candidates the names
+    /// and bundle ids alone have to be enough to choose by.
+    private static let maxCandidatesToTitle = 8
 
     static func windowTitles(pid: pid_t) -> [String] {
         let app = AXElement.application(pid: pid)
@@ -54,6 +63,36 @@ public enum AppResolver {
         .app(pid: app.pid, bundleId: app.bundleId, name: app.name)
     }
 
+    /// One tier's verdict: exactly one match resolves, several are ambiguous, none lets the
+    /// cascade continue. Foreground apps win a tie — a background helper that shares a name or a
+    /// bundle-id prefix (Messages' AssistantExtension, Safari's PlatformSupport helper) must not
+    /// shadow the app the caller meant.
+    private static func outcome(for matches: [RunningApp]) -> Resolution? {
+        guard !matches.isEmpty else { return nil }
+        let regular = matches.filter(\.isRegular)
+        let preferred = regular.isEmpty ? matches : regular
+        if preferred.count == 1 { return resolved(preferred[0]) }
+        return .ambiguous(candidates: bounded(preferred), total: preferred.count)
+    }
+
+    /// A substring tier's verdict, foreground apps only. A loose match must never land on a
+    /// background helper: with Safari closed, "Safari" is a substring of
+    /// com.apple.SafariBookmarksSyncAgent, and resolving to that agent would drive an invisible
+    /// process — and on the control_app path would silently replace the launch the caller wanted.
+    /// Menu-bar and agent apps stay reachable the precise ways: exact name, exact bundle id, or a
+    /// window title.
+    private static func foregroundOutcome(for matches: [RunningApp]) -> Resolution? {
+        outcome(for: matches.filter(\.isRegular))
+    }
+
+    /// Candidates for an ambiguous match, bounded twice: how many are listed, and how many are
+    /// worth an AX read for their window titles.
+    private static func bounded(_ apps: [RunningApp]) -> [Candidate] {
+        let shown = Array(apps.prefix(maxAmbiguousCandidates))
+        let titlesAffordable = shown.count <= maxCandidatesToTitle
+        return shown.map { candidate($0, windowTitles: titlesAffordable ? windowTitles(pid: $0.pid) : []) }
+    }
+
     /// `includeWindowTitle` gates tier 4 — the window-title substring match. That tier is **slow**:
     /// it AX-queries every running app's windows (up to a 2s messaging timeout each), so callers that
     /// will fall back to launching should resolve with it OFF first (fast pid/bundle/name), and only
@@ -73,27 +112,29 @@ public enum AppResolver {
             return resolved(app)
         }
 
-        // 2. bundle id — exact, then case-insensitive (>1 → ambiguous)
-        var byBundle = apps.filter { $0.bundleId == identity }
-        if byBundle.isEmpty { byBundle = apps.filter { $0.bundleId.lowercased() == identity.lowercased() } }
-        if byBundle.count == 1 { return resolved(byBundle[0]) }
-        if byBundle.count > 1 {
-            // Duplicate instances via `open -n` are a real ambiguity: silently picking the first
-            // could drive the wrong window. Report candidates like the name/window tiers do.
-            return .ambiguous(byBundle.map { candidate($0, windowTitles: windowTitles(pid: $0.pid)) })
+        // 2. bundle id — exact, then case-insensitive. Duplicate instances via `open -n` are a
+        //    real ambiguity: silently picking the first could drive the wrong window.
+        if let hit = outcome(for: apps.filter { $0.bundleId == identity })
+            ?? outcome(for: apps.filter { $0.bundleId.caseInsensitiveCompare(identity) == .orderedSame }) {
+            return hit
         }
 
-        // 3. app name — exact, then case-insensitive (>1 → ambiguous)
-        var named = apps.filter { $0.name == identity }
-        if named.isEmpty { named = apps.filter { $0.name.lowercased() == identity.lowercased() } }
-        // Background helpers/XPC extensions can share the app's localizedName (e.g. Messages'
-        // AssistantExtension). Prefer foreground (.regular) apps so they don't shadow the real one;
-        // fall back to the full set only when nothing regular matched (the target is itself an agent).
-        let regular = named.filter { $0.isRegular }
-        let preferred = regular.isEmpty ? named : regular
-        if preferred.count == 1 { return resolved(preferred[0]) }
-        if preferred.count > 1 {
-            return .ambiguous(preferred.map { candidate($0, windowTitles: windowTitles(pid: $0.pid)) })
+        // 3. app name — exact, then case-insensitive.
+        if let hit = outcome(for: apps.filter { $0.name == identity })
+            ?? outcome(for: apps.filter { $0.name.caseInsensitiveCompare(identity) == .orderedSame }) {
+            return hit
+        }
+
+        // 4/5. Case-insensitive SUBSTRING of bundle id, then of app name — the same flexibility
+        //    `list_app_windows`' appMatch has, so a matcher that finds an app's windows also
+        //    drives it ("dt.Devices" used to list two windows and resolve to nothing). These run
+        //    AFTER the exact tiers, so a precise identity is never widened, and an app named
+        //    exactly what you asked for always beats one that merely contains it.
+        if let hit = foregroundOutcome(for: apps.filter { $0.bundleId.range(of: identity, options: .caseInsensitive) != nil }) {
+            return hit
+        }
+        if let hit = foregroundOutcome(for: apps.filter { $0.name.range(of: identity, options: .caseInsensitive) != nil }) {
+            return hit
         }
 
         // 4. window-title fallback — case-insensitive substring (>1 → ambiguous). Restrict the
@@ -112,7 +153,11 @@ public enum AppResolver {
             }
         }
         if matched.count == 1 { return resolved(matched[0].app) }
-        if matched.count > 1 { return .ambiguous(matched.map { candidate($0.app, windowTitles: $0.titles) }) }
+        if matched.count > 1 {
+            return .ambiguous(candidates: matched.prefix(maxAmbiguousCandidates)
+                                                 .map { candidate($0.app, windowTitles: $0.titles) },
+                              total: matched.count)
+        }
 
         return .noMatch
     }

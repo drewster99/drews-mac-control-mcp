@@ -89,6 +89,13 @@ def test_calculator(s):
     if not pid:
         return
 
+    # An app appears in the running-apps list the instant it launches, well before its AX tree
+    # exists — a cold `open -g` here used to read an empty tree and abort the section. Wait on the
+    # UI itself with the tool built for it rather than sleeping and hoping.
+    ready = s.call("wait_for", {"pid": pid, "mode": "appears", "role": "AXButton", "timeoutMs": 15000})
+    check("Calculator's UI is ready to read", ready.get("satisfied") is True,
+          f"waitedMs={ready.get('waitedMs')}")
+
     snap = s.call("control_app", {"identity": str(pid)}, timeout=60)
     elements = [l for l in snap.get("hierarchy", "").split("\n") if l.strip() and not l.startswith("//")]
     check("control_app returns a tree", len(elements) > 0, f"{len(elements)} element lines")
