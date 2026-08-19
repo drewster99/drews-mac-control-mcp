@@ -79,8 +79,8 @@ final class GuidanceTests: XCTestCase {
         let lines = Guidance.forAppSummary(summary, pending: Guidance.pendingContent(in: tree))
         let text = lines.joined(separator: "\n")
 
-        XCTAssertTrue(text.contains(#"action("e5", "press")"#), text)
-        XCTAssertTrue(text.contains(#"change_text("e6", "your text")"#), text)
+        XCTAssertTrue(text.contains(#"action(ref: "e5", action: "press")"#), text)
+        XCTAssertTrue(text.contains(#"change_text(ref: "e6", value: "your text")"#), text)
         XCTAssertTrue(text.contains("find_elements(pid: 42"), text)
         XCTAssertTrue(text.contains(#"control_app(identity: "com.apple.Notes")"#), text)
         // Named, so the caller can tell which control a suggestion would hit.
@@ -103,20 +103,20 @@ final class GuidanceTests: XCTestCase {
     func testElementGuidanceNamesTheActionsTheElementReports() {
         let lines = Guidance.forElement(ref: "e14", actions: ["press", "menu"], isSettable: false)
         let text = lines.joined(separator: "\n")
-        XCTAssertTrue(text.contains(#"action("e14", "press")"#), text)
-        XCTAssertTrue(text.contains(#"action("e14", "menu")"#), text)
-        XCTAssertTrue(text.contains(#"click("e14")"#), text)
+        XCTAssertTrue(text.contains(#"action(ref: "e14", action: "press")"#), text)
+        XCTAssertTrue(text.contains(#"action(ref: "e14", action: "menu")"#), text)
+        XCTAssertTrue(text.contains(#"click(ref: "e14")"#), text)
     }
 
     func testSettableElementIsOfferedAWrite() {
         let text = Guidance.forElement(ref: "e10", actions: [], isSettable: true).joined(separator: "\n")
-        XCTAssertTrue(text.contains(#"change_text("e10", "your text")"#), text)
+        XCTAssertTrue(text.contains(#"change_text(ref: "e10", value: "your text")"#), text)
     }
 
     func testActionlessElementFallsBackToClickAndReveal() {
         let text = Guidance.forElement(ref: "e9", actions: [], isSettable: false).joined(separator: "\n")
-        XCTAssertTrue(text.contains(#"click("e9")"#), text)
-        XCTAssertTrue(text.contains(#"reveal("e9")"#), text)
+        XCTAssertTrue(text.contains(#"click(ref: "e9")"#), text)
+        XCTAssertTrue(text.contains(#"reveal(ref: "e9")"#), text)
     }
 
     // MARK: one catalog, two consumers

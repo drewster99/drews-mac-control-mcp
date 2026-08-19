@@ -31,29 +31,29 @@ public enum Guidance {
     /// Verbs that take a `ref` from a hierarchy or summary. Ordered by how often a caller needs
     /// them, not alphabetically — the first few should answer most "what now?" moments.
     public static let refVerbs: [GuidanceVerb] = [
-        .init(call: #"action(ref, "press")"#,
+        .init(call: #"action(ref: "<ref>", action: "press")"#,
               purpose: #"perform an action — press, menu, inc, dec, disclose, collapse, or any label after the "-""#),
-        .init(call: "click(ref)",
-              purpose: "a real click at the element (fronts its app); click(ref, count: 2) double-clicks"),
-        .init(call: #"change_text(ref, "text")"#,
+        .init(call: #"click(ref: "<ref>")"#,
+              purpose: "a real click at the element (fronts its app); add count: 2 to double-click"),
+        .init(call: #"change_text(ref: "<ref>", value: "your text")"#,
               purpose: "set an {editable} field's value directly — fastest, needs no focus"),
-        .init(call: #"type("text", ref: ref)"#,
+        .init(call: #"type(text: "your text", ref: "<ref>")"#,
               purpose: "type into a field for real keystroke behavior (search-as-you-type, validation)"),
-        .init(call: "change_value(ref, 0.5)",
+        .init(call: #"change_value(ref: "<ref>", value: 0.5)"#,
               purpose: "set a numeric value — slider, scrollbar, stepper (0–1, or the shown min–max)"),
-        .init(call: "set_value(ref, value)",
+        .init(call: #"set_value(ref: "<ref>", value: true)"#,
               purpose: "set a checkbox/toggle/switch, or any settable non-text value"),
-        .init(call: "expand(ref)",
+        .init(call: #"expand(ref: "<ref>")"#,
               purpose: "load children that are not in the tree yet ([N hidden], device screens)"),
-        .init(call: "refresh(ref)",
+        .init(call: #"refresh(ref: "<ref>")"#,
               purpose: "discard and re-read a subtree after the UI changed underneath you"),
-        .init(call: "element_detail(ref)",
+        .init(call: #"element_detail(ref: "<ref>")"#,
               purpose: "every attribute of one element — actions, settability, frame, identifier"),
-        .init(call: "reveal(ref)",
+        .init(call: #"reveal(ref: "<ref>")"#,
               purpose: "scroll an off-screen element into view so it can be clicked or read"),
-        .init(call: "focus_keyboard(ref)",
+        .init(call: #"focus_keyboard(ref: "<ref>")"#,
               purpose: "move keyboard focus to an element before sending keys"),
-        .init(call: #"window(ref, "raise")"#,
+        .init(call: #"window(ref: "<ref>", action: "raise")"#,
               purpose: #"window management — "raise", "move", "resize", "minimize", "unminimize""#)
     ]
 
@@ -196,13 +196,13 @@ extension Guidance {
                 let named = entry.label.map { " — \(AppProjection.quote($0))" } ?? ""
                 switch group.name {
                 case AppProjection.buttonsGroup.plural:
-                    steps.append(.init(call: #"action("\#(entry.ref)", "press")"#,
+                    steps.append(.init(call: #"action(ref: "\#(entry.ref)", action: "press")"#,
                                        purpose: "press \(group.itemLabel) 1\(named)"))
                 case AppProjection.textFieldsGroup.plural:
-                    steps.append(.init(call: #"change_text("\#(entry.ref)", "your text")"#,
+                    steps.append(.init(call: #"change_text(ref: "\#(entry.ref)", value: "your text")"#,
                                        purpose: "set \(group.itemLabel) 1\(named)"))
                 case AppProjection.otherGroup.plural:
-                    steps.append(.init(call: #"element_detail("\#(entry.ref)")"#,
+                    steps.append(.init(call: #"element_detail(ref: "\#(entry.ref)")"#,
                                        purpose: "see what \(group.itemLabel) 1\(named) supports"))
                 default:
                     continue
@@ -218,14 +218,14 @@ extension Guidance {
         }
 
         if let menu = summary.menus.first(where: { $0.title != "Apple" }) ?? summary.menus.first {
-            steps.append(.init(call: #"action("\#(menu.ref)", "press")"#,
+            steps.append(.init(call: #"action(ref: "\#(menu.ref)", action: "press")"#,
                                purpose: "open the \(AppProjection.quote(menu.title)) menu — its items load only once opened"))
         }
 
         if let other = summary.windows.first(where: { !$0.isActive }) {
             steps.append(.init(call: #"app(identity: "\#(AppProjection.oneLine(summary.bundleId))", window: \#(AppProjection.quote(other.title)))"#,
                                purpose: "summarize that window instead"))
-            steps.append(.init(call: #"window("\#(other.ref)", "raise")"#, purpose: "bring it to the front"))
+            steps.append(.init(call: #"window(ref: "\#(other.ref)", action: "raise")"#, purpose: "bring it to the front"))
         }
 
         steps.append(.init(call: #"control_app(identity: "\#(AppProjection.oneLine(summary.bundleId))")"#,
@@ -250,21 +250,21 @@ extension Guidance {
             // A custom action label is app-supplied text — escape it so the suggested call stays
             // copy-pasteable even when the label contains a quote.
             let escaped = AppProjection.quote(action)
-            steps.append(.init(call: "action(\(quoted), \(escaped))",
+            steps.append(.init(call: "action(ref: \(quoted), action: \(escaped))",
                                purpose: "perform this element's \(escaped) action"))
         }
         if actions.contains("press") {
-            steps.append(.init(call: "click(\(quoted))",
+            steps.append(.init(call: "click(ref: \(quoted))",
                                purpose: "click it for real instead, if the press does nothing or the wrong thing"))
         }
         if isSettable {
-            steps.append(.init(call: #"change_text(\#(quoted), "your text")"#,
+            steps.append(.init(call: #"change_text(ref: \#(quoted), value: "your text")"#,
                                purpose: "its value is settable — write to it directly"))
         }
         if steps.isEmpty {
-            steps.append(.init(call: "click(\(quoted))",
+            steps.append(.init(call: "click(ref: \(quoted))",
                                purpose: "it reports no AX actions — a real click is the way in"))
-            steps.append(.init(call: "reveal(\(quoted))",
+            steps.append(.init(call: "reveal(ref: \(quoted))",
                                purpose: "if it is off-screen, scroll it into view first"))
         }
         return ["WHAT YOU CAN DO WITH \(quoted):"] + verbLines(steps)

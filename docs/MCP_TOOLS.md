@@ -16,10 +16,19 @@ that misbehaves but a caller that has a ref and guesses which verb takes it.
 | `control_app`, `launch_app` | only what the legend can't know: which containers in THIS tree are still holding content back |
 | `element_detail`, `focused_element`, `element_at`, `find_elements` | the verbs that element actually accepts, from the actions it reports (plus a write when its value is settable) |
 | `list_app_windows` | the `screenshot_app_window` / `app` call for a real row |
-| `screenshot_full_display` | the `ocr` call for the image just written |
+| `screenshot_app_window`, `screenshot_simulator` | the `ocr` call for the image just written, when `performOCR` wasn't asked for |
+| `screenshot_full_display` | the `ocr` call for the image just written (this tool has no OCR of its own) |
 
 Verb signatures come from one catalog (`Guidance.refVerbs`), which also renders the `control_app`
 legend's DRIVE IT block — a verb cannot be documented two ways.
+
+**Every argument is named**, matching the JSON the caller has to send: `change_text(ref: "e10",
+value: "hi")`, not `change_text("e10", "hi")`. Several parameter names are not guessable from the
+verb (`change_text` and `change_value` both take `value`; `window` takes `action`), so a positional
+example would leave exactly the guess the field exists to remove. `GuidanceCallValidityTests`
+checks every catalog line against the assembled server's own `tools/list`: the tool must exist,
+each argument must be a real parameter, required parameters must be present, and nothing may be
+positional.
 
 **A device or simulator screen (`iOSContentGroup`) reports no hidden-child count**, so nothing else
 in a result hints that more can be loaded. Those are always named explicitly, per window, with the

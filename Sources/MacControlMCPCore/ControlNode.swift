@@ -313,26 +313,26 @@ public enum ControlRenderer {
     //     so the returned hierarchy covers the new view. refresh:"none" returns just {ok}.
     //
     // FIND / NAVIGATE / SCROLL (don't re-read the whole tree when you can target):
-    //   jump to a known element → find_elements(pid, query:"text", role:"link", identifier, actionable)
-    //     query substring-matches ANY visible text; role takes the name shown here (link/button/window)
-    //     or the raw AXLink. returns matching refs (usable with every verb here). pid is in the
-    //     control_app result.
-    //   bring an off-screen element into view → reveal(ref), then read/expand it
+    //   jump to a known element → find_elements(pid: <pid>, query: "text", role: "link")
+    //     also takes identifier: and actionable: to narrow further. query substring-matches ANY
+    //     visible text; role takes the name shown here (link/button/window) or the raw AXLink.
+    //     returns matching refs (usable with every verb here). pid is in the control_app result.
+    //   bring an off-screen element into view → reveal(ref: "<ref>"), then read/expand it
     //   after navigating (a click that swaps a pane/sidebar/tab), see the new view via the acting
     //     verb's refresh:"window", or call control_app(...) again
     //
     // RECIPES (→ = a separate tool call; read each result before the next):
-    //   Messages — text "Rachel" "running late": control_app("Messages") →
-    //     find_elements(pid,titleContains:"Rachel") → click(rowRef) →
-    //     type("running late", ref: composeFieldRef) → key("return")
-    //   Safari — new tab to a site: control_app("Safari") → key("cmd+t") →
-    //     type("apple.com", ref: addressFieldRef) → key("return")
-    //   Mail — search "mcp server", open first hit in its own window: control_app("Mail") →
-    //     action(allMessagesRef,"press") → type("mcp server", ref: searchFieldRef) → key("return") →
-    //     click(firstRowRef, count:2)
-    //   Notes — find "Groceries" and append: control_app("Notes") →
-    //     find_elements(pid,titleContains:"Groceries") → click(rowRef) →
-    //     type("\\n- milk", ref: noteBodyRef)
+    //   Messages — text "Rachel" "running late": control_app(identity: "Messages") →
+    //     find_elements(pid: <pid>, query: "Rachel") → click(ref: "<rowRef>") →
+    //     type(text: "running late", ref: "<composeFieldRef>") → key(keys: "return")
+    //   Safari — new tab to a site: control_app(identity: "Safari") → key(keys: "cmd+t") →
+    //     type(text: "apple.com", ref: "<addressFieldRef>") → key(keys: "return")
+    //   Mail — search "mcp server", open first hit in its own window: control_app(identity: "Mail") →
+    //     action(ref: "<allMessagesRef>", action: "press") → type(text: "mcp server", ref: "<searchFieldRef>") →
+    //     key(keys: "return") → click(ref: "<firstRowRef>", count: 2)
+    //   Notes — find "Groceries" and append: control_app(identity: "Notes") →
+    //     find_elements(pid: <pid>, query: "Groceries") → click(ref: "<rowRef>") →
+    //     type(text: "\\n- milk", ref: "<noteBodyRef>")
     //
     // expand/refresh return THIS SAME hierarchy rooted at the ref; action/change_* settle, then
     // return the updated hierarchy one level up.
