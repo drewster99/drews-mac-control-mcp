@@ -52,15 +52,35 @@ public enum AppResolver {
 
     static func windowTitles(pid: pid_t) -> [String] {
         let app = AXElement.application(pid: pid)
-        app.setMessagingTimeout(2)
-        return app.windows.compactMap { $0.title }.filter { !$0.isEmpty }
+        app.setMessagingTimeout(axReadTimeout)
+        defer { app.setMessagingTimeout(0) }
+        // The app element's timeout does NOT reach its children (setMessagingTimeout contract), so
+        // each window is bracketed too — otherwise these reads run at the process-global default
+        // and a wedged app stalls the whole serialized request queue.
+        return app.windows.compactMap { window -> String? in
+            window.setMessagingTimeout(axReadTimeout)
+            defer { window.setMessagingTimeout(0) }
+            return window.title
+        }.filter { !$0.isEmpty }
     }
+
+    /// Per-AX-read ceiling for the title scans. Short on purpose: these run over every window-owning
+    /// app, and the cost is paid before the caller gets anything at all.
+    private static let axReadTimeout: Float = 2
+    /// Whole-scan ceiling for the window-title tier. The per-read bound alone still multiplies by
+    /// the number of on-screen apps (routinely 20–40), and this tier is already the last resort.
+    private static let windowScanBudget: TimeInterval = 10
 
     /// Whether an app owns a window whose title exactly (case-sensitively) matches `title`.
     public static func hasWindow(pid: pid_t, title: String) -> Bool {
         let app = AXElement.application(pid: pid)
-        app.setMessagingTimeout(2)
-        return app.windows.contains { $0.title == title }
+        app.setMessagingTimeout(axReadTimeout)
+        defer { app.setMessagingTimeout(0) }
+        return app.windows.contains { window in
+            window.setMessagingTimeout(axReadTimeout)   // children don't inherit the app's timeout
+            defer { window.setMessagingTimeout(0) }
+            return window.title == title
+        }
     }
 
     /// `windowTitles` is injected rather than fetched here because every caller has already paid (or
@@ -79,7 +99,8 @@ public enum AppResolver {
     /// cascade continue. Foreground apps win a tie — a background helper that shares a name or a
     /// bundle-id prefix (Messages' AssistantExtension, Safari's PlatformSupport helper) must not
     /// shadow the app the caller meant.
-    private static func outcome(for matches: [RunningApp], by matchedBy: MatchedBy) -> Resolution? {
+    private static func outcome(for matches: [RunningApp], by matchedBy: MatchedBy,
+                                readTitles: Bool) -> Resolution? {
         guard !matches.isEmpty else { return nil }
         let regular = matches.filter(\.isRegular)
         let preferred = regular.isEmpty ? matches : regular
@@ -91,7 +112,7 @@ public enum AppResolver {
             if lhs.name.count != rhs.name.count { return lhs.name.count < rhs.name.count }
             return lhs.pid < rhs.pid
         }
-        return .ambiguous(candidates: bounded(ordered), total: ordered.count)
+        return .ambiguous(candidates: bounded(ordered, readTitles: readTitles), total: ordered.count)
     }
 
     /// Said out loud whenever an app was chosen only because one of its windows displays the text.
@@ -101,6 +122,14 @@ public enum AppResolver {
         "Matched \(name) only because one of its windows contains that text — a browser tab or "
         + "document title can contain anything. If that is the wrong app, re-call with its name, "
         + "bundle id, or pid."
+    }
+
+    /// One case rule for the whole cascade. `caseInsensitiveCompare` case-FOLDS — it treats
+    /// "Straßenbahn" as equal to "STRASSENBAHN" — while `lowercased()` does not, so mixing the two made
+    /// the substring tiers strictly stricter than the exact ones: "STRASSEN" failed to match a name
+    /// the resolver had just accepted in full. Folding once, here, keeps every tier agreeing.
+    static func folded(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
 
     /// How well an identity matches an app, strongest first. A substring can select a dozen apps,
@@ -118,11 +147,11 @@ public enum AppResolver {
     /// The best way `identity` matches this app across its name and bundle id, or nil if it
     /// doesn't. Case-insensitive throughout, like every other tier.
     static func strength(of app: RunningApp, for identity: String) -> MatchStrength? {
-        let needle = identity.lowercased()
-        let name = app.name.lowercased()
-        let bundleComponents = app.bundleId.lowercased().split(separator: ".").map(String.init)
+        let needle = folded(identity)
+        let name = folded(app.name)
+        let bundleComponents = folded(app.bundleId).split(separator: ".").map(String.init)
 
-        guard name.contains(needle) || app.bundleId.lowercased().contains(needle) else { return nil }
+        guard name.contains(needle) || folded(app.bundleId).contains(needle) else { return nil }
 
         if bundleComponents.contains(needle) { return .componentExact }
         if name.hasPrefix(needle) || bundleComponents.contains(where: { $0.hasPrefix(needle) }) {
@@ -158,7 +187,8 @@ public enum AppResolver {
     /// would drive an invisible process — and on the control_app path would silently replace the
     /// launch the caller wanted. Menu-bar and agent apps stay reachable the precise ways: exact
     /// name, exact bundle id, or a window title.
-    private static func bestSubstringMatch(_ apps: [RunningApp], _ identity: String) -> Resolution? {
+    private static func bestSubstringMatch(_ apps: [RunningApp], _ identity: String,
+                                           readTitles: Bool) -> Resolution? {
         let matches = ranked(apps.filter(\.isRegular), for: identity)
         guard let best = matches.first else { return nil }
 
@@ -173,15 +203,18 @@ public enum AppResolver {
         }
 
         // Genuinely undecidable — hand back every match, best guess first.
-        return .ambiguous(candidates: bounded(matches.map(\.app)), total: matches.count)
+        return .ambiguous(candidates: bounded(matches.map(\.app), readTitles: readTitles), total: matches.count)
     }
 
     /// Candidates for an ambiguous match, bounded twice: how many are listed, and how many are
     /// worth an AX read for their window titles.
-    private static func bounded(_ apps: [RunningApp]) -> [Candidate] {
-        let shown = Array(apps.prefix(maxAmbiguousCandidates))
-        let titlesAffordable = shown.count <= maxCandidatesToTitle
-        return shown.map { candidate($0, windowTitles: titlesAffordable ? windowTitles(pid: $0.pid) : []) }
+    private static func bounded(_ apps: [RunningApp], readTitles: Bool) -> [Candidate] {
+        Array(apps.prefix(maxAmbiguousCandidates)).enumerated().map { index, app in
+            // Spend the budget on the first rows rather than dropping titles for every row the
+            // moment there is one candidate too many — titles are what let a caller choose.
+            let affordable = readTitles && index < maxCandidatesToTitle
+            return candidate(app, windowTitles: affordable ? windowTitles(pid: app.pid) : [])
+        }
     }
 
     /// `includeWindowTitle` gates tier 4 — the window-title substring match. That tier is **slow**:
@@ -211,14 +244,14 @@ public enum AppResolver {
 
         // 2. bundle id — exact, then case-insensitive. Duplicate instances via `open -n` are a
         //    real ambiguity: silently picking the first could drive the wrong window.
-        if let hit = outcome(for: apps.filter { $0.bundleId == identity }, by: .bundleId)
-            ?? outcome(for: apps.filter { $0.bundleId.caseInsensitiveCompare(identity) == .orderedSame }, by: .bundleId) {
+        if let hit = outcome(for: apps.filter { $0.bundleId == identity }, by: .bundleId, readTitles: includeWindowTitle)
+            ?? outcome(for: apps.filter { folded($0.bundleId) == folded(identity) }, by: .bundleId, readTitles: includeWindowTitle) {
             return hit
         }
 
         // 3. app name — exact, then case-insensitive.
-        if let hit = outcome(for: apps.filter { $0.name == identity }, by: .name)
-            ?? outcome(for: apps.filter { $0.name.caseInsensitiveCompare(identity) == .orderedSame }, by: .name) {
+        if let hit = outcome(for: apps.filter { $0.name == identity }, by: .name, readTitles: includeWindowTitle)
+            ?? outcome(for: apps.filter { folded($0.name) == folded(identity) }, by: .name, readTitles: includeWindowTitle) {
             return hit
         }
 
@@ -227,20 +260,24 @@ public enum AppResolver {
         //    it ("dt.Devices" used to list two windows and resolve to nothing). Runs AFTER the exact
         //    tiers, so a precise identity is never widened, and it RANKS rather than giving up the
         //    moment two apps match (see `bestSubstringMatch`).
-        if let hit = bestSubstringMatch(apps, identity) { return hit }
+        if let hit = bestSubstringMatch(apps, identity, readTitles: includeWindowTitle) { return hit }
 
-        // 4. window-title fallback — case-insensitive substring (>1 → ambiguous). Restrict the
+        // 5. window-title fallback — case-insensitive substring (>1 → ambiguous). Restrict the
         // per-app AX scan to apps that actually own an on-screen window (cheap CGWindowList
         // prefilter), so unresponsive background processes can't each cost the full 2s timeout.
         guard includeWindowTitle else { return .noMatch }
-        let needle = identity.lowercased()
+        let needle = folded(identity)
         let onScreenPIDs = RunningApps.windowOwnerPIDs(onScreenOnly: true)
         // Keep each app's titles alongside the match: the ambiguous branch reports them, and
         // re-reading titles per candidate would repeat the slow AX scan we just performed.
         var matched: [(app: RunningApp, titles: [String])] = []
+        // Bounded overall, not just per read: 20–40 apps own an on-screen window on a working Mac,
+        // and this tier is already the last resort — it must not become the slowest thing we do.
+        let scanDeadline = Date().addingTimeInterval(windowScanBudget)
         for app in apps where onScreenPIDs.contains(app.pid) {
+            guard Date() < scanDeadline else { break }
             let titles = windowTitles(pid: app.pid)
-            if titles.contains(where: { $0.lowercased().contains(needle) }) {
+            if titles.contains(where: { folded($0).contains(needle) }) {
                 matched.append((app: app, titles: titles))
             }
         }

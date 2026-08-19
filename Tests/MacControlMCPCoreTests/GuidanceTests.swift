@@ -204,4 +204,88 @@ final class GuidanceTests: XCTestCase {
         let text = Guidance.nextSteps(for: summary).joined(separator: "\n")
         XCTAssertTrue(text.contains(#"control_app(identity: "com.apple.Notes")"#), text)
     }
+
+    // MARK: regressions found by audit
+
+    /// `String.padding(toLength:)` measures UTF-16 while the column width counts Characters, so it
+    /// TRUNCATED any call whose units exceed its character count — an NFD filename or an emoji in a
+    /// window title — cutting off the closing quote and paren.
+    func testAlignmentNeverTruncatesANonASCIICall() {
+        let nfd = "re\u{0301}sume\u{0301}.pages"          // what the filesystem hands out
+        let long = #"app(identity: "com.apple.Pages", window: "\#(nfd)")"#
+        let lines = Guidance.verbLines([.init(call: long, purpose: "summarize that window"),
+                                        .init(call: #"click(ref: "e1")"#, purpose: "click")])
+        XCTAssertTrue(lines[0].contains(long), "the call was cut: \(lines[0])")
+        XCTAssertTrue(lines[0].contains(#"")"#), "lost its closing quote/paren: \(lines[0])")
+
+        let emoji = #"app(identity: "com.slack", window: "🎉 Release")"#
+        let emojiLines = Guidance.verbLines([.init(call: emoji, purpose: "x"),
+                                             .init(call: "a(ref: \"e1\")", purpose: "y")])
+        XCTAssertTrue(emojiLines[0].contains(emoji), "emoji call was cut: \(emojiLines[0])")
+    }
+
+    /// The window argument used to be the DISPLAY title — truncated at 80 with an ellipsis that no
+    /// real window title contains — so the hint matched nothing and `app` silently returned the
+    /// window the caller already had.
+    func testWindowSuggestionCarriesAMatchableHintNotTheEllipsisedTitle() {
+        let longTitle = String(repeating: "Swift Forums — strict concurrency ", count: 4)
+        let tree = ControlNode(ref: "e1", type: "application", label: "Safari", children: [
+            ControlNode(ref: "e2", type: "window", label: "Main", states: ["main"]),
+            ControlNode(ref: "e3", type: "window", label: longTitle)
+        ])
+        let summary = AppProjection.project(tree: tree, name: "Safari", pid: 9, bundleId: "com.apple.Safari")
+        let text = Guidance.nextSteps(for: summary).joined(separator: "\n")
+        XCTAssertFalse(text.contains("…"), "an ellipsised title cannot match any window: \(text)")
+        let hint = try? XCTUnwrap(summary.windows.first { !$0.isActive }?.matchHint)
+        XCTAssertNotNil(hint)
+        XCTAssertTrue(longTitle.contains(hint ?? "zzz"), "the hint must be a real substring of the title")
+    }
+
+    /// Call arguments must survive a backslash. `AppProjection.quote` escapes quotes only, so a
+    /// title like `regex \u{5C}d+` produced an invalid JSON escape, and one ending in a backslash
+    /// produced an unterminated string literal.
+    func testBackslashesInTitlesDoNotBreakASuggestedCall() {
+        let backslash = "\u{5C}"
+        let title = "AC" + backslash + "DC" + backslash          // AC\DC\
+        let tree = ControlNode(ref: "e1", type: "application", label: "X", children: [
+            ControlNode(ref: "e2", type: "window", label: title, states: ["main"], children: [
+                ControlNode(ref: "e3", type: Guidance.deviceScreenType)
+            ])
+        ])
+        let line = Guidance.pendingContentLines(Guidance.pendingContent(in: tree)).joined(separator: "\n")
+        let escaped = "AC" + backslash + backslash + "DC" + backslash + backslash
+        XCTAssertTrue(line.contains(escaped), "backslashes must be doubled: \(line)")
+        // The literal must still be terminated: an odd trailing backslash would eat the quote.
+        XCTAssertTrue(line.contains(escaped + "\""), "the quoted literal is unterminated: \(line)")
+    }
+
+    /// Windows are identified by base role OR subrole everywhere else; matching on `type` alone
+    /// skipped any window whose subrole humanizes outside the list — and any device screen in it.
+    func testDeviceScreenIsFoundInAWindowWithAnUnusualSubrole() {
+        let tree = ControlNode(ref: "e1", type: "application", label: "Java App", children: [
+            ControlNode(ref: "e2", type: "unknown", role: "window", label: "Main", children: [
+                ControlNode(ref: "e3", type: Guidance.deviceScreenType)
+            ])
+        ])
+        XCTAssertTrue(Guidance.pendingContent(in: tree).contains { $0.ref == "e3" },
+                      "a window whose subrole is unusual still contains its device screen")
+    }
+
+    /// The per-window budget keyed on TITLE, so two Finder windows both called "Documents" shared
+    /// one budget and the second window's unloaded content was dropped entirely.
+    func testTwoWindowsWithTheSameTitleEachGetTheirOwnBudget() {
+        func window(_ ref: String) -> ControlNode {
+            ControlNode(ref: ref, type: "window", label: "Documents", children: [
+                ControlNode(ref: ref + "a", type: "outline", label: "One", hidden: .unknown),
+                ControlNode(ref: ref + "b", type: "table", label: "Two", hidden: .unknown),
+                ControlNode(ref: ref + "c", type: "outline", label: "Three", hidden: .unknown)
+            ])
+        }
+        let tree = ControlNode(ref: "e1", type: "application", label: "Finder",
+                               children: [window("w1"), window("w2")])
+        let pending = Guidance.pendingContent(in: tree)
+        XCTAssertTrue(pending.contains { $0.windowRef == "w1" })
+        XCTAssertTrue(pending.contains { $0.windowRef == "w2" },
+                      "the second same-titled window must not be starved: \(pending.map(\.ref))")
+    }
 }

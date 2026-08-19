@@ -10,28 +10,52 @@ import XCTest
 /// still has to translate.
 final class GuidanceCallValidityTests: XCTestCase {
 
+    /// One tool's schema, reduced to what a guidance line has to satisfy.
+    private struct ToolSchema {
+        let properties: Set<String>
+        let required: Set<String>
+        let types: [String: String]
+    }
+
     private struct ParsedCall {
         let tool: String
         let named: Set<String>
         let positional: Int
+        /// argument name -> the literal as written, so its JSON type can be checked.
+        let literals: [(String, String)]
+    }
+
+    /// The JSON Schema type name a literal would arrive as, or "unknown" for a placeholder.
+    private static func jsonKind(of literal: String) -> String {
+        let text = literal.trimmingCharacters(in: .whitespaces)
+        if text.hasPrefix("\"") { return text.contains("<") ? "unknown" : "string" }
+        if text == "true" || text == "false" { return "boolean" }
+        if text.hasPrefix("[") { return "array" }
+        if Int(text) != nil { return "integer" }
+        if Double(text) != nil { return "number" }
+        return "unknown"
     }
 
     /// Read the descriptors the way a client does — a real `tools/list` over the assembled server.
     /// Listing calls no tool, so this needs no Accessibility or Screen Recording grant.
-    private func toolSchemas() throws -> [String: (properties: Set<String>, required: Set<String>)] {
+    private func toolSchemas() throws -> [String: ToolSchema] {
         let request = #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#
         let data = try XCTUnwrap(makeFullServer().handleLine(request))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let result = try XCTUnwrap(object["result"] as? [String: Any])
         let descriptors = try XCTUnwrap(result["tools"] as? [[String: Any]])
 
-        var schemas: [String: (properties: Set<String>, required: Set<String>)] = [:]
+        var schemas: [String: ToolSchema] = [:]
         for descriptor in descriptors {
             guard let name = descriptor["name"] as? String,
                   let schema = descriptor["inputSchema"] as? [String: Any] else { continue }
             let properties = (schema["properties"] as? [String: Any]).map { Set($0.keys) } ?? []
             let required = Set(schema["required"] as? [String] ?? [])
-            schemas[name] = (properties, required)
+            var types: [String: String] = [:]
+            for (key, value) in (schema["properties"] as? [String: Any]) ?? [:] {
+                if let declared = (value as? [String: Any])?["type"] as? String { types[key] = declared }
+            }
+            schemas[name] = ToolSchema(properties: properties, required: required, types: types)
         }
         return schemas
     }
@@ -58,17 +82,23 @@ final class GuidanceCallValidityTests: XCTestCase {
         if !trailing.isEmpty { arguments.append(trailing) }
 
         var named = Set<String>()
+        var literals: [(String, String)] = []
         var positional = 0
         for argument in arguments {
             guard let colon = argument.firstIndex(of: ":") else { positional += 1; continue }
             let key = String(argument[argument.startIndex..<colon]).trimmingCharacters(in: .whitespaces)
             // A colon inside a quoted value doesn't make it a named argument.
-            if key.allSatisfy({ $0.isLetter || $0 == "_" }), !key.isEmpty { named.insert(key) } else { positional += 1 }
+            if key.allSatisfy({ $0.isLetter || $0 == "_" }), !key.isEmpty {
+                named.insert(key)
+                literals.append((key, String(argument[argument.index(after: colon)...])))
+            } else {
+                positional += 1
+            }
         }
-        return ParsedCall(tool: tool, named: named, positional: positional)
+        return ParsedCall(tool: tool, named: named, positional: positional, literals: literals)
     }
 
-    private func verify(_ call: String, _ schemas: [String: (properties: Set<String>, required: Set<String>)],
+    private func verify(_ call: String, _ schemas: [String: ToolSchema],
                         file: StaticString = #filePath, line: UInt = #line) {
         guard let parsed = parse(call) else {
             return XCTFail("not a parseable call: \(call)", file: file, line: line)
@@ -84,6 +114,17 @@ final class GuidanceCallValidityTests: XCTestCase {
         }
         for missing in schema.required.subtracting(parsed.named) {
             XCTFail("'\(parsed.tool)' requires '\(missing)', absent from: \(call)", file: file, line: line)
+        }
+        // The literal's TYPE has to match too. `set_value(ref: "x", value: true)` named every
+        // parameter correctly and still could not run: the tool declares `value` a string and casts
+        // with `as? String`, so a JSON bool failed with an error naming `ref`.
+        for (argument, literal) in parsed.literals {
+            guard let declared = schema.types[argument] else { continue }
+            let actual = Self.jsonKind(of: literal)
+            guard actual != "unknown" else { continue }
+            XCTAssertEqual(actual, declared,
+                           "'\(parsed.tool)' declares \(argument) as \(declared) but the example passes \(actual): \(call)",
+                           file: file, line: line)
         }
     }
 

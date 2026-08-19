@@ -113,4 +113,37 @@ final class ToolNameDriftTests: XCTestCase {
         XCTAssertEqual(documented.subtracting(live), [], "documented but not a live tool")
         XCTAssertEqual(live.subtracting(documented), [], "live tool with no section in MCP_TOOLS.md")
     }
+
+    /// Tool lookup is `tools.first(where: { $0.name == name })`, so a duplicate name would make one
+    /// of the two permanently unreachable — silently, and only for whichever was registered second.
+    func testToolNamesAreUnique() throws {
+        let request = #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#
+        let data = try XCTUnwrap(makeFullServer().handleLine(request))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let result = try XCTUnwrap(object["result"] as? [String: Any])
+        let names = try XCTUnwrap(result["tools"] as? [[String: Any]]).compactMap { $0["name"] as? String }
+
+        var seen = Set<String>()
+        for name in names where !seen.insert(name).inserted {
+            XCTFail("two tools are registered as '\(name)' — the second is unreachable")
+        }
+        XCTAssertEqual(names.count, seen.count)
+    }
+
+    /// A tool with no description is a tool the caller has to guess at, which is the whole failure
+    /// mode this project keeps running into.
+    func testEveryToolIsDescribedAndTakesAnObject() throws {
+        let request = #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#
+        let data = try XCTUnwrap(makeFullServer().handleLine(request))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let result = try XCTUnwrap(object["result"] as? [String: Any])
+        for descriptor in try XCTUnwrap(result["tools"] as? [[String: Any]]) {
+            let name = (descriptor["name"] as? String) ?? "(unnamed)"
+            XCTAssertFalse(name.isEmpty, "a tool has no name")
+            let description = (descriptor["description"] as? String) ?? ""
+            XCTAssertFalse(description.isEmpty, "\(name) has no description")
+            let schema = descriptor["inputSchema"] as? [String: Any]
+            XCTAssertEqual(schema?["type"] as? String, "object", "\(name)'s inputSchema is not an object")
+        }
+    }
 }

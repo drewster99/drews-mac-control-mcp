@@ -41,8 +41,8 @@ public enum Guidance {
               purpose: "type into a field for real keystroke behavior (search-as-you-type, validation)"),
         .init(call: #"change_value(ref: "<ref>", value: 0.5)"#,
               purpose: "set a numeric value — slider, scrollbar, stepper (0–1, or the shown min–max)"),
-        .init(call: #"set_value(ref: "<ref>", value: true)"#,
-              purpose: "set a checkbox/toggle/switch, or any settable non-text value"),
+        .init(call: #"set_value(ref: "<ref>", value: "1")"#,
+              purpose: "write a raw string to a settable AXValue — value is a STRING here, even for a number"),
         .init(call: #"expand(ref: "<ref>")"#,
               purpose: "load children that are not in the tree yet ([N hidden], device screens)"),
         .init(call: #"refresh(ref: "<ref>")"#,
@@ -75,9 +75,13 @@ public enum Guidance {
 
     /// Render a catalog as aligned `call   purpose` lines.
     public static func verbLines(_ verbs: [GuidanceVerb], indent: String = "  ") -> [String] {
+        // Pad by appending spaces, never `String.padding(toLength:)`: that API measures UTF-16 code
+        // units while `width` counts Characters, so it TRUNCATES any call whose units exceed its
+        // character count — an NFD filename ("résumé.pages") or an emoji in a window title — and the
+        // caller receives a call missing its closing quote and paren.
         let width = verbs.map(\.call.count).max() ?? 0
         return verbs.map { verb in
-            indent + verb.call.padding(toLength: max(width, verb.call.count), withPad: " ", startingAt: 0)
+            indent + verb.call + String(repeating: " ", count: max(0, width - verb.call.count))
                 + "   " + verb.purpose
         }
     }
@@ -89,12 +93,18 @@ public enum Guidance {
     /// complete. Callers guess wrong here more than anywhere else: the summary looks finished.
     public struct PendingContent: Equatable, Sendable {
         public let ref: String
+        /// The window's own ref. The per-window budget keys on this, not the title: two Finder
+        /// windows are both called "Documents", and sharing one budget would drop the second
+        /// window's unloaded content entirely.
+        public let windowRef: String
         public let windowTitle: String
         public let describedAs: String
         public let isDeviceScreen: Bool
 
-        public init(ref: String, windowTitle: String, describedAs: String, isDeviceScreen: Bool) {
+        public init(ref: String, windowRef: String, windowTitle: String,
+                    describedAs: String, isDeviceScreen: Bool) {
             self.ref = ref
+            self.windowRef = windowRef
             self.windowTitle = windowTitle
             self.describedAs = describedAs
             self.isDeviceScreen = isDeviceScreen
@@ -107,39 +117,46 @@ public enum Guidance {
     public static let deviceScreenType = "iOSContentGroup"
 
     private static let maxPendingPerWindow = 3
+    /// Across all windows. Guidance rides on every response, so this section cannot scale with the
+    /// number of windows an app happens to have open.
+    private static let maxPendingTotal = 8
 
     /// Containers worth an `expand`, grouped under the window they belong to. Device screens come
     /// first — they are the ones no other signal reveals.
     public static func pendingContent(in tree: ControlNode) -> [PendingContent] {
         var found: [PendingContent] = []
 
-        func walk(_ node: ControlNode, windowTitle: String) {
+        func walk(_ node: ControlNode, windowRef: String, windowTitle: String) {
             let isDevice = node.type == deviceScreenType
             if isDevice || node.hidden != .none {
                 found.append(PendingContent(ref: node.ref,
+                                            windowRef: windowRef,
                                             windowTitle: windowTitle,
                                             describedAs: describe(node, isDeviceScreen: isDevice),
                                             isDeviceScreen: isDevice))
             }
             for child in node.children {
-                walk(child, windowTitle: windowTitle)
+                walk(child, windowRef: windowRef, windowTitle: windowTitle)
             }
         }
 
-        for window in tree.children where AppProjection.windowTypes.contains(window.type) {
-            walk(window, windowTitle: AppProjection.oneLine(window.label ?? "(untitled)"))
+        for window in AppProjection.windowNodes(in: tree) {
+            walk(window, windowRef: window.ref,
+                 windowTitle: AppProjection.oneLine(window.label ?? "(untitled)"))
         }
 
         // Order first, THEN cap: a device screen is the one thing no other signal reveals, so it
         // must never be crowded out by hidden containers that happened to be walked earlier.
         let ordered = found.filter(\.isDeviceScreen) + found.filter { !$0.isDeviceScreen }
         var perWindow: [String: Int] = [:]
-        return ordered.filter { item in
-            let count = perWindow[item.windowTitle] ?? 0
+        let capped = ordered.filter { item in
+            let count = perWindow[item.windowRef] ?? 0
             guard count < maxPendingPerWindow else { return false }
-            perWindow[item.windowTitle] = count + 1
+            perWindow[item.windowRef] = count + 1
             return true
         }
+        // A 25-window app would otherwise append ~75 lines to EVERY result.
+        return Array(capped.prefix(maxPendingTotal))
     }
 
     private static func describe(_ node: ControlNode, isDeviceScreen: Bool) -> String {
@@ -157,7 +174,8 @@ public enum Guidance {
         guard !pending.isEmpty else { return [] }
         var lines = ["NOT LOADED YET — these containers hold more than is shown:"]
         for item in pending {
-            lines.append("  Window \(AppProjection.quote(item.windowTitle)): call expand(ref: \"\(item.ref)\")   \(item.describedAs)")
+            lines.append("  Window \(JSONText.quotedLiteral(item.windowTitle)) [\(item.windowRef)]: "
+                         + "call expand(ref: \"\(item.ref)\")   \(item.describedAs)")
         }
         if pending.contains(where: { !$0.isDeviceScreen }) {
             lines.append(#"  If expand returns no more, the rows are virtualized — reveal(ref: "<ref>") or scroll first."#)
@@ -225,11 +243,11 @@ extension Guidance {
 
         if let menu = summary.menus.first(where: { $0.title != "Apple" }) ?? summary.menus.first {
             steps.append(.init(call: #"action(ref: "\#(menu.ref)", action: "press")"#,
-                               purpose: "open the \(AppProjection.quote(menu.title)) menu — its items load only once opened"))
+                               purpose: "open the \(JSONText.quotedLiteral(menu.title)) menu — its items load only once opened"))
         }
 
         if let other = summary.windows.first(where: { !$0.isActive }) {
-            steps.append(.init(call: "app(identity: \(identity), window: \(AppProjection.quote(other.title)))",
+            steps.append(.init(call: "app(identity: \(identity), window: \(JSONText.quotedLiteral(other.matchHint)))",
                                purpose: "summarize that window instead"))
             steps.append(.init(call: #"window(ref: "\#(other.ref)", action: "raise")"#, purpose: "bring it to the front"))
         }
@@ -256,7 +274,7 @@ extension Guidance {
         for action in actions.prefix(3) {
             // A custom action label is app-supplied text — escape it so the suggested call stays
             // copy-pasteable even when the label contains a quote.
-            let escaped = AppProjection.quote(action)
+            let escaped = JSONText.quotedLiteral(action)
             steps.append(.init(call: "action(ref: \(quoted), action: \(escaped))",
                                purpose: "perform this element's \(escaped) action"))
         }

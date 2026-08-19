@@ -1378,8 +1378,7 @@ public struct AppTool: Tool {
             // The `window` hint is a substring, so it can fit several windows; the first is used.
             // Silently choosing one of three is exactly the kind of thing a caller cannot see.
             if let windowArgument {
-                let windowNodes = tree.children.filter { AppProjection.windowTypes.contains($0.type) }
-                let fits = AppProjection.windowsMatching(windowNodes, hint: windowArgument)
+                let fits = AppProjection.windowsMatching(AppProjection.windowNodes(in: tree), hint: windowArgument)
                 if fits > 1 {
                     notes.append("window \"\(windowArgument)\" fits \(fits) windows; using "
                         + "\(summary.activeWindow.map { "\"\($0.title)\"" } ?? "the first"). "

@@ -121,6 +121,19 @@ enum CaptureTools {
         return .invalid
     }
 
+    /// A boolean argument, or the error to hand back. `"excludeZeroAlpha": "false"` (a stringified
+    /// bool, which generated tool-calls produce constantly) used to fall through to the DEFAULT —
+    /// true — dropping the very windows the caller asked to keep and then reporting `no_match`.
+    static func boolean(_ arguments: [String: Any], _ key: String, default fallback: Bool) -> (value: Bool, error: String?) {
+        switch ToolArguments.strictBool(arguments, for: key) {
+        case .value(let flag): return (flag, nil)
+        case .absent: return (fallback, nil)
+        case .invalid:
+            return (fallback, JSONText.from(["error": "invalid_\(key)",
+                                             "howToFix": "\(key) must be a JSON boolean (true/false), not a string or number."]))
+        }
+    }
+
     static func missingMatcherError(_ key: String) -> String {
         JSONText.from(["error": "missing_\(key)",
                        "howToFix": "Pass \(key) — an exact pid, or a substring of a bundle id or app name. "
@@ -323,9 +336,12 @@ public struct ScreenshotAppWindowTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard hasScreenRecording() else { return CaptureTools.screenRecordingError() }
         let windowMatch = CaptureTools.matcherArgument(arguments, "windowMatch")
-        let onScreenOnly = (arguments["onScreenOnly"] as? Bool) ?? false
-        let excludeZeroAlpha = (arguments["excludeZeroAlpha"] as? Bool) ?? true
-        let performOCR = (arguments["performOCR"] as? Bool) ?? false
+        let (onScreenOnly, onScreenOnlyError) = CaptureTools.boolean(arguments, "onScreenOnly", default: false)
+        if let onScreenOnlyError { return onScreenOnlyError }
+        let (excludeZeroAlpha, alphaError) = CaptureTools.boolean(arguments, "excludeZeroAlpha", default: true)
+        if let alphaError { return alphaError }
+        let (performOCR, ocrError) = CaptureTools.boolean(arguments, "performOCR", default: false)
+        if let ocrError { return ocrError }
         let limit = CaptureTools.clampMaxScreenshots(ToolArguments.strictNumber(arguments, for: "maxScreenshots")?.intValue)
 
         let outputDir: URL
@@ -583,8 +599,10 @@ public struct ListAppWindowsTool: Tool {
         case .invalid: return CaptureTools.invalidMatcherError("appMatch")
         }
         let windowMatch = CaptureTools.matcherArgument(arguments, "windowMatch")
-        let onScreenOnly = (arguments["onScreenOnly"] as? Bool) ?? true
-        let excludeZeroAlpha = (arguments["excludeZeroAlpha"] as? Bool) ?? true
+        let (onScreenOnly, onScreenOnlyError) = CaptureTools.boolean(arguments, "onScreenOnly", default: true)
+        if let onScreenOnlyError { return onScreenOnlyError }
+        let (excludeZeroAlpha, alphaError) = CaptureTools.boolean(arguments, "excludeZeroAlpha", default: true)
+        if let alphaError { return alphaError }
 
         guard let content = SCKCapture.shareableContent(onScreenWindowsOnly: onScreenOnly) else {
             return JSONText.from(["error": "capture_unavailable"])
@@ -662,7 +680,8 @@ public struct ScreenshotSimulatorTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         let match = CaptureTools.matcherArgument(arguments, "match")
-        let performOCR = (arguments["performOCR"] as? Bool) ?? false
+        let (performOCR, ocrError) = CaptureTools.boolean(arguments, "performOCR", default: false)
+        if let ocrError { return ocrError }
         let limit = CaptureTools.clampMaxScreenshots(ToolArguments.strictNumber(arguments, for: "maxScreenshots")?.intValue)
 
         let outputDir: URL

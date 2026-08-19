@@ -65,6 +65,24 @@ public enum ToolArguments {
         (arguments[key] as? NSNumber)?.doubleValue
     }
 
+    /// Strict JSON-boolean extraction, mirroring `strictNumber`. `as? Bool` accepts numeric 0/1 and
+    /// rejects the string "false" by returning nil — which a `?? default` then turns into the
+    /// OPPOSITE of what the caller asked for, silently. Absent and unusable are separate outcomes so
+    /// a caller can be told which mistake it made.
+    public enum BoolArgument: Equatable {
+        case value(Bool)
+        case absent
+        case invalid
+    }
+
+    public static func strictBool(_ arguments: [String: Any], for key: String) -> BoolArgument {
+        guard let raw = arguments[key] else { return .absent }
+        guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+            return .invalid
+        }
+        return .value(number.boolValue)
+    }
+
     /// Strict JSON-number extraction. JSONSerialization bridges JSON true/false to NSNumber 0/1,
     /// so without the CFBoolean check {"x": true} would click at x=1 (`as? Bool` can't detect
     /// this either — numeric 0/1 NSNumbers bridge to Bool too).
@@ -140,7 +158,9 @@ public enum Shell {
                 // zombie-reserved, and isRunning flips false at that reap — this closes the
                 // pid-reuse window down to the instructions between the read and the kill.
                 if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-                exited.wait()
+                // Bounded: a child wedged in an uninterruptible wait never reaps, and an unbounded
+                // wait here would hold the caller — and in the host, the request lock — forever.
+                if exited.wait(timeout: .now() + 2) == .timedOut { return (-1, box.data) }
             }
         }
         // Bound the drain. The read returns only once EVERY write-end of the pipe closes, so a

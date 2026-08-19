@@ -32,7 +32,12 @@ public struct AppSummary: Equatable, Sendable {
     }
     public struct WindowRef: Equatable, Sendable {
         public let ref: String
+        /// For display: collapsed to one line and truncated with an ellipsis.
         public let title: String
+        /// For passing back as `window:`. The raw title, cut at the first newline and capped
+        /// WITHOUT an ellipsis — the display title's "…" appears in no real window title, so using
+        /// it as an argument silently matches nothing and the caller keeps the window they had.
+        public let matchHint: String
         public let isActive: Bool
     }
     public struct MenuRef: Equatable, Sendable {
@@ -62,6 +67,20 @@ public enum AppProjection {
     static let textFieldsGroup = (plural: "Text fields", singular: "Text field")
     static let otherGroup = (plural: "Other", singular: "Other")
     static let textGroup = (plural: "Text", singular: "Text")
+
+    /// The window-like children of an app node. One definition, because the guidance builder, the
+    /// projection and the ambiguity note must all agree on what counts as a window — matching on
+    /// `type` alone misses a window whose subrole humanizes to something outside the list.
+    public static func windowNodes(in tree: ControlNode) -> [ControlNode] {
+        tree.children.filter { isKind($0, windowTypes) }
+    }
+
+    /// A hint safe to pass back as `window:` — one line, no ellipsis, bounded.
+    static func windowMatchHint(_ label: String?) -> String {
+        let firstLine = (label ?? "").split(separator: "\n", maxSplits: 1,
+                                            omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        return String(firstLine.prefix(60))
+    }
 
     /// Top-level window-like containers. A window's humanized `type` reflects its SUBROLE, so a
     /// Safari window with subrole AXDialog renders as `dialog`, not `window` — match all of them.
@@ -95,10 +114,11 @@ public enum AppProjection {
 
     public static func project(tree: ControlNode, name: String, pid: Int, bundleId: String,
                                activeWindowTitle: String? = nil) -> AppSummary {
-        let windowNodes = tree.children.filter { isKind($0, windowTypes) }
+        let windowNodes = windowNodes(in: tree)
         let active = activeWindowNode(windowNodes, preferred: activeWindowTitle)
         let windows = windowNodes.map { node in
             AppSummary.WindowRef(ref: node.ref, title: oneLine(node.label ?? "(untitled)"),
+                                 matchHint: windowMatchHint(node.label),
                                  isActive: active.map { $0.ref == node.ref } ?? false)
         }
         let activeWindow = active.map {

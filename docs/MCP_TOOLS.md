@@ -4,6 +4,13 @@ _Server `mac-control-mcp` v0.2.26 · MCP protocol 2025-06-18 · generated from a
 
 > This file is generated from the server's own `tools/list` output. Regenerate after changing any tool descriptor.
 
+## Boolean arguments are strict
+
+`onScreenOnly`, `excludeZeroAlpha` and `performOCR` must be JSON booleans. A string (`"false"`) or a
+number (`0`) is rejected with `invalid_<name>` rather than falling back to the default — because the
+default is frequently the OPPOSITE of what was asked for, and the resulting empty result reads as
+"nothing matched" instead of "your argument was ignored".
+
 ## How `identity` resolves, and how to read `matchedBy`
 
 `app`, `control_app` and `kill` share one cascade: **exact pid → exact bundle id → exact app name →
