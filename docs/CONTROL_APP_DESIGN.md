@@ -11,6 +11,10 @@ drive — plus the verbs to drive it (`action`, `change_text`, `change_value`, `
 
 ---
 
+> **Tool names here are design-era.** This document records the design as written; some
+> tools were renamed on the way in (`list_apps` → `list_running_apps`, `ui_snapshot` →
+> `control_app`, `perform` → `action`, `set_focus` → `focus_keyboard`, `open_menu` →
+> `menu_pick`, `type_text` → `type`). [MCP_TOOLS.md](./MCP_TOOLS.md) is the live surface.
 ## 1. Motivation
 
 Every existing AX tool (`ui_snapshot`, `find`, `perform_action`, …) requires a **pid**.

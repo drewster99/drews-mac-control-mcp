@@ -131,7 +131,7 @@ Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
 }
 
 // Run a faceless AppKit loop, NOT dispatchMain(): a launchd agent parked in dispatchMain()
-// never pumps the main run loop, so NSWorkspace.runningApplications (used by list_apps)
+// never pumps the main run loop, so NSWorkspace.runningApplications (used by list_running_apps)
 // freezes at launch time and keeps reporting stale/dead pids. The run loop keeps NSWorkspace
 // live AND drains the main dispatch queue, so XPC delivery is unaffected. LSUIElement +
 // .accessory keep it invisible (no Dock icon, no menu bar).

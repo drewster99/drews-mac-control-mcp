@@ -90,10 +90,15 @@ def test_typing(s):
     s.call("focus_keyboard", {"ref": ref})
     time.sleep(0.3)
 
-    r = s.call("type", {"text": "hello cgevent", "via": "keys"})
+    typed = "hello cgevent"
+    r = s.call("type", {"text": typed, "via": "keys"})
     time.sleep(0.6)  # keystrokes process a beat after posting — read after a settle delay
     val = s.call("element_detail", {"ref": ref}).get("value") or ""
-    check("type(keys) lands in focused field", "ok" in r and "hello cgevent" in val, f"value={val!r}")
+    # `type` reports {success, chars, deferred}; chars is the count it actually posted, so
+    # assert the count as well as the read-back rather than merely that a key is present.
+    check("type(keys) lands in focused field",
+          r.get("success") is True and r.get("chars") == len(typed) and typed in val,
+          f"chars={r.get('chars')}/{len(typed)} value={val!r}")
 
     # ⌘A selects all, delete removes the selection -> empty field. Proves a modifier combo
     # AND a plain keystroke both land (with settle delays for the post→process lag).

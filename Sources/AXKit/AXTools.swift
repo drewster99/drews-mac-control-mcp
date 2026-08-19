@@ -138,7 +138,7 @@ private func resolvedElement(_ session: ElementRegistry, _ ref: String) -> Eleme
                                       "howToFix": "The element was rebuilt; disambiguate among the candidate refs."]))
     case .stale, .unknown:
         return .errorJSON(JSONText.from(["error": "stale_ref", "ref": ref,
-                                      "howToFix": "Re-run ui_snapshot/find_elements to refresh refs."]))
+                                      "howToFix": "Re-run app/control_app or find_elements to refresh refs."]))
     }
 }
 
@@ -285,7 +285,7 @@ public struct ElementDetailTool: Tool {
                                "howToFix": "The element was rebuilt; disambiguate among the candidate refs."])
         case .stale, .unknown:
             return JSONText.from(["error": "stale_ref", "ref": ref,
-                               "howToFix": "Re-run ui_snapshot/find_elements to refresh refs."])
+                               "howToFix": "Re-run app/control_app or find_elements to refresh refs."])
         }
         let maxValueLength = min(max((arguments["maxValueLength"] as? Int) ?? 5000, 1), 100_000)
         let rawValue = element.value ?? ""

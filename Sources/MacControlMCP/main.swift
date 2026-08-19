@@ -7,7 +7,7 @@
 //  two transports.
 //
 //  The JSON-RPC loop runs on a BACKGROUND thread so the main thread is free to run an AppKit
-//  run loop. That run loop is what keeps NSWorkspace.runningApplications (used by list_apps)
+//  run loop. That run loop is what keeps NSWorkspace.runningApplications (used by list_running_apps)
 //  live: a process that just blocks in readLine() on the main thread never pumps the run loop,
 //  so NSWorkspace never services its launch/terminate Mach source and the app list freezes at
 //  launch time (stale pids). This mirrors the XPC host (server off the main thread, run loop
