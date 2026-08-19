@@ -28,6 +28,32 @@ class TestAbort(Exception):
     """A precondition the rest of a test section depends on was not met."""
 
 
+def matches(result):
+    """Rows from a find_elements result. The tool returns {matches, count, diagnostics, guidance};
+    harnesses want the rows, and an error payload yields none rather than raising."""
+    if isinstance(result, dict):
+        return result.get("matches", [])
+    return result or []
+
+
+def screenshot_paths(result):
+    """Paths from any screenshot_* result: {screenshots: [{path, success, ...}], succeeded}."""
+    if not isinstance(result, dict):
+        return []
+    return [entry.get("path") for entry in result.get("screenshots", [])
+            if entry.get("success") and entry.get("path")]
+
+
+def png_size(path):
+    """(width, height) straight from a PNG's IHDR — the capture tools report the file, not its
+    dimensions, and the downscale claim is only meaningful if measured."""
+    with open(path, "rb") as handle:
+        header = handle.read(24)
+    if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
+        return (0, 0)
+    return (int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big"))
+
+
 def first(items, what):
     """items[0], or TestAbort naming what was expected — guards tool results that
     may be an error dict or an empty list rather than the expected match list."""

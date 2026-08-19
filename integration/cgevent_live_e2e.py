@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Live proof of the 6 GLOBAL-INPUT CGEvent verbs (click / scroll / key / type_text / hover /
+Live proof of the 6 GLOBAL-INPUT CGEvent verbs (click_point / scroll / key / type / hover /
 drag) through the real MacControlStdio server.
 
 UNLIKE the AX verbs, these post SYSTEM-WIDE events that land on whatever is frontmost — so
 this harness foregrounds throwaway targets (Calculator, TextEdit) and asks the operator to
 stay hands-off while it runs. Run it ATTENDED. It verifies effects by reading state back:
 
-  type_text -> the focused TextEdit field's value
+  type      -> the focused TextEdit field's value
   key       -> ⌘A then a replacement keystroke collapses the field to one char
-  click     -> clicking a Calculator button's frame updates the display
+  click_point -> clicking a Calculator button's frame updates the display
   drag      -> dragging the title bar moves the window (frame read-back)
   scroll    -> best-effort (scroll offset isn't exposed by the tools): asserts it posts ok
   hover     -> best-effort (cursor position isn't exposed): asserts it posts ok
@@ -24,7 +24,7 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcp_client import MCPServer, ServerDied, RpcTimeout, TestAbort, first
+from mcp_client import MCPServer, ServerDied, RpcTimeout, TestAbort, first, matches
 
 
 def locate_binary():
@@ -53,7 +53,7 @@ def activate(app_name):
 def app_pid(s, bundle_id, timeout=12.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        for a in s.call("list_apps", {}):
+        for a in s.call("list_running_apps", {}):
             if a.get("bundleId") == bundle_id:
                 return a["pid"]
         time.sleep(0.4)
@@ -62,8 +62,8 @@ def app_pid(s, bundle_id, timeout=12.0):
 
 def find_one(s, pid, **kw):
     kw["pid"] = pid
-    r = s.call("find_elements", kw)
-    return r[0] if isinstance(r, list) and r else None
+    rows = matches(s.call("find_elements", kw))
+    return rows[0] if rows else None
 
 
 def window_frame(s, pid):
@@ -72,7 +72,7 @@ def window_frame(s, pid):
 
 
 def test_typing(s):
-    print("TextEdit — type_text + key (focused-field read-back):")
+    print("TextEdit — type + key (focused-field read-back):")
     tmp = os.path.join(tempfile.gettempdir(), f"cg_scratch_{os.getpid()}.txt")
     with open(tmp, "w") as f:
         f.write("seed\n")
@@ -87,13 +87,13 @@ def test_typing(s):
         check("TextEdit text area", False); return
     ref = area["ref"]
     s.call("set_value", {"ref": ref, "value": ""})
-    s.call("set_focus", {"ref": ref})
+    s.call("focus_keyboard", {"ref": ref})
     time.sleep(0.3)
 
-    r = s.call("type_text", {"text": "hello cgevent", "via": "keys"})
+    r = s.call("type", {"text": "hello cgevent", "via": "keys"})
     time.sleep(0.6)  # keystrokes process a beat after posting — read after a settle delay
     val = s.call("element_detail", {"ref": ref}).get("value") or ""
-    check("type_text(keys) lands in focused field", "ok" in r and "hello cgevent" in val, f"value={val!r}")
+    check("type(keys) lands in focused field", "ok" in r and "hello cgevent" in val, f"value={val!r}")
 
     # ⌘A selects all, delete removes the selection -> empty field. Proves a modifier combo
     # AND a plain keystroke both land (with settle delays for the post→process lag).
@@ -107,17 +107,18 @@ def test_typing(s):
     # observe:"settle" on a CGEvent verb (the gap this session closed): type with settle posts,
     # waits for the app to quiesce, and returns the diff — no separate read-after-wait needed.
     s.call("set_value", {"ref": ref, "value": ""})
-    s.call("set_focus", {"ref": ref})
+    s.call("focus_keyboard", {"ref": ref})
     time.sleep(0.3)
-    rs = s.call("type_text", {"text": "settle me", "via": "keys", "observe": "settle", "pid": pid})
+    s.call("type", {"text": "settle me", "via": "keys"})
+    rs = s.call("key", {"keys": "right", "observe": "settle", "pid": pid})
     landed = s.call("element_detail", {"ref": ref}).get("value") or ""
-    check("type_text observe:settle -> diff + text lands",
+    check("key observe:settle -> diff + typed text lands",
           isinstance(rs, dict) and "settledAfterMs" in rs and "diff" in rs and "settle me" in landed,
           f"settledAfterMs={rs.get('settledAfterMs')} value={landed!r}")
 
     # scroll: needs content taller than the view; assert it posts without error (offset unreadable).
     s.call("set_value", {"ref": ref, "value": "\n".join(f"line {i}" for i in range(200))})
-    s.call("set_focus", {"ref": ref})
+    s.call("focus_keyboard", {"ref": ref})
     time.sleep(0.2)
     rs = s.call("scroll", {"dx": 0, "dy": -400})
     check("scroll posts ok (best-effort)", isinstance(rs, dict) and rs.get("ok") is not False
@@ -142,7 +143,7 @@ def test_typing(s):
 
 
 def test_click(s):
-    print("Calculator — click (display read-back):")
+    print("Calculator — click_point (display read-back):")
     subprocess.run(["open", "-a", "Calculator"], check=False)
     pid = app_pid(s, "com.apple.calculator")
     if not pid:
@@ -166,22 +167,22 @@ def test_click(s):
 
     ac = ref_for("AllClear", "Clear")
     if ac:
-        s.call("click", {"x": ac["frame"]["x"] + ac["frame"]["w"] // 2,
-                         "y": ac["frame"]["y"] + ac["frame"]["h"] // 2})
+        s.call("click_point", {"x": ac["frame"]["x"] + ac["frame"]["w"] // 2,
+                               "y": ac["frame"]["y"] + ac["frame"]["h"] // 2})
         time.sleep(0.3)
 
     five = ref_for("Five")
     if five is None:
         raise TestAbort("no Calculator button with identifier 'Five'")
     fr = five["frame"]
-    s.call("click", {"x": fr["x"] + fr["w"] // 2, "y": fr["y"] + fr["h"] // 2})
+    s.call("click_point", {"x": fr["x"] + fr["w"] // 2, "y": fr["y"] + fr["h"] // 2})
     time.sleep(0.4)
     disp = None
-    for e in s.call("find_elements", {"pid": pid, "role": "AXStaticText", "limit": 40}) or []:
+    for e in matches(s.call("find_elements", {"pid": pid, "role": "AXStaticText", "limit": 40})):
         v = s.call("element_detail", {"ref": e["ref"]}).get("value") or ""
         if any(c.isdigit() for c in v):
             disp = v
-    check("click on '5' button -> display shows 5",
+    check("click_point on '5' button -> display shows 5",
           disp is not None and disp.replace("‎", "").strip().endswith("5"), f"display={disp!r}")
 
 

@@ -14,9 +14,9 @@ The binary is auto-located from DerivedData (build the `All` scheme first), or p
 
 | Script | Proves | Targets | Attended? |
 |---|---|---|---|
-| `ax_live_e2e.py` | read (`ui_snapshot`, `find_elements` incl. identifier/actionable filters, `element_detail`, `element_at`, `focused_element`), AX **act** (`perform`/AXPress, `set_value`, `set_focus`, `reveal`, `window` move, `open_menu`), `observe:"settle"`, `wait_for`, `get_changes` value-diff | Calculator (native AppKit), TextEdit | no — background, element-targeted |
-| `capture_sim_electron_e2e.py` | `screenshot` (screen + simulator), downscale, `ocr` (Vision), `sim` (statusbar/appearance), `list_simulators`, Electron read coverage | Booted simulator, screen, Slack/Postman/Discord (already running; launching is opt-in via `E2E_LAUNCH_APPS=1`) | no |
-| `cgevent_live_e2e.py` | the 6 **global-input** verbs — `click`, `scroll`, `key`, `type_text`, `hover`, `drag` — with read-back where observable (typed text, ⌘A+delete→empty, click→display, drag→window frame), plus `type_text` with `observe:"settle"` returning a diff | Calculator + TextEdit (foregrounded) | **YES** — posts system-wide events |
+| `ax_live_e2e.py` | read (`control_app`, `find_elements` incl. identifier/actionable filters, `element_detail`), AX **act** (`action`/AXPress, `set_value`, `focus_keyboard`, `reveal`, `window` move, `menu_pick`), `action refresh:"window"`, `set_value observe:"settle"`, `wait_for`, `get_changes` value-diff | Calculator (native AppKit), TextEdit | no — background, element-targeted |
+| `capture_sim_electron_e2e.py` | `screenshot_full_display` + `screenshot_simulator`, downscale (measured from the PNG), `ocr` (Vision), `sim` (statusbar/appearance), `list_simulators`, Electron read coverage via `control_app` | Booted simulator, screen, Slack/Postman/Discord (already running; launching is opt-in via `E2E_LAUNCH_APPS=1`) | no |
+| `cgevent_live_e2e.py` | the 6 **global-input** verbs — `click_point`, `scroll`, `key`, `type`, `hover`, `drag` — with read-back where observable (typed text, ⌘A+delete→empty, click→display, drag→window frame), plus `key` with `observe:"settle"` returning a diff | Calculator + TextEdit (foregrounded) | **YES** — posts system-wide events |
 
 Run:
 

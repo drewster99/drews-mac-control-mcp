@@ -16,7 +16,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcp_client import MCPServer, ServerDied, RpcTimeout, TestAbort, first
+from mcp_client import MCPServer, ServerDied, RpcTimeout, TestAbort, first, matches, screenshot_paths, png_size
 
 
 def locate_binary():
@@ -63,9 +63,9 @@ def test_simulator(s):
     walk(sims)
     check("list_simulators returns devices", len(booted) > 0, f"{len(booted)} device entries")
 
-    shot = s.call("screenshot", {"target": "simulator"})
-    spath = shot.get("path")
-    check("screenshot simulator -> valid PNG", spath and os.path.exists(spath) and is_png(spath),
+    shot = s.call("screenshot_simulator", {"maxScreenshots": 1}, timeout=90)
+    spath = next(iter(screenshot_paths(shot)), None)
+    check("screenshot_simulator -> valid PNG", spath and os.path.exists(spath) and is_png(spath),
           f"path={spath} bytes={os.path.getsize(spath) if spath and os.path.exists(spath) else 0}")
 
     check("sim statusbar override ok", s.call("sim", {"action": "statusbar"}).get("ok") is True)
@@ -76,11 +76,12 @@ def test_simulator(s):
 
 def test_screen_capture_and_ocr(s):
     print("Mac screen capture + OCR (Screen-Recording grant):")
-    screen = s.call("screenshot", {"target": "screen", "maxDimension": 1400})
-    cpath = screen.get("path")
-    longest = max(screen.get("width", 0), screen.get("height", 0))
-    check("screenshot screen -> valid PNG", cpath and os.path.exists(cpath) and is_png(cpath),
-          f"{screen.get('width')}x{screen.get('height')}")
+    screen = s.call("screenshot_full_display", {"maxDimension": 1400}, timeout=90)
+    cpath = next(iter(screenshot_paths(screen)), None)
+    width, height = png_size(cpath) if cpath and os.path.exists(cpath) else (0, 0)
+    longest = max(width, height)
+    check("screenshot_full_display -> valid PNG", cpath and os.path.exists(cpath) and is_png(cpath),
+          f"{width}x{height}")
     check("screenshot downscale honored (<=1400)", 0 < longest <= 1400, f"longest={longest}")
     if cpath:
         ocr = s.call("ocr", {"path": cpath})
@@ -99,7 +100,7 @@ launched_bundle_id = None
 
 def running_electron_target(s):
     """(name, pid) of the first already-running candidate app, else None."""
-    apps = s.call("list_apps", {})
+    apps = s.call("list_running_apps", {})
     for bid, name in ELECTRON_CANDIDATES:
         hit = next((a for a in apps if a.get("bundleId") == bid), None)
         if hit:
@@ -109,7 +110,7 @@ def running_electron_target(s):
 
 def launch_electron_target(s):
     """Launch the first installed candidate and poll (not a fixed sleep — startup speed
-    varies wildly) until it shows up in list_apps. Records the launched bundle id for
+    varies wildly) until it shows up in list_running_apps. Records the launched bundle id for
     cleanup. Returns (name, pid) or None."""
     global launched_bundle_id
     for bid, name in ELECTRON_CANDIDATES:
@@ -119,7 +120,7 @@ def launch_electron_target(s):
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
             time.sleep(0.5)
-            apps = s.call("list_apps", {})
+            apps = s.call("list_running_apps", {})
             hit = next((a for a in apps if a.get("bundleId") == bid), None)
             if hit:
                 return (name, hit["pid"])
@@ -140,13 +141,12 @@ def test_electron_reads(s):
         target = launch_electron_target(s)
     if target:
         name, pid = target
-        outline = s.call("ui_snapshot", {"pid": pid, "depth": 4}).get("_text", "")
-        nlines = outline.count("\n")
-        check(f"ui_snapshot on {name} (Electron) returns non-trivial tree", nlines >= 5,
-              f"{nlines} outline lines")
-        btns = s.call("find_elements", {"pid": pid, "role": "AXButton", "limit": 50})
-        check(f"find_elements finds controls in {name}", isinstance(btns, list) and len(btns) > 0,
-              f"{len(btns) if isinstance(btns, list) else 0} buttons")
+        outline = s.call("control_app", {"identity": str(pid)}, timeout=90).get("hierarchy", "")
+        nlines = len([l for l in outline.split("\n") if l.strip() and not l.startswith("//")])
+        check(f"control_app on {name} (Electron) returns non-trivial tree", nlines >= 5,
+              f"{nlines} element lines")
+        btns = matches(s.call("find_elements", {"pid": pid, "role": "AXButton", "limit": 50}))
+        check(f"find_elements finds controls in {name}", len(btns) > 0, f"{len(btns)} buttons")
     else:
         check("Electron app available", False, "no Slack/Postman/Discord found")
 

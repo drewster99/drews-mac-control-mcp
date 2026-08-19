@@ -9,17 +9,17 @@ What it proves (contained + safe — it only touches apps it launches in the bac
 the AX act verbs are element-targeted, never global CGEvents):
 
   Calculator (native AppKit):
-    - list_apps / ui_snapshot / find_elements (read)
+    - list_running_apps / control_app / find_elements (read)
     - find_elements by exact AXIdentifier, by `actionable`, identifier in rows  (the filters
       that make modern apps — whose controls have no AXTitle — actually addressable)
-    - perform / AXPress -> the display updates
-    - perform observe:"settle" -> structured post-action diff + timing
-    - set_focus, window raise, window move (with frame read-back), open_menu
+    - action / AXPress -> the display updates
+    - action refresh:"window" -> the settled hierarchy comes back
+    - focus_keyboard, window raise, window move (with frame read-back), menu_pick
 
   TextEdit:
-    - set_value (write text, read it back), set_value observe:"settle", set_focus, reveal
+    - set_value (write text, read it back), set_value observe:"settle", focus_keyboard, reveal
 
-The 6 global-input CGEvent verbs (click/scroll/key/type_text/hover/drag) are intentionally
+The 6 global-input CGEvent verbs (click_point/scroll/key/type/hover/drag) are intentionally
 NOT exercised here — they post system-wide events and must be run deliberately.
 
 Usage:  python3 integration/ax_live_e2e.py   (exit 0 = all checks passed)
@@ -32,7 +32,7 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcp_client import MCPServer, ServerDied, RpcTimeout, TestAbort, first
+from mcp_client import MCPServer, ServerDied, RpcTimeout, TestAbort, first, matches
 
 
 def locate_binary():
@@ -55,14 +55,14 @@ def check(name, ok, detail=""):
 
 
 def app_pid(s, bundle_id):
-    for a in s.call("list_apps", {}):
+    for a in s.call("list_running_apps", {}):
         if a.get("bundleId") == bundle_id:
             return a["pid"]
     return None
 
 
 def wait_for_app(s, bundle_id, timeout=12.0):
-    """Poll list_apps until the app appears — cold launches can take several seconds."""
+    """Poll list_running_apps until the app appears — cold launches can take several seconds."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         pid = app_pid(s, bundle_id)
@@ -74,7 +74,7 @@ def wait_for_app(s, bundle_id, timeout=12.0):
 
 def numeric_display(s, pid):
     for role in ("AXStaticText", "AXTextField"):
-        for e in s.call("find_elements", {"pid": pid, "role": role, "limit": 40}) or []:
+        for e in matches(s.call("find_elements", {"pid": pid, "role": role, "limit": 40})):
             v = s.call("element_detail", {"ref": e["ref"]}).get("value") or ""
             if any(c.isdigit() for c in v):
                 return v
@@ -85,49 +85,49 @@ def test_calculator(s):
     print("Calculator (native AppKit):")
     subprocess.run(["open", "-g", "-a", "Calculator"], check=False)
     pid = wait_for_app(s, "com.apple.calculator")
-    check("list_apps finds Calculator", pid is not None, f"pid={pid}")
+    check("list_running_apps finds Calculator", pid is not None, f"pid={pid}")
     if not pid:
         return
 
-    snap = s.call("ui_snapshot", {"pid": pid, "depth": 4})
-    check("ui_snapshot returns a tree", len(snap.get("_text", "")) > 0)
+    snap = s.call("control_app", {"identity": str(pid)}, timeout=60)
+    elements = [l for l in snap.get("hierarchy", "").split("\n") if l.strip() and not l.startswith("//")]
+    check("control_app returns a tree", len(elements) > 0, f"{len(elements)} element lines")
 
-    seven = s.call("find_elements", {"pid": pid, "identifier": "Seven"})
-    check("find_elements by AXIdentifier", isinstance(seven, list) and len(seven) == 1
-          and seven[0].get("identifier") == "Seven")
+    seven = matches(s.call("find_elements", {"pid": pid, "identifier": "Seven"}))
+    check("find_elements by AXIdentifier", len(seven) == 1 and seven[0].get("identifier") == "Seven")
 
-    btns = s.call("find_elements", {"pid": pid, "role": "AXButton", "actionable": True, "limit": 80})
-    check("find_elements actionable=true", isinstance(btns, list) and len(btns) > 0
-          and all(b.get("actions") for b in btns), f"{len(btns)} actionable buttons")
+    btns = matches(s.call("find_elements", {"pid": pid, "role": "AXButton", "actionable": True, "limit": 80}))
+    check("find_elements actionable=true", len(btns) > 0 and all(b.get("actions") for b in btns),
+          f"{len(btns)} actionable buttons")
 
     def ref_for(*idents):
         for ident in idents:
-            e = s.call("find_elements", {"pid": pid, "identifier": ident})
-            if isinstance(e, list) and e:
+            e = matches(s.call("find_elements", {"pid": pid, "identifier": ident}))
+            if e:
                 return e[0]["ref"]
         raise TestAbort(f"no element with identifier in {idents}")
 
-    s.call("perform", {"ref": ref_for("AllClear", "Clear"), "action": "AXPress"})
+    s.call("action", {"ref": ref_for("AllClear", "Clear"), "action": "AXPress"})
     time.sleep(0.2)
-    r7 = s.call("perform", {"ref": ref_for("Seven"), "action": "AXPress"})
+    r7 = s.call("action", {"ref": ref_for("Seven"), "action": "AXPress"})
     time.sleep(0.15)
-    r8 = s.call("perform", {"ref": ref_for("Eight"), "action": "AXPress"})
+    r8 = s.call("action", {"ref": ref_for("Eight"), "action": "AXPress"})
     time.sleep(0.2)
     disp = numeric_display(s, pid)
-    check("perform(AXPress) 7,8 -> display '78'",
+    check("action(AXPress) 7,8 -> display '78'",
           r7.get("ok") and r8.get("ok") and disp and disp.replace("‎", "").strip().endswith("78"),
           f"display={disp!r}")
 
-    s.call("perform", {"ref": ref_for("AllClear", "Clear"), "action": "AXPress"})
+    s.call("action", {"ref": ref_for("AllClear", "Clear"), "action": "AXPress"})
     time.sleep(0.2)
-    rs = s.call("perform", {"ref": ref_for("Nine"), "action": "AXPress", "observe": "settle"})
-    check("perform observe:settle -> diff+timing",
-          "diff" in rs and "settledAfterMs" in rs and "quiesced" in rs,
-          f"settledAfterMs={rs.get('settledAfterMs')}")
+    rs = s.call("action", {"ref": ref_for("Nine"), "action": "AXPress", "refresh": "window"})
+    refreshed = [l for l in rs.get("hierarchy", "").split("\n") if l.strip() and not l.startswith("//")]
+    check("action refresh:window -> settled hierarchy back",
+          rs.get("ok") is True and len(refreshed) > 0, f"{len(refreshed)} element lines")
 
-    check("set_focus", s.call("set_focus", {"ref": ref_for("Five")}).get("ok") is True)
+    check("focus_keyboard", s.call("focus_keyboard", {"ref": ref_for("Five")}).get("ok") is True)
 
-    wins = s.call("find_elements", {"pid": pid, "role": "AXWindow", "limit": 5})
+    wins = matches(s.call("find_elements", {"pid": pid, "role": "AXWindow", "limit": 5}))
     wref = first(wins, "Calculator AXWindow")["ref"]
     mv = s.call("window", {"ref": wref, "action": "move", "x": 120, "y": 120})
     fr = s.call("element_detail", {"ref": wref}).get("frame", {})
@@ -139,8 +139,8 @@ def test_calculator(s):
     rr = s.call("window", {"ref": wref, "action": "raise"})
     print(f"  [info] window raise returned ok={rr.get('ok')}")
 
-    check("open_menu Edit>Copy",
-          s.call("open_menu", {"pid": pid, "path": ["Edit", "Copy"]}).get("ok") is True)
+    check("menu_pick Edit>Copy",
+          s.call("menu_pick", {"pid": pid, "path": ["Edit", "Copy"]}).get("ok") is True)
 
     # wait_for (read-only poll) — an AXButton already exists, so 'appears' is satisfied fast.
     wf = s.call("wait_for", {"pid": pid, "mode": "appears", "role": "AXButton", "timeoutMs": 2000})
@@ -164,8 +164,8 @@ def test_textedit(s):
         if not pid:
             return
         time.sleep(1.0)  # let the document window's AX tree populate
-        areas = s.call("find_elements", {"pid": pid, "role": "AXTextArea", "limit": 5})
-        check("found AXTextArea", isinstance(areas, list) and len(areas) > 0)
+        areas = matches(s.call("find_elements", {"pid": pid, "role": "AXTextArea", "limit": 5}))
+        check("found AXTextArea", len(areas) > 0)
         ref = first(areas, "TextEdit AXTextArea")["ref"]
         check("text area is value-settable",
               s.call("element_detail", {"ref": ref}).get("settable") is True)
@@ -177,7 +177,7 @@ def test_textedit(s):
         rs = s.call("set_value", {"ref": ref, "value": "second value", "observe": "settle"})
         check("set_value observe:settle -> diff", "diff" in rs and "settledAfterMs" in rs)
 
-        check("set_focus", s.call("set_focus", {"ref": ref}).get("ok") is True)
+        check("focus_keyboard", s.call("focus_keyboard", {"ref": ref}).get("ok") is True)
         check("reveal returns structured result", "ok" in s.call("reveal", {"ref": ref}))
 
         # get_changes detects a value change on a standard, identity-stable element — this is
