@@ -96,6 +96,9 @@ Rules:
   `{ "success": false, "error": "app_unreachable", "pid": … }` rather than a `success: true`
   carrying an empty hierarchy, which reads identically to an app that genuinely has no windows.
   A just-launched app is exempt — it can legitimately be mid-layout with nothing drawn yet.
+  `launch_app` reports the neighbouring `app_pid_unavailable` when macOS names an app as running
+  but gives no pid for it and it owns no window to recover one from — a distinct condition from a
+  pid that resolves and then answers nothing.
 
 ```json
 { "success": false, "error": "ambiguous",
