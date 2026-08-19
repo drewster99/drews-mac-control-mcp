@@ -11,6 +11,18 @@
 //  cost the production walker pays — and mints a sequential ref per node (no hidden items).
 //  Subscription is app-level via a raw AXObserver. AX permission required.
 //
+//  NOT BUILT BY THE XCODE PROJECT. This target exists only in Package.swift (SPM), pinned to
+//  Swift 5 because its measurement singletons don't satisfy Swift 6 strict concurrency. The `All`
+//  scheme never compiles it, so nothing here is verified by the build or the test suite — treat it
+//  as a historical spike whose conclusions already live in docs/ROADMAP.md.
+//
+//  Consequently it carries its own app enumeration (`regularApps`, `resolveApp`) rather than
+//  MacControlMCPCore's `RunningApps.current()`, and so does NOT get the repair for apps whose pid
+//  AppKit withholds — Xcode's Device Hub launched from a non-standard bundle reports
+//  `processIdentifier == -1`, which makes `resolveApp("<its real pid>")` return nil and a
+//  measure-all pass walk nothing for it. If this is ever resurrected, add MacControlMCPCore as a
+//  dependency and delete the duplicate enumeration rather than patching the pid reads one by one.
+//
 
 import AppKit
 import ApplicationServices
