@@ -130,10 +130,10 @@ func isNotification(_ line: String) -> Bool {
 /// changes and the app surfaces a re-register banner, so a stale host is short-lived.
 func noteHostBuildIfInitialize(request line: String, response: String) {
     guard let reqData = line.data(using: .utf8),
-          let req = (try? JSONSerialization.jsonObject(with: reqData)) as? [String: Any],
+          let req = JSONText.object(reqData) as? [String: Any],
           (req["method"] as? String) == "initialize" else { return }
     guard let respData = response.data(using: .utf8),
-          let resp = (try? JSONSerialization.jsonObject(with: respData)) as? [String: Any],
+          let resp = JSONText.object(respData) as? [String: Any],
           let result = resp["result"] as? [String: Any],
           let serverInfo = result["serverInfo"] as? [String: Any],
           let hostBuildId = serverInfo["buildId"] as? String else { return }

@@ -206,7 +206,13 @@ enum CaptureTools {
     /// (created if missing) that we NEVER auto-prune. `.failed` carries a caller-facing reason.
     static func resolveOutputDirectory(_ targetFolder: String?) -> FolderResolution {
         guard let raw = targetFolder, !raw.isEmpty else {
-            return .ok(dir: CaptureSupport.screenshotsDirectory(), autoPruned: true)
+            do {
+                return .ok(dir: try CaptureSupport.createScreenshotsDirectory(), autoPruned: true)
+            } catch {
+                return .failed(reason: "could not create the temporary screenshots folder "
+                    + "\"\(CaptureSupport.screenshotsDirectory.path)\": \(error.localizedDescription). "
+                    + "Pass targetFolder to write somewhere else.")
+            }
         }
         let expanded = (raw as NSString).expandingTildeInPath
         guard expanded.hasPrefix("/") else {

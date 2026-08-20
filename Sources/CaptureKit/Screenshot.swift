@@ -37,17 +37,24 @@ enum CaptureSupport {
     /// and so macOS's own temp purge (per-user `$TMPDIR`, items untouched for days) is a backstop
     /// even when the host isn't running to prune. Created 0700 — the captures can contain sensitive
     /// screen content, so keep them owner-only rather than relying on the temp dir's default mode.
-    static func screenshotsDirectory() -> URL {
-        let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    /// Where default-location captures go. Pure — creating it is `createScreenshotsDirectory()`,
+    /// so a reader (the pruner) never has the side effect of making the thing it came to inspect.
+    static var screenshotsDirectory: URL {
+        URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("maccontrol-screenshots", isDirectory: true)
-        try? FileManager.default.createDirectory(
+    }
+
+    /// Creates the directory (0700) and returns it.
+    ///
+    /// Throws rather than swallowing: if this fails, EVERY capture in the call then fails with an
+    /// opaque per-image "write_failed", which reads as a problem with the screenshot rather than
+    /// with the folder. The caller can say what actually went wrong, once, up front.
+    static func createScreenshotsDirectory() throws -> URL {
+        let dir = screenshotsDirectory
+        try FileManager.default.createDirectory(
             at: dir, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
         return dir
-    }
-
-    static func screenshotPath(prefix: String) -> String {
-        screenshotsDirectory().appendingPathComponent("\(prefix)_\(UUID().uuidString).png").path
     }
 
     struct SimulatorDevice: Equatable { let udid: String; let name: String }
@@ -160,7 +167,7 @@ enum CaptureSupport {
     /// captures (which can contain sensitive screen content) don't accumulate there. Called at the
     /// start of each capture; failures are ignored.
     static func pruneOldScreenshots(maxAge: TimeInterval = 3600) {
-        let dir = screenshotsDirectory()   // only our own subdirectory, never the shared temp root
+        let dir = screenshotsDirectory   // only our own subdirectory, never the shared temp root
         let fileManager = FileManager.default
         let items: [URL]
         do {

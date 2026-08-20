@@ -87,8 +87,24 @@ public final class ActivityConfigStore: @unchecked Sendable {
     /// starts clean instead of fighting the same bad bytes on every load.
     private static func setAsideCorruptFile(at url: URL) {
         let corrupt = url.appendingPathExtension("corrupt")
-        try? FileManager.default.removeItem(at: corrupt)
-        try? FileManager.default.moveItem(at: url, to: corrupt)
+        // A previous .corrupt may or may not exist; only a failure to remove an EXISTING one is
+        // worth reporting, since it is what blocks the move below.
+        if FileManager.default.fileExists(atPath: corrupt.path) {
+            do {
+                try FileManager.default.removeItem(at: corrupt)
+            } catch {
+                DebugLog.event("config_quarantine_failed",
+                               "could not replace \(corrupt.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        do {
+            try FileManager.default.moveItem(at: url, to: corrupt)
+        } catch {
+            // Swallowing this made the doc comment a lie: the bad file stays, so every later load
+            // re-reads the same bytes and re-fails, with nothing anywhere saying why.
+            DebugLog.event("config_quarantine_failed",
+                           "could not set aside \(url.lastPathComponent): \(error.localizedDescription)")
+        }
     }
 
     private static func persist(_ config: ActivityConfig, to fileURL: URL) {

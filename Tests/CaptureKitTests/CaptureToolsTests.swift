@@ -200,4 +200,30 @@ final class CaptureToolsTests: XCTestCase {
             XCTAssertTrue(example.hasSuffix(")"), example)
         }
     }
+
+    /// The default screenshots folder is created up front, and a failure to create it is REPORTED —
+    /// it used to be swallowed with `try?`, after which every capture in the call failed with an
+    /// opaque per-image "write_failed" that read as a problem with the screenshot, not the folder.
+    func testDefaultOutputDirectoryIsCreatedAndUsable() throws {
+        let dir = try CaptureSupport.createScreenshotsDirectory()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path))
+        // Owner-only: captures can contain sensitive screen content.
+        let mode = try FileManager.default.attributesOfItem(atPath: dir.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.int16Value, 0o700)
+
+        // And it is what resolveOutputDirectory hands back when no targetFolder is given.
+        switch CaptureTools.resolveOutputDirectory(nil) {
+        case .ok(let resolved, let autoPruned):
+            XCTAssertEqual(resolved.standardizedFileURL, dir.standardizedFileURL)
+            XCTAssertTrue(autoPruned)
+        case .failed(let reason):
+            XCTFail("the default folder should resolve: \(reason)")
+        }
+    }
+
+    /// Reading the folder must not create it — the pruner asks where captures live, and a getter
+    /// that materialises the thing it came to inspect is a side effect waiting to surprise someone.
+    func testTheDirectoryAccessorHasNoSideEffect() {
+        XCTAssertTrue(CaptureSupport.screenshotsDirectory.path.hasSuffix("maccontrol-screenshots"))
+    }
 }

@@ -332,7 +332,11 @@ final class AppModel: ObservableObject {
             return
         }
         Task { @MainActor in
-            try? await Task.sleep(for: .seconds(timeout))
+            do {
+                try await Task.sleep(for: .seconds(timeout))
+            } catch {
+                return   // cancelled — the work finished, so there is no timeout to report
+            }
             settler.settle(.failure(.timedOut))
         }
         start(proxy, { json in
@@ -352,7 +356,11 @@ final class AppModel: ObservableObject {
     func runIdleRefreshLoop() async {
         while !Task.isCancelled {
             refreshIdle()
-            try? await Task.sleep(for: .seconds(1))
+            do {
+                try await Task.sleep(for: .seconds(1))
+            } catch {
+                return   // cancelled while sleeping — stop the loop rather than spin
+            }
         }
     }
 
@@ -464,11 +472,28 @@ final class AppModel: ObservableObject {
             // Management record, even after the embedded plist's BundleProgram changed — so a
             // rebuild keeps launchd spawning the OLD binary path. Clearing the record first forces
             // launchd to re-read the current plist. (Learned the hard way in the video-scheduler.)
+            // A failed unregister is not fatal on its own — register() below may still succeed —
+            // but it IS the usual reason register then fails, so keep the reason instead of
+            // discarding it and reporting only the downstream symptom.
+            var unregisterFailure: String?
             if agent.status != .notRegistered {
-                try? agent.unregister()
+                do {
+                    try agent.unregister()
+                } catch {
+                    unregisterFailure = error.localizedDescription
+                }
                 Thread.sleep(forTimeInterval: 0.8)   // let launchd tear the old job down
             }
-            try agent.register()
+            do {
+                try agent.register()
+            } catch {
+                if let unregisterFailure {
+                    lastMessage = "Could not clear the old Login Item record (\(unregisterFailure)), "
+                        + "and re-registering then failed: \(error.localizedDescription)"
+                    return
+                }
+                throw error
+            }
             switch agent.status {
             case .enabled:
                 HostLifecycle.terminateStaleHost()

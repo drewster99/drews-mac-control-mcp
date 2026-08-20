@@ -66,12 +66,29 @@ public enum DebugLog {
         bodiesLock.lock(); defer { bodiesLock.unlock() }
         let fileManager = FileManager.default
         if enabled {
-            try? fileManager.createDirectory(at: bodiesMarkerURL.deletingLastPathComponent(),
-                                             withIntermediateDirectories: true)
-            fileManager.createFile(atPath: bodiesMarkerURL.path, contents: nil,
-                                   attributes: [.posixPermissions: 0o600])
+            do {
+                try fileManager.createDirectory(at: bodiesMarkerURL.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+            } catch {
+                event("log_bodies_toggle_failed",
+                      "could not create the marker directory: \(error.localizedDescription)")
+                return
+            }
+            // createFile reports failure by returning false, which was being discarded — the switch
+            // would read as "on" while nothing had been written.
+            if !fileManager.createFile(atPath: bodiesMarkerURL.path, contents: nil,
+                                       attributes: [.posixPermissions: 0o600]) {
+                event("log_bodies_toggle_failed", "could not write \(bodiesMarkerURL.lastPathComponent)")
+            }
         } else {
-            try? fileManager.removeItem(at: bodiesMarkerURL)
+            do {
+                try fileManager.removeItem(at: bodiesMarkerURL)
+            } catch CocoaError.fileNoSuchFile {
+                // Already off — the requested state, not a failure.
+            } catch {
+                event("log_bodies_toggle_failed",
+                      "could not remove \(bodiesMarkerURL.lastPathComponent): \(error.localizedDescription)")
+            }
         }
     }
 
