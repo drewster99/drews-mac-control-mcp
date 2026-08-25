@@ -27,7 +27,8 @@ Point an MCP client (Claude Code, Codex, Gemini/Antigravity, the MCP Inspector, 
 - **macOS 14 (Sonoma) or later**, Apple Silicon or Intel.
 - **Accessibility** permission granted to the host (prompted on first use).
 - **Screen Recording** permission for the `screenshot` tool (prompted on first capture).
-- To build from source: **Xcode 16+**, and **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** (`brew install xcodegen`, or let `install.sh` install it) to generate the project from `project.yml`.
+- Installing from PyPI needs nothing else — the wheel carries a signed, notarized app.
+- To build from source: **Xcode 16+**, **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** (`brew install xcodegen`, or let `install.sh` install it) to generate the project from `project.yml`, and a **Developer ID Application** signing identity — the host's XPC Mach service is team-scoped, so ad-hoc signing won't work.
 
 ---
 
@@ -99,7 +100,28 @@ Why this matters: you grant Accessibility **once, to the host**, and every MCP c
 
 ---
 
-## Build & install
+## Install
+
+### From PyPI (no Xcode, no Developer ID)
+
+```sh
+uvx drews-mac-control-mcp --setup
+```
+
+The wheel carries the signed, notarized app. It installs to `~/Applications` on first run, opens
+it so macOS raises the permission prompts, and prints the client registration command. Grant
+**Accessibility** — and **Screen Recording** if you want screenshots.
+
+Later releases replace the installed app by themselves: the wrapper compares the version it
+carries against the one in `~/Applications` on every launch, so a `uvx` upgrade brings the app
+along with it. Nothing about this path needs Xcode or a signing identity of your own.
+
+Requires macOS 14 or later. The wheel is tagged `macosx_14_0_universal2`, so pip and uv decline to
+install it anywhere else.
+
+---
+
+## Build & install from source
 
 ### One command
 
@@ -144,25 +166,47 @@ swift test             # run the unit tests
 
 > Signing/notarization defaults to a Nuclear Cyborg Developer ID + a `notarytool` keychain profile. Override the identity with `--identity` / `CODESIGN_IDENTITY` and the profile with `--profile` / `NOTARY_PROFILE`. Forks also need to change the bundle ids and the team prefix in `packaging/host.launchagent.plist`.
 
+### Cutting a release
+
+`scripts/build-release.sh` is the other half of `install.sh`: same build and signing steps, but it
+packages the notarized bundle into the PyPI wheel instead of installing it locally.
+
+```bash
+./scripts/build-release.sh                       # build + verify, publish nothing
+./scripts/build-release.sh --publish --testpypi  # rehearse on TestPyPI
+./scripts/build-release.sh --publish             # PyPI + git tag + GitHub release
+./scripts/build-release.sh --help                # all options
+```
+
+It bumps the version in lockstep across `AppVersion.swift`, `project.yml` and
+`python/pyproject.toml`, runs the tests, asserts both architecture slices are present (the wheel
+promises `universal2`), checks the signature the way notarization will, and finally extracts the
+app back out of the finished wheel to confirm it still verifies and staples. Nothing reaches PyPI,
+GitHub, or `origin` without `--publish` and a confirmation prompt.
+
 ### Register with an MCP client
 
-The server is the relay binary inside the app bundle:
+The server is the relay binary inside the app bundle. Which folder it sits in depends on how the
+app got there: `~/Applications` for the PyPI install, `/Applications` for `install.sh`.
 
 ```
-/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
+~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay   # uvx drews-mac-control-mcp
+ /Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay   # ./install.sh
 ```
 
 **Codex:**
 ```bash
-codex mcp add maccontrol -- /Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
+codex mcp add maccontrol -- ~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
 ```
 
 **Claude Code:**
 ```bash
-claude mcp add --scope user maccontrol /Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
+claude mcp add --scope user maccontrol ~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
 ```
 
-Any MCP client that launches a stdio server works the same way — point it at the relay.
+`install.sh` registers both clients for you; `--setup` prints the commands with the right path
+already filled in. Any MCP client that launches a stdio server works the same way — point it at
+the relay.
 
 ---
 
@@ -180,12 +224,13 @@ It records launch / connect / disconnect plus every request and response in full
 
 ## Versioning
 
-There is one version to bump, declared in two files that the build keeps in lockstep:
+There is one version to bump, declared in three files that the build keeps in lockstep:
 
 - `Sources/MacControlMCPCore/AppVersion.swift` — the compiled-in source of truth every component reports (the GUI's "Version" line, the MCP `initialize` `serverInfo.version`, and the launch-log build identity).
 - `project.yml` — `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION`, which feed the native bundles' `CFBundleShortVersionString` / `CFBundleVersion`.
+- `python/pyproject.toml` — the wheel's version, so `uvx drews-mac-control-mcp` and the app it installs are never two different stories.
 
-Set both to the same value, then re-run `xcodegen generate`. A "Verify version" pre-build phase fails the build if the two disagree, so they can't silently drift.
+`install.sh` and `scripts/build-release.sh` bump all three for you; setting them by hand means setting all three to the same value, then re-running `xcodegen generate`. A "Verify version" pre-build phase fails the build if the Swift constant and `project.yml` disagree, and the release script re-reads every file it wrote — a `sed` that matches nothing still exits 0.
 
 The app's setup window shows its own version and, by querying the *running* host over XPC, the live agent's version — flagging a mismatch (e.g. a stale host left registered by an older install). The agent-version check needs the signed build to satisfy the host's caller requirement; an unsigned dev build will show the agent as "not reachable".
 

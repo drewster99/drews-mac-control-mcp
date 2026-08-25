@@ -39,8 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try agent.register()
         } catch {
-            // Unsigned/dev builds (or not in /Applications) can't register; the UI surfaces this.
-            // Nothing actionable headlessly.
+            // Unsigned/dev builds (or not in an Applications folder) can't register; the UI
+            // surfaces this. Nothing actionable headlessly.
         }
         let stale = HostLifecycle.terminateStaleHostsReturningThem()
         if CommandLine.arguments.contains("--register-and-exit") {
@@ -241,10 +241,24 @@ final class AppModel: ObservableObject {
 
     /// SMAppService only registers a LaunchAgent for a SIGNED app in a stable location. The
     /// unsigned Xcode/DerivedData build fails to register (silently, before this fix) — so warn
-    /// when we're not the notarized build in /Applications.
-    var runningFromApplications: Bool {
-        Bundle.main.bundleURL.path.hasPrefix("/Applications/")
+    /// when we're not the notarized build in an Applications folder.
+    ///
+    /// Both `/Applications` and `~/Applications` qualify. The PyPI wheel installs to the user's
+    /// folder because an unattended `uvx` bootstrap has no way to obtain the privileges the system
+    /// folder needs; `install.sh` still uses the system folder. launchd treats either as stable.
+    var isInstalledInApplicationsFolder: Bool {
+        let bundle = Bundle.main.bundleURL.resolvingSymlinksInPath().path
+        return Self.applicationsFolderPrefixes.contains { bundle.hasPrefix($0) }
     }
+
+    /// Trailing separator included so a sibling like `/ApplicationsOld/…` can't satisfy the
+    /// prefix test.
+    private static let applicationsFolderPrefixes: [String] = [
+        "/Applications/",
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications", isDirectory: true)
+            .resolvingSymlinksInPath().path + "/",
+    ]
 
     private let agent = SMAppService.agent(plistName: "com.nuclearcyborg.maccontrol.host.plist")
 
@@ -462,8 +476,8 @@ final class AppModel: ObservableObject {
     }
 
     func register() {
-        guard runningFromApplications else {
-            lastMessage = "This isn't the /Applications build — SMAppService only registers a signed app from a stable location. Run ./install.sh, then open /Applications/MacControlMCP.app."
+        guard isInstalledInApplicationsFolder else {
+            lastMessage = "This isn't an installed build — SMAppService only registers a signed app from a stable location. Install it (./install.sh, or `uvx drews-mac-control-mcp --setup`), then open MacControlMCP.app from the Applications folder it was installed into."
             return
         }
         do {
@@ -502,12 +516,12 @@ final class AppModel: ObservableObject {
                 SMAppService.openSystemSettingsLoginItems()
                 lastMessage = "Approve MacControlMCP in System Settings ▸ General ▸ Login Items to enable the host."
             case .notRegistered, .notFound:
-                lastMessage = "Register returned but the host is still \(statusName(agent.status)) — try quitting and reopening the app from /Applications (a running copy whose bundle was replaced by an update can't re-register)."
+                lastMessage = "Register returned but the host is still \(statusName(agent.status)) — try quitting and reopening MacControlMCP.app from the Applications folder it's installed in (a running copy whose bundle was replaced by an update can't re-register)."
             @unknown default:
                 lastMessage = "Register returned an unexpected status: \(statusName(agent.status))."
             }
         } catch {
-            lastMessage = "Register failed: \(error.localizedDescription). If you just updated, quit and reopen /Applications/MacControlMCP.app — a running copy whose bundle was replaced can't register."
+            lastMessage = "Register failed: \(error.localizedDescription). If you just updated, quit and reopen MacControlMCP.app from the Applications folder it's installed in — a running copy whose bundle was replaced can't register."
         }
         refresh()
     }
@@ -714,8 +728,8 @@ struct ContentView: View {
 
                 GroupBox("1 · Host agent") {
                     VStack(alignment: .leading, spacing: 8) {
-                        if !model.runningFromApplications {
-                            Text("⚠︎ Run the notarized build from /Applications — an unsigned dev build can't register the host agent.")
+                        if !model.isInstalledInApplicationsFolder {
+                            Text("⚠︎ Run the notarized build from /Applications or ~/Applications — an unsigned dev build can't register the host agent.")
                                 .font(.callout).foregroundStyle(.orange)
                         }
                         Text("Status: \(model.agentStatus)")
