@@ -134,6 +134,7 @@ remove_generated() {
         "${REPO_ROOT}/${PYTHON_DIR}/build"|"${REPO_ROOT}/${PYTHON_DIR}/build/"*) ;;
         "${REPO_ROOT}/${PYTHON_DIR}/dist"|"${REPO_ROOT}/${PYTHON_DIR}/dist/"*) ;;
         "${REPO_ROOT}/${RESOURCE_ZIP}") ;;
+        "${REPO_ROOT}/${PYTHON_DIR}/"*.egg-info) ;;
         *) die "Refusing to remove '$target': not a path this script generates" ;;
     esac
     rm -rf "$target"
@@ -173,6 +174,15 @@ preflight() {
             git -C "$REPO_ROOT" status --short
             die "Working tree is not clean. Commit or stash first."
         fi
+        # publish() pushes HEAD and tags it. From any other branch that would tag a commit main
+        # never sees, and the release would not match what the tag claims.
+        local branch
+        branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
+        [[ "$branch" == "main" ]] || die "Releases are cut from main; currently on '$branch'."
+        # A push that fast-forwards nothing is a release nobody can reproduce from origin.
+        git -C "$REPO_ROOT" fetch --quiet origin main
+        [[ -z "$(git -C "$REPO_ROOT" log --oneline HEAD..origin/main)" ]] \
+            || die "main is behind origin/main. Reconcile first — the release must build from what origin has."
     fi
 
     resolve_signing_identity
@@ -297,9 +307,18 @@ run_tests() {
         -destination 'platform=macOS' \
         test > "${WORK_DIR}/xcodebuild-test.log" 2>&1 \
         || { tail -40 "${WORK_DIR}/xcodebuild-test.log"; die "Tests failed. Full log: ${WORK_DIR}/xcodebuild-test.log"; }
-    local summary
-    summary="$(grep -E '^Test Suite .* passed|Executed [0-9]+ test' "${WORK_DIR}/xcodebuild-test.log" | tail -1 || true)"
-    info "${summary:-tests passed}"
+    # xcodebuild prints a per-bundle summary and repeats it for the enclosing suite, so the last
+    # line is one bundle's count, not the run's. Count the bundles and sum their totals instead —
+    # reporting "29 tests" for a 5-bundle run reads like most of the suite never executed.
+    local bundles totals
+    bundles="$(grep -cE "^Test Suite '.*\.xctest' passed" "${WORK_DIR}/xcodebuild-test.log" || true)"
+    totals="$(grep -E "^Test Suite '.*\.xctest' passed" -A1 "${WORK_DIR}/xcodebuild-test.log" \
+        | grep -oE 'Executed [0-9]+ test' | grep -oE '[0-9]+' \
+        | awk '{ sum += $1 } END { print sum + 0 }')"
+    grep -q '\*\* TEST SUCCEEDED \*\*' "${WORK_DIR}/xcodebuild-test.log" \
+        || die "Tests did not report success. Full log: ${WORK_DIR}/xcodebuild-test.log"
+    [[ "${bundles:-0}" -gt 0 ]] || die "No test bundles ran. Full log: ${WORK_DIR}/xcodebuild-test.log"
+    info "${totals} tests across ${bundles} bundles, 0 failures"
 }
 
 generate_project() {
@@ -496,7 +515,10 @@ build_wheel() {
 
     remove_generated "${REPO_ROOT}/${PYTHON_DIR}/build"
     remove_generated "${REPO_ROOT}/${PYTHON_DIR}/dist"
-    find "${REPO_ROOT}/${PYTHON_DIR}" -maxdepth 1 -name '*.egg-info' -exec rm -rf {} +
+    local egg_info
+    while IFS= read -r egg_info; do
+        [[ -n "$egg_info" ]] && remove_generated "$egg_info"
+    done < <(find "${REPO_ROOT}/${PYTHON_DIR}" -maxdepth 1 -name '*.egg-info')
 
     ( cd "${REPO_ROOT}/${PYTHON_DIR}" && python3 -m build --wheel --outdir dist > "${WORK_DIR}/wheel-build.log" 2>&1 ) \
         || { tail -40 "${WORK_DIR}/wheel-build.log"; die "Wheel build failed. Full log: ${WORK_DIR}/wheel-build.log"; }

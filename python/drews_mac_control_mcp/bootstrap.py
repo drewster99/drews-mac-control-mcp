@@ -40,6 +40,16 @@ STATE_DIR = Path.home() / ".drews-mac-control-mcp"
 LOCK_FILE = STATE_DIR / "install.lock"
 RETIRED_PREFIX = ".mcmcp-retired-"
 
+# The build-from-source install path. Both copies would register the same LaunchAgent Label from
+# different bundles and then terminate each other's host on every launch, so its presence is worth
+# naming rather than leaving as a mystery.
+SYSTEM_INSTALL = Path("/Applications") / APP_NAME
+
+# Registering the LaunchAgent runs the app headlessly; it exits on its own in well under a second.
+# Bounded anyway because this runs as the MCP server's own command: a wedged launch would otherwise
+# hang the client forever with no output on either stream.
+REGISTER_TIMEOUT_SECONDS = 30
+
 
 class BootstrapError(RuntimeError):
     pass
@@ -105,6 +115,21 @@ def ensure_installed() -> None:
         log(f"installing app version {wanted} (was {current or 'absent'})")
         _install_from_zip()
         _activate(is_update=is_update)
+        _warn_about_competing_install()
+
+
+def _warn_about_competing_install() -> None:
+    """Name the one situation where two installs undermine each other.
+
+    Both copies carry the same bundle id and register the same LaunchAgent Label, and each one
+    terminates a host running from any other bundle. Whichever was launched last wins, so the stack
+    keeps working — but it flaps, and the version the MCP client reports depends on which app ran
+    most recently. Removing the other copy is the user's call, not ours.
+    """
+    if SYSTEM_INSTALL.is_dir():
+        log(f"note: {SYSTEM_INSTALL} also exists (from install.sh). Both register the same "
+            f"LaunchAgent, so they will take the host from each other. Keep one — this wheel "
+            f"manages {INSTALLED_APP}.")
 
 
 def _activate(is_update: bool) -> None:
@@ -126,8 +151,14 @@ def _activate(is_update: bool) -> None:
         return
     if is_update:
         subprocess.run(["/usr/bin/pkill", "-x", HOST_PROCESS_NAME], check=False)
-    else:
-        subprocess.run([str(app_executable), "--register-and-exit"], check=False)
+        return
+    try:
+        subprocess.run([str(app_executable), "--register-and-exit"],
+                       check=False, timeout=REGISTER_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # Not fatal: the relay bootstraps the host itself on its first call, so this only costs
+        # the cold-start wait it was meant to save.
+        log("registering the host agent timed out; the relay will retry on its first call")
 
 
 def _install_from_zip() -> None:
@@ -165,10 +196,25 @@ def _verify_signature(app: Path) -> None:
         raise BootstrapError(f"code signature verification failed: {result.stderr.strip()}")
 
 
+def _retired_path() -> Path:
+    """A rename target that does not exist yet.
+
+    os.rename onto an existing non-empty directory fails, and a leftover from an earlier run that
+    happened to share this pid would do exactly that — turning a routine update into a traceback.
+    """
+    base = INSTALL_DIR / f"{RETIRED_PREFIX}{os.getpid()}"
+    candidate = base.with_suffix(".app")
+    counter = 0
+    while candidate.exists():
+        counter += 1
+        candidate = Path(f"{base}-{counter}.app")
+    return candidate
+
+
 def _atomic_install(staged_app: Path) -> None:
     retired: Path | None = None
     if INSTALLED_APP.exists():
-        retired = INSTALL_DIR / f"{RETIRED_PREFIX}{os.getpid()}.app"
+        retired = _retired_path()
         os.rename(INSTALLED_APP, retired)
     try:
         os.rename(staged_app, INSTALLED_APP)
