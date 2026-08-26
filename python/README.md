@@ -35,3 +35,7 @@ it anywhere else.
 
 <https://github.com/drewster99/drews-mac-control-mcp> — including how to build and install from a
 checkout instead, which needs Xcode and your own Developer ID.
+
+## License
+
+[Apache License 2.0](https://github.com/drewster99/drews-mac-control-mcp/blob/main/LICENSE).
