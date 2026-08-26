@@ -583,10 +583,10 @@ cask "${CASK_TOKEN}" do
 
   url "https://github.com/${REPO_SLUG}/releases/download/v#{version}/MacControlMCP-#{version}.zip"
   name "MacControlMCP"
-  desc "MCP server for driving macOS apps and the iOS Simulator over the Accessibility API"
+  desc "MCP server for driving apps and the iOS Simulator via Accessibility"
   homepage "https://github.com/${REPO_SLUG}"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "MacControlMCP.app"
 
