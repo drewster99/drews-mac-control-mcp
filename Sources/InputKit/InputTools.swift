@@ -7,21 +7,29 @@
 //  posting. The actual posting fires only on a real call with access granted.
 //
 
+import AppKit
 import CoreGraphics
 import Foundation
 import MacControlMCPCore
 
+/// Which process owns the screen point, for reporting what a blind click would actually hit.
+///
+/// Injected rather than called directly: InputKit does not depend on AXKit, and the hit test is
+/// an Accessibility read. Returns nil when nothing resolves or the host wired no lookup.
+public typealias PointOwnerLookup = @Sendable (Double, Double) -> pid_t?
+
 public enum InputTools {
     public static func all(
         canPostEvents: @escaping @Sendable () -> Bool = { CGPreflightPostEventAccess() },
-        settle: ActAndSettle? = nil
+        settle: ActAndSettle? = nil,
+        pointOwner: PointOwnerLookup? = nil
     ) -> [Tool] {
         [
-            ClickTool(canPostEvents: canPostEvents, settle: settle),
+            ClickTool(canPostEvents: canPostEvents, settle: settle, pointOwner: pointOwner),
             ScrollTool(canPostEvents: canPostEvents, settle: settle),
             KeyTool(canPostEvents: canPostEvents, settle: settle),
-            HoverTool(canPostEvents: canPostEvents, settle: settle),
-            DragTool(canPostEvents: canPostEvents, settle: settle)
+            HoverTool(canPostEvents: canPostEvents, settle: settle, pointOwner: pointOwner),
+            DragTool(canPostEvents: canPostEvents, settle: settle, pointOwner: pointOwner)
         ]
     }
 }
@@ -40,7 +48,58 @@ private func observeProp() -> [String: Any] {
      "description": "settle = after posting, wait for `pid`'s UI to quiesce and return the diff (§6). Synthetic input lands a beat after posting, so prefer this over an immediate re-read."]
 }
 private func pidProp() -> [String: Any] {
-    ["type": "integer", "description": "App to observe when observe=settle (its UI tree is diffed)."]
+    ["type": "integer", "description": "The app this input is meant for. Coordinate-taking tools refuse rather than post when another app owns the point, so a click cannot land in the wrong application unnoticed. Also the app whose UI tree is diffed when observe=settle."]
+}
+
+/// The app the caller says this input is meant for, if it named a usable one.
+private func intendedPid(_ arguments: [String: Any]) -> pid_t? {
+    guard let raw = arguments["pid"] as? Int, let pid = pid_t(exactly: raw), pid > 0 else { return nil }
+    return pid
+}
+
+/// Human-readable name for a pid, for saying which app a point actually belongs to.
+private func appName(for pid: pid_t) -> String? {
+    NSRunningApplication(processIdentifier: pid)?.localizedName
+}
+
+private enum PointCheck {
+    /// Safe to post; merge these fields into the result.
+    case proceed([String: Any])
+    /// Do not post; return this JSON.
+    case refuse(String)
+}
+
+/// Compares where the caller is aiming against who actually owns that point.
+///
+/// Synthetic input goes to whatever the window server has stacked on top, which is not
+/// necessarily the app the caller has in mind. Posted blind, a click at perfectly correct
+/// coordinates lands in some other application and still reports ok — indistinguishable, from
+/// the caller's side, from input that did nothing at all. So: name an app and a point that
+/// belongs to someone else is refused rather than misdelivered; name none and the result at
+/// least says where the input went.
+private func checkPoint(_ arguments: [String: Any], x: Double, y: Double,
+                        pointOwner: PointOwnerLookup?) -> PointCheck {
+    // No lookup wired, or nothing resolves at the point (empty desktop, a surface that exposes
+    // no AX): post as before rather than block on a check that cannot be made.
+    guard let owner = pointOwner?(x, y) else { return .proceed([:]) }
+    guard let intended = intendedPid(arguments) else {
+        return .proceed(["hitTest": [
+            "pid": Int(owner),
+            "app": appName(for: owner) ?? "unknown",
+            "note": "Input went to the topmost window at this point. Pass pid to have a point that belongs to another app refused instead."
+        ]])
+    }
+    guard owner != intended else { return .proceed([:]) }
+    let ownerName = appName(for: owner) ?? "pid \(owner)"
+    let intendedName = appName(for: intended) ?? "pid \(intended)"
+    return .refuse(JSONText.from([
+        "ok": false,
+        "error": "point_owned_by_other_app",
+        "x": Int(x), "y": Int(y),
+        "intended": ["pid": Int(intended), "app": intendedName],
+        "actual": ["pid": Int(owner), "app": ownerName],
+        "howToFix": "\(ownerName) covers this point, so the input would have gone there instead of \(intendedName). Raise or activate \(intendedName) first, or act on the element directly with click(ref)/action(ref) which does not depend on what is stacked on top."
+    ]))
 }
 
 private func okJSON(_ extra: [String: Any]) -> String {
@@ -93,10 +152,13 @@ private func settledResult(_ settle: ActAndSettle?, _ arguments: [String: Any],
 public struct ClickTool: Tool {
     private let canPostEvents: @Sendable () -> Bool
     private let settle: ActAndSettle?
+    private let pointOwner: PointOwnerLookup?
     public init(canPostEvents: @escaping @Sendable () -> Bool = { CGPreflightPostEventAccess() },
-                settle: ActAndSettle? = nil) {
+                settle: ActAndSettle? = nil,
+                pointOwner: PointOwnerLookup? = nil) {
         self.canPostEvents = canPostEvents
         self.settle = settle
+        self.pointOwner = pointOwner
     }
 
     public let name = "click_point"
@@ -104,7 +166,7 @@ public struct ClickTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Synthetic mouse click at raw screen coordinates (global top-left). AVOID unless you have an explicit coordinate to hit — to click a UI element, use `click(ref)`, which targets the element and brings its app frontmost. Rides the Accessibility grant.",
+            "description": "Synthetic mouse click at raw screen coordinates (global top-left). AVOID unless you have an explicit coordinate to hit — to click a UI element, use `click(ref)`, which targets the element and brings its app frontmost. The click goes to whatever window is stacked on top at that point, which is the commonest reason a click at correct coordinates appears to do nothing — it landed in another app. Pass `pid` and a point owned by a different app is refused instead of misdelivered; omit it and the result reports which app the click actually reached. Rides the Accessibility grant.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -128,8 +190,19 @@ public struct ClickTool: Tool {
         // Clamp to the documented 1...3 range so a bad argument can't flood the host with
         // millions of synthetic mouse events.
         let count = min(3, max(1, (arguments["count"] as? Int) ?? 1))
-        return settledResult(settle, arguments, base: ["x": x.intValue, "y": y.intValue], post: {
-            SyntheticInput.click(x: x.doubleValue, y: y.doubleValue, rightButton: rightButton, clickCount: count)
+        // A named app is delivered to directly. Posted to the shared HID stream instead, the
+        // window server hands the click to whatever is stacked over the point — so a click at
+        // perfectly correct coordinates lands in another application and still reports ok,
+        // which reads as "synthetic clicks do not work here" rather than "something is in the
+        // way". Naming the app removes the question.
+        var base: [String: Any] = ["x": x.intValue, "y": y.intValue]
+        switch checkPoint(arguments, x: x.doubleValue, y: y.doubleValue, pointOwner: pointOwner) {
+        case .refuse(let error): return error
+        case .proceed(let extra): for (key, value) in extra { base[key] = value }
+        }
+        return settledResult(settle, arguments, base: base, post: {
+            SyntheticInput.click(x: x.doubleValue, y: y.doubleValue, rightButton: rightButton,
+                                 clickCount: count)
         })
     }
 }
@@ -166,6 +239,8 @@ public struct ScrollTool: Tool {
             return #"{"error":"missing_dy"}"#
         }
         let dx = ToolArguments.strictNumber(arguments, for: "dx")?.intValue ?? 0
+        // No coordinates of its own — a scroll goes wherever the pointer already is, so there
+        // is no point to check. Position it with `hover` first, which is checked.
         return settledResult(settle, arguments, base: ["dx": dx, "dy": dy], post: {
             SyntheticInput.scroll(dx: dx, dy: dy)
         })
@@ -215,10 +290,13 @@ public struct KeyTool: Tool {
 public struct HoverTool: Tool {
     private let canPostEvents: @Sendable () -> Bool
     private let settle: ActAndSettle?
+    private let pointOwner: PointOwnerLookup?
     public init(canPostEvents: @escaping @Sendable () -> Bool = { CGPreflightPostEventAccess() },
-                settle: ActAndSettle? = nil) {
+                settle: ActAndSettle? = nil,
+                pointOwner: PointOwnerLookup? = nil) {
         self.canPostEvents = canPostEvents
         self.settle = settle
+        self.pointOwner = pointOwner
     }
 
     public let name = "hover"
@@ -244,7 +322,12 @@ public struct HoverTool: Tool {
               let y = ToolArguments.strictNumber(arguments, for: "y") else {
             return #"{"error":"missing_coordinates"}"#
         }
-        return settledResult(settle, arguments, base: ["x": x.intValue, "y": y.intValue], post: {
+        var base: [String: Any] = ["x": x.intValue, "y": y.intValue]
+        switch checkPoint(arguments, x: x.doubleValue, y: y.doubleValue, pointOwner: pointOwner) {
+        case .refuse(let error): return error
+        case .proceed(let extra): for (key, value) in extra { base[key] = value }
+        }
+        return settledResult(settle, arguments, base: base, post: {
             SyntheticInput.move(x: x.doubleValue, y: y.doubleValue)
         })
     }
@@ -253,10 +336,13 @@ public struct HoverTool: Tool {
 public struct DragTool: Tool {
     private let canPostEvents: @Sendable () -> Bool
     private let settle: ActAndSettle?
+    private let pointOwner: PointOwnerLookup?
     public init(canPostEvents: @escaping @Sendable () -> Bool = { CGPreflightPostEventAccess() },
-                settle: ActAndSettle? = nil) {
+                settle: ActAndSettle? = nil,
+                pointOwner: PointOwnerLookup? = nil) {
         self.canPostEvents = canPostEvents
         self.settle = settle
+        self.pointOwner = pointOwner
     }
 
     public let name = "drag"
@@ -285,7 +371,14 @@ public struct DragTool: Tool {
               let toY = ToolArguments.strictNumber(arguments, for: "toY") else {
             return #"{"error":"missing_coordinates"}"#
         }
-        return settledResult(settle, arguments, base: [:], post: {
+        var base: [String: Any] = [:]
+        // Checked at the press point: that is where the gesture takes hold, and a drag that
+        // starts in the wrong window is the more destructive mistake.
+        switch checkPoint(arguments, x: fromX.doubleValue, y: fromY.doubleValue, pointOwner: pointOwner) {
+        case .refuse(let error): return error
+        case .proceed(let extra): for (key, value) in extra { base[key] = value }
+        }
+        return settledResult(settle, arguments, base: base, post: {
             SyntheticInput.drag(fromX: fromX.doubleValue, fromY: fromY.doubleValue,
                                 toX: toX.doubleValue, toY: toY.doubleValue)
         })

@@ -65,7 +65,17 @@ public func makeFullServer() -> MCPServer {
         + AXTools.all(session: session, click: click, type: type)
         + [ScreenshotAppWindowTool(), ScreenshotFullDisplayTool(), ScreenshotSimulatorTool(),
            ListConnectedDisplaysTool(), ListAppWindowsTool(), OCRTool()]
-        + InputTools.all(settle: settle)
+        + InputTools.all(settle: settle, pointOwner: { x, y in
+            // Which app owns the point, so a click posted to the shared stream can report where
+            // it actually went. AXKit lives on the other side of InputKit's dependencies, so the
+            // hit test is handed in rather than reached for.
+            let systemWide = AXElement.systemWide()
+            // Bounded like every other global AX read here: an unresponsive app under the cursor
+            // must not stall the click that is about to be posted.
+            systemWide.setMessagingTimeout(1)
+            defer { systemWide.setMessagingTimeout(0) }
+            return systemWide.elementAtPosition(x: Float(x), y: Float(y))?.pid
+        })
     // `batch` dispatches over the base tools (never itself), so a sequence like pressing several
     // calculator keys runs in one XPC round-trip instead of one per key.
     let dispatch: (String, [String: Any]) -> String = { name, arguments in
