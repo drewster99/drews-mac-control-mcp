@@ -210,7 +210,7 @@ resolve_signing_identity() {
 }
 
 verify_notary_credentials() {
-    xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" --limit 1 >/dev/null 2>&1 \
+    xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 \
         || die "notarytool profile '$NOTARY_PROFILE' is not usable.
     Create it with:
       xcrun notarytool store-credentials '$NOTARY_PROFILE' --apple-id <id> --team-id <team>"
