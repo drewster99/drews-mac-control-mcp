@@ -200,19 +200,15 @@ step "Signing (hardened runtime, inside-out)"
 APP="dist/MacControlMCP.app"
 rm -rf dist && mkdir -p dist
 cp -R "$BUILT" "$APP"
-# Strip any stray top-level items incremental builds may leave behind; a valid
-# bundle keeps everything under Contents/.
-find "$APP" -mindepth 1 -maxdepth 1 ! -name Contents -exec rm -rf {} +
-
-# A trusted timestamp needs Apple's timestamp server (network). It's required for
-# notarization; for a local install we skip it so the script works offline.
-if [ "$NOTARIZE" -eq 1 ]; then TS="--timestamp"; else TS="--timestamp=none"; fi
-
-codesign --force --options runtime $TS -i com.nuclearcyborg.maccontrol.relay -s "$IDENTITY" "$APP/Contents/Helpers/MacControlRelay"
-codesign --force --options runtime $TS                                       -s "$IDENTITY" "$APP/Contents/Helpers/MacControlHost.app"
-codesign --force --options runtime $TS                                       -s "$IDENTITY" "$APP"
-codesign --verify --deep --strict "$APP"
-info "signed and verified"
+# scripts/sign-app.sh owns the signing sequence and the checks that stand between a build and a
+# notarization rejection, so this script, notarize-app.sh and build-release.sh cannot drift apart
+# on how a shippable bundle is produced.
+#
+# A trusted timestamp needs Apple's timestamp server (network). It's required for notarization; for
+# a local install we skip it so the script works offline.
+SIGN_ARGUMENTS=(--app "$APP" --identity "$IDENTITY")
+if [ "$NOTARIZE" -eq 0 ]; then SIGN_ARGUMENTS+=(--no-timestamp); fi
+./scripts/sign-app.sh "${SIGN_ARGUMENTS[@]}"
 
 # ── 4. notarize (optional) ───────────────────────────────────────────────────
 if [ "$NOTARIZE" -eq 1 ]; then

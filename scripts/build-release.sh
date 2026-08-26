@@ -4,7 +4,8 @@
 #
 # Pipeline: preflight -> version bump (lockstep across AppVersion.swift, project.yml and
 # python/pyproject.toml) -> tests -> xcodegen -> xcodebuild (unsigned) -> verify the built product
-# -> re-sign inside-out with the Developer ID -> preflight the signature -> notarize + staple ->
+# -> re-sign inside-out via scripts/sign-app.sh (which also runs the notarization preflight) ->
+# notarize + staple ->
 # zip the .app into the Python package -> build the wheel -> verify the wheel -> optionally publish.
 #
 # The host's XPC Mach service is team-scoped, so a real Developer ID is mandatory — ad-hoc signing
@@ -25,6 +26,7 @@
 #   --no-bump              Leave the version alone. For re-running a failed packaging step.
 #   --skip-notarize        Sign but do not notarize/staple. Local testing only; cannot be published.
 #   --skip-tests           Do not run the test suite before building.
+#   --skip-tap             Do not update the Homebrew cask in drewster99/homebrew-tap.
 #   --identity NAME        Developer ID Application identity. Env: CODESIGN_IDENTITY.
 #   --notary-profile NAME  notarytool keychain profile. Env: NOTARY_PROFILE.
 #   --yes                  Do not prompt for confirmation before publishing.
@@ -51,6 +53,13 @@ BUNDLE_IDENTIFIER="com.nuclearcyborg.maccontrol"
 RELAY_IDENTIFIER="com.nuclearcyborg.maccontrol.relay"
 REPO_SLUG="drewster99/drews-mac-control-mcp"
 PYPI_NAME="drews-mac-control-mcp"
+
+# Homebrew addresses a tap by its repository name with the homebrew- prefix removed, so this repo
+# installs as drewster99/tap/maccontrol-mcp. A cask, not a formula: the artifact is an .app bundle.
+TAP_REPOSITORY="drewster99/homebrew-tap"
+TAP_NAME="${TAP_REPOSITORY##*/homebrew-}"
+CASK_TOKEN="maccontrol-mcp"
+CASK_PATH="Casks/${CASK_TOKEN}.rb"
 
 # The wheel is tagged for these; both are asserted against the built binaries rather than assumed,
 # because a wheel that claims universal2 and ships one slice fails only on the user's Mac.
@@ -82,6 +91,7 @@ EXPLICIT_VERSION=""
 NO_BUMP=0
 SKIP_NOTARIZE=0
 SKIP_TESTS=0
+SKIP_TAP=0
 ASSUME_YES=0
 KEEP_WORK=0
 
@@ -95,6 +105,7 @@ while [[ $# -gt 0 ]]; do
         --no-bump)         NO_BUMP=1; shift ;;
         --skip-notarize)   SKIP_NOTARIZE=1; shift ;;
         --skip-tests)      SKIP_TESTS=1; shift ;;
+        --skip-tap)        SKIP_TAP=1; shift ;;
         --identity)        SIGNING_IDENTITY="${2:?--identity needs a value}"; shift 2 ;;
         --notary-profile)  NOTARY_PROFILE="${2:?--notary-profile needs a value}"; shift 2 ;;
         --yes)             ASSUME_YES=1; shift ;;
@@ -405,59 +416,11 @@ verify_built_product() {
 
 sign_app() {
     step "Signing (hardened runtime, inside-out)"
-    # Nested code first, wrapper last: a signature over a bundle covers what is inside it, so
-    # re-signing a helper afterwards would invalidate the enclosing seal.
-    local timestamp="--timestamp"
-    [[ $SKIP_NOTARIZE -eq 1 ]] && timestamp="--timestamp=none"
-
-    codesign --force --options runtime $timestamp -i "$RELAY_IDENTIFIER" \
-        -s "$SIGNING_IDENTITY" "${APP}/Contents/Helpers/MacControlRelay"
-    codesign --force --options runtime $timestamp \
-        -s "$SIGNING_IDENTITY" "${APP}/Contents/Helpers/MacControlHost.app"
-    codesign --force --options runtime $timestamp \
-        -s "$SIGNING_IDENTITY" "$APP"
-
-    codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | sed 's/^/    /'
-    info "signed and verified"
-}
-
-# Turns a slow notarization rejection into a fast local failure.
-preflight_signature() {
-    step "Pre-flight (local equivalents of the notarization checks)"
-
-    local target
-    for target in "$APP" \
-                  "${APP}/Contents/Helpers/MacControlHost.app" \
-                  "${APP}/Contents/Helpers/MacControlRelay"; do
-        # Captured into variables before matching. Piping codesign straight into `grep -q` races:
-        # grep exits at the first match, codesign takes SIGPIPE, and pipefail then reports the
-        # whole pipeline as failed even though the match succeeded.
-        local details entitlements
-        details="$(codesign -dvvv "$target" 2>&1 || true)"
-        entitlements="$(codesign -d --entitlements - --xml "$target" 2>/dev/null || true)"
-
-        grep -q '^Authority=Developer ID Application' <<<"$details" \
-            || die "$target is not signed with a Developer ID Application certificate"
-        grep -q 'flags=.*runtime' <<<"$details" \
-            || die "$target is missing the hardened runtime"
-        if [[ $SKIP_NOTARIZE -eq 0 ]]; then
-            grep -q 'Timestamp=' <<<"$details" \
-                || die "$target is missing a secure timestamp"
-        fi
-        # get-task-allow makes a binary debuggable; notarization rejects it outright.
-        if grep -q 'get-task-allow' <<<"$entitlements"; then
-            die "$target still carries get-task-allow"
-        fi
-    done
-    info "authority, hardened runtime, timestamp and entitlements check out"
-
-    # A symlink cannot survive the round trip through the wheel's inner archive on every extractor,
-    # and the bundle has never needed one — so assert zero rather than discovering a broken install
-    # on someone else's Mac.
-    local symlinks
-    symlinks="$(find "$APP" -type l | wc -l | tr -d ' ')"
-    [[ "$symlinks" == "0" ]] || die "Bundle contains $symlinks symlink(s); the packaged app must have none"
-    info "no symlinks in the bundle"
+    # scripts/sign-app.sh owns the sequence and the checks, so install.sh, notarize-app.sh and this
+    # script cannot drift apart on how a shippable bundle is produced.
+    local sign_arguments=("--identity" "$SIGNING_IDENTITY")
+    [[ $SKIP_NOTARIZE -eq 1 ]] && sign_arguments+=("--no-timestamp")
+    ./scripts/sign-app.sh --app "$APP" "${sign_arguments[@]}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -577,6 +540,159 @@ PY
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Release assets (Homebrew cask channel)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The wheel is the PyPI channel. Homebrew needs the bundle on its own, so the same notarized,
+# stapled .app is also published as a zip. ditto rather than `zip` for the same reason it is used
+# everywhere else here: the signature and the stapled ticket have to survive.
+make_app_archive() {
+    step "Packaging the app for the Homebrew cask"
+
+    APP_ARCHIVE_NAME="MacControlMCP-${NEW_MARKETING}.zip"
+    APP_ARCHIVE="${DIST_DIR}/${APP_ARCHIVE_NAME}"
+    rm -f "$APP_ARCHIVE"
+    ditto -c -k --keepParent "$APP" "$APP_ARCHIVE"
+
+    # Proof the published archive is the notarized one: an unstapled bundle would make every
+    # cask install hit Gatekeeper's online check, and fail outright offline.
+    if [[ $SKIP_NOTARIZE -eq 0 ]]; then
+        local check="${WORK_DIR}/cask-verify"
+        remove_generated "$check"
+        mkdir -p "$check"
+        ditto -x -k "$APP_ARCHIVE" "$check"
+        xcrun stapler validate "${check}/${APP_NAME}" \
+            || die "The archive for the cask has no stapled ticket"
+    fi
+
+    cp "$WHEEL" "$DIST_DIR/"
+    ( cd "$DIST_DIR" && shasum -a 256 "$APP_ARCHIVE_NAME" "$(basename "$WHEEL")" > SHA256SUMS )
+    APP_ARCHIVE_SHA="$(awk -v f="$APP_ARCHIVE_NAME" '$2==f {print $1}' "${DIST_DIR}/SHA256SUMS")"
+    [[ -n "$APP_ARCHIVE_SHA" ]] || die "Could not compute the archive checksum"
+
+    info "$APP_ARCHIVE_NAME ($(du -h "$APP_ARCHIVE" | cut -f1))"
+    sed 's/^/    /' "${DIST_DIR}/SHA256SUMS"
+}
+
+write_cask() {
+    CASK_FILE="${DIST_DIR}/${CASK_TOKEN}.rb"
+    cat > "$CASK_FILE" <<CASK
+cask "${CASK_TOKEN}" do
+  version "${NEW_MARKETING}"
+  sha256 "${APP_ARCHIVE_SHA}"
+
+  url "https://github.com/${REPO_SLUG}/releases/download/v#{version}/MacControlMCP-#{version}.zip"
+  name "MacControlMCP"
+  desc "MCP server for driving macOS apps and the iOS Simulator over the Accessibility API"
+  homepage "https://github.com/${REPO_SLUG}"
+
+  depends_on macos: ">= :sonoma"
+
+  app "MacControlMCP.app"
+
+  # Opening the app once is what registers the host LaunchAgent via SMAppService and raises the
+  # permission prompts; nothing works until that has happened.
+  postflight do
+    system_command "/usr/bin/open", args: ["--background", "#{appdir}/MacControlMCP.app"]
+  end
+
+  uninstall launchctl: "com.nuclearcyborg.maccontrol.host",
+            quit:      "com.nuclearcyborg.maccontrol"
+
+  zap trash: [
+    "~/Library/Logs/MacControlMCP",
+    "~/Library/Preferences/com.nuclearcyborg.maccontrol.plist",
+  ]
+
+  caveats <<~EOS
+    Grant Accessibility — and Screen Recording for screenshots — to MacControlMCP in
+    System Settings > Privacy & Security, then point your MCP client at the relay:
+
+      claude mcp add --scope user maccontrol #{appdir}/MacControlMCP.app/Contents/Helpers/MacControlRelay
+
+      codex mcp add maccontrol -- #{appdir}/MacControlMCP.app/Contents/Helpers/MacControlRelay
+  EOS
+end
+CASK
+    info "$CASK_FILE"
+}
+
+tap_instructions() {
+    echo "    The cask for this release is at:"
+    echo "      ${CASK_FILE}"
+    echo
+    echo "    Add it to ${TAP_REPOSITORY} as ${CASK_PATH}, then users install with:"
+    echo "      brew install --cask ${TAP_REPOSITORY%/*}/${TAP_NAME}/${CASK_TOKEN}"
+}
+
+update_tap() {
+    write_cask
+
+    if [[ $SKIP_TAP -eq 1 ]]; then
+        step "Skipping the Homebrew tap"
+        tap_instructions
+        return
+    fi
+    # The cask points at the release asset, so this can only run once the release exists. A missing
+    # tap is not a failed release: the assets are published and the cask is on disk, so say what is
+    # left to do rather than exiting non-zero.
+    if ! gh repo view "$TAP_REPOSITORY" >/dev/null 2>&1; then
+        step "No tap at ${TAP_REPOSITORY} yet"
+        tap_instructions
+        return
+    fi
+
+    step "Updating the Homebrew cask"
+    local checkout="${WORK_DIR}/tap"
+    local attempt pushed=0
+
+    # One tap serves every project here, so another project's release can land between our clone
+    # and our push. Their file cannot conflict with ours, but the branch has moved and the push is
+    # refused. Each attempt starts from a fresh clone and rewrites the cask rather than replaying a
+    # patch: the wanted state is one file's contents, so recomputing it can never leave a
+    # half-merged tap behind.
+    for attempt in 1 2 3 4 5; do
+        remove_generated "$checkout"
+        gh repo clone "$TAP_REPOSITORY" "$checkout" -- --quiet 2>/dev/null \
+            || die "Could not clone ${TAP_REPOSITORY}"
+        mkdir -p "$(dirname "${checkout}/${CASK_PATH}")"
+        cp "$CASK_FILE" "${checkout}/${CASK_PATH}"
+
+        if [[ -z "$(git -C "$checkout" status --porcelain)" ]]; then
+            die "The tap already holds this exact cask, which cannot be right for a new release"
+        fi
+
+        git -C "$checkout" add "$CASK_PATH"
+        git -C "$checkout" commit --quiet -m "${CASK_TOKEN} ${NEW_MARKETING}"
+        # -u origin HEAD rather than a bare push, so this also works against a tap whose branch has
+        # no upstream configured yet.
+        if git -C "$checkout" push --quiet -u origin HEAD 2>/dev/null; then
+            pushed=1
+            break
+        fi
+        info "the tap moved under us, most likely another project releasing (${attempt}/5)"
+        sleep 3
+    done
+
+    [[ $pushed -eq 1 ]] || die "Could not push to ${TAP_REPOSITORY} after 5 attempts.
+    Everything else for ${TAG} is published; only the cask is missing. Add it by hand from:
+      ${CASK_FILE}"
+
+    verify_tap_cask
+}
+
+verify_tap_cask() {
+    local published
+    published="$(gh api "repos/${TAP_REPOSITORY}/contents/${CASK_PATH}" --jq '.content' | base64 --decode)" \
+        || die "Could not read the cask back from ${TAP_REPOSITORY}"
+    grep -q "$APP_ARCHIVE_SHA" <<<"$published" \
+        || die "The cask in the tap does not carry this release's digest"
+    grep -q "/download/${TAG}/" <<<"$published" \
+        || die "The cask in the tap does not point at ${TAG}"
+    info "brew install --cask ${TAP_REPOSITORY%/*}/${TAP_NAME}/${CASK_TOKEN}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Publishing
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -593,6 +709,15 @@ release_notes() {
         echo
         echo "Installs the signed app to \`~/Applications\` and opens it so macOS prompts for"
         echo "permissions. Grant **Accessibility** — and **Screen Recording** for screenshots."
+        echo
+        echo "Or with Homebrew, which installs to \`/Applications\` instead:"
+        echo
+        echo '```sh'
+        echo "brew install --cask ${TAP_REPOSITORY%/*}/${TAP_NAME}/${CASK_TOKEN}"
+        echo '```'
+        echo
+        echo "\`MacControlMCP-${NEW_MARKETING}.zip\` below is the same notarized bundle, for a"
+        echo "manual install. \`SHA256SUMS\` covers both downloads."
         echo
         echo "Requires macOS 14 or later. Signed and notarized by Apple."
         echo
@@ -638,18 +763,22 @@ publish() {
     git -C "$REPO_ROOT" push origin "$TAG"
 
     release_notes
-    gh release create "$TAG" "$WHEEL" \
+    gh release create "$TAG" "$WHEEL" "$APP_ARCHIVE" "${DIST_DIR}/SHA256SUMS" \
         --repo "$REPO_SLUG" \
         --title "MacControlMCP ${NEW_MARKETING}" \
         --notes-file "$NOTES_FILE"
     verify_published
+    update_tap
 }
 
 verify_published() {
     local view="${WORK_DIR}/release-${NEW_MARKETING}.json"
     gh release view "$TAG" --repo "$REPO_SLUG" --json tagName,url,assets > "$view"
     grep -q "\"$TAG\"" "$view" || die "Published release is missing tag $TAG"
-    grep -q "$(basename "$WHEEL")" "$view" || die "Published release is missing the wheel asset"
+    local asset
+    for asset in "$(basename "$WHEEL")" "$APP_ARCHIVE_NAME" "SHA256SUMS"; do
+        grep -q "$asset" "$view" || die "Published release is missing asset $asset"
+    done
     info "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$view")"
 }
 
@@ -669,20 +798,24 @@ run_tests
 build_app
 verify_built_product
 sign_app
-preflight_signature
 notarize_app
 build_wheel
 verify_wheel
+make_app_archive
 
 if [[ $PUBLISH -eq 1 ]]; then
     publish
+else
+    # Written even when not publishing, so the cask can be reviewed before a release exists.
+    write_cask
 fi
 
 [[ $KEEP_WORK -eq 1 ]] || remove_generated "$WORK_DIR"
 
 printf '\n\033[1;32m✓ MacControlMCP %s (%s)\033[0m\n\n' "$NEW_MARKETING" "$NEW_BUILD"
-echo "  App:    $APP"
-echo "  Wheel:  $WHEEL"
+echo "  App:      $APP"
+echo "  Wheel:    $WHEEL"
+echo "  Archive:  ${APP_ARCHIVE:-(none)}"
 echo
 if [[ $PUBLISH -eq 1 ]]; then
     if [[ $TESTPYPI -eq 1 ]]; then
@@ -693,6 +826,9 @@ if [[ $PUBLISH -eq 1 ]]; then
 else
     echo "  Test the bootstrap without publishing:"
     echo "    uvx --from $WHEEL ${PYPI_NAME} --setup"
+    echo
+    echo "  Cask (points at the not-yet-created ${TAG} release):"
+    echo "    $CASK_FILE"
     echo
     if [[ $SKIP_NOTARIZE -eq 1 ]]; then
         echo "  Not notarized — this wheel cannot be published."

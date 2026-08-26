@@ -119,6 +119,19 @@ along with it. Nothing about this path needs Xcode or a signing identity of your
 Requires macOS 14 or later. The wheel is tagged `macosx_14_0_universal2`, so pip and uv decline to
 install it anywhere else.
 
+### With Homebrew
+
+```sh
+brew install --cask drewster99/tap/maccontrol-mcp
+```
+
+The same notarized bundle, installed to `/Applications` instead of `~/Applications`. Pick one
+channel or the other — both register the same host LaunchAgent, so two copies would take it from
+each other on every launch.
+
+Each GitHub release also carries `MacControlMCP-<version>.zip` for a manual install, and a
+`SHA256SUMS` covering every download.
+
 ---
 
 ## Build & install from source
@@ -157,6 +170,19 @@ cp -R dist/MacControlMCP.app /Applications/
 open /Applications/MacControlMCP.app
 ```
 
+`notarize-app.sh` is the fast inner loop — it signs and notarizes the bundle Xcode already built,
+rather than rebuilding from scratch the way `install.sh` and `scripts/build-release.sh` do.
+
+All three delegate the signing itself to `scripts/sign-app.sh`, which is the single place that
+knows the inside-out order, the relay's explicit identifier, and the checks that stand between a
+build and a notarization rejection — hardened runtime, secure timestamp, `Developer ID Application`
+authority, no `get-task-allow`, no symlinks. Run it directly against any built bundle:
+
+```bash
+./scripts/sign-app.sh --app dist/MacControlMCP.app            # signed for distribution
+./scripts/sign-app.sh --app dist/MacControlMCP.app --no-timestamp   # offline/local
+```
+
 For a quick check of just the library/binary targets (no app bundle, won't hold the Accessibility grant):
 
 ```bash
@@ -183,6 +209,12 @@ It bumps the version in lockstep across `AppVersion.swift`, `project.yml` and
 promises `universal2`), checks the signature the way notarization will, and finally extracts the
 app back out of the finished wheel to confirm it still verifies and staples. Nothing reaches PyPI,
 GitHub, or `origin` without `--publish` and a confirmation prompt.
+
+Publishing produces three release assets — the wheel, `MacControlMCP-<version>.zip`, and
+`SHA256SUMS` — uploads the wheel to PyPI, and updates the Homebrew cask in
+[`drewster99/homebrew-tap`](https://github.com/drewster99/homebrew-tap) (`--skip-tap` opts out).
+The cask is regenerated from the release's own digest and read back from the tap to confirm it
+points at the tag that was just cut.
 
 ### Register with an MCP client
 
