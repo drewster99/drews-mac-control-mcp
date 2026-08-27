@@ -26,7 +26,6 @@
 #
 set -euo pipefail
 
-RELAY_IDENTIFIER="com.nuclearcyborg.maccontrol.relay"
 RELAY_RELATIVE="Contents/Helpers/MacControlRelay"
 HOST_RELATIVE="Contents/Helpers/MacControlHost.app"
 
@@ -55,6 +54,22 @@ die()  { printf '\033[1;31merror:\033[0m sign-app: %s\n' "$*" >&2; exit 1; }
 [[ -d "$APP" ]] || die "not a bundle: $APP"
 [[ -f "${APP}/${RELAY_RELATIVE}" ]] || die "no relay at ${APP}/${RELAY_RELATIVE}"
 [[ -d "${APP}/${HOST_RELATIVE}" ]] || die "no host helper at ${APP}/${HOST_RELATIVE}"
+
+# The relay is a CLI tool with no Info.plist, so its signing identifier must be supplied
+# explicitly — and it has to be THIS bundle's, not a fixed one. The host's compiled-in
+# callerRequirement pins the relay identifier for the variant it was built as, so signing a .user
+# bundle's relay under the system identifier would make the host reject its own relay, surfacing
+# only as an unexplained "host unavailable" at first use.
+#
+# Derived from the host helper, which does carry an Info.plist, by swapping its role component.
+# Reading it from the artifact means it cannot drift from what was actually built.
+HOST_IDENTIFIER="$(plutil -extract CFBundleIdentifier raw -o - "${APP}/${HOST_RELATIVE}/Contents/Info.plist" 2>/dev/null || true)"
+[[ -n "$HOST_IDENTIFIER" ]] || die "could not read the host helper's CFBundleIdentifier"
+case "$HOST_IDENTIFIER" in
+    *.host|*.host.*) ;;
+    *) die "host identifier '$HOST_IDENTIFIER' has no .host component; cannot derive the relay's" ;;
+esac
+RELAY_IDENTIFIER="${HOST_IDENTIFIER/.host/.relay}"
 
 # Ambiguity is an error rather than something to resolve by picking the first match: the host's XPC
 # Mach service is team-scoped, so signing with the wrong team yields a bundle that builds, installs,
@@ -101,6 +116,13 @@ for target in "$APP" "${APP}/${HOST_RELATIVE}" "${APP}/${RELAY_RELATIVE}"; do
     fi
 done
 info "authority, hardened runtime, timestamp and entitlements check out"
+
+# The host pins this exact string, so assert codesign actually recorded it rather than trusting
+# that -i was honored.
+signed_relay_identifier="$(codesign -dvv "${APP}/${RELAY_RELATIVE}" 2>&1 | sed -n 's/^Identifier=//p')"
+[[ "$signed_relay_identifier" == "$RELAY_IDENTIFIER" ]] \
+    || die "relay signed as '$signed_relay_identifier', expected '$RELAY_IDENTIFIER'"
+info "relay identifier: $RELAY_IDENTIFIER (matches what its host requires)"
 
 # A symlink cannot survive the round trip through every archive this bundle is shipped in, and the
 # bundle has never needed one — so assert zero rather than discovering a broken install elsewhere.

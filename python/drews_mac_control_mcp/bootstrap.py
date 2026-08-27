@@ -8,8 +8,14 @@ re-derive the truth from disk each time.
 
 Why ``~/Applications`` and not ``/Applications``: this runs unattended as the MCP server's own
 command, so there is no way to obtain the privileges the system folder requires. launchd treats
-either as a stable location, so SMAppService registration works from both. ``install.sh`` still
-installs to ``/Applications`` for the build-from-source path.
+either as a stable location, so SMAppService registration works from both. ``install.sh`` and the
+Homebrew cask still own ``/Applications``.
+
+The app this wheel carries is built as the *user* variant: its bundle identifiers, LaunchAgent
+label and Mach service all carry a ``.user`` suffix, so it is a different product from the
+``/Applications`` build rather than a second copy of it. Both can be installed at once and neither
+notices the other. That is also why every process this module signals is addressed by label or by
+full path — the two variants ship executables with identical names.
 
 Nothing is ever written to stdout on the automatic path — stdout is the MCP JSON-RPC transport,
 and a stray byte there corrupts the session. All diagnostics go to stderr.
@@ -30,7 +36,10 @@ APP_NAME = "MacControlMCP.app"
 RELAY_RELATIVE = "Contents/Helpers/MacControlRelay"
 APP_EXECUTABLE_RELATIVE = "Contents/MacOS/MacControlMCP"
 HOST_EXECUTABLE_RELATIVE = "Contents/Helpers/MacControlHost.app/Contents/MacOS/MacControlHost"
-HOST_PROCESS_NAME = "MacControlHost"
+
+# This variant's LaunchAgent job label. `pkill -x MacControlHost` would match the /Applications
+# build's host too — both ship an executable of that name — so the job is addressed by label.
+HOST_LAUNCH_AGENT_LABEL = "com.nuclearcyborg.maccontrol.host.user"
 INFO_PLIST_RELATIVE = "Contents/Info.plist"
 ARCHIVE_NAME = "MacControlMCP.app.zip"
 
@@ -39,11 +48,6 @@ INSTALLED_APP = INSTALL_DIR / APP_NAME
 STATE_DIR = Path.home() / ".drews-mac-control-mcp"
 LOCK_FILE = STATE_DIR / "install.lock"
 RETIRED_PREFIX = ".mcmcp-retired-"
-
-# The build-from-source install path. Both copies would register the same LaunchAgent Label from
-# different bundles and then terminate each other's host on every launch, so its presence is worth
-# naming rather than leaving as a mystery.
-SYSTEM_INSTALL = Path("/Applications") / APP_NAME
 
 # Registering the LaunchAgent runs the app headlessly; it exits on its own in well under a second.
 # Bounded anyway because this runs as the MCP server's own command: a wedged launch would otherwise
@@ -115,21 +119,6 @@ def ensure_installed() -> None:
         log(f"installing app version {wanted} (was {current or 'absent'})")
         _install_from_zip()
         _activate(is_update=is_update)
-        _warn_about_competing_install()
-
-
-def _warn_about_competing_install() -> None:
-    """Name the one situation where two installs undermine each other.
-
-    Both copies carry the same bundle id and register the same LaunchAgent Label, and each one
-    terminates a host running from any other bundle. Whichever was launched last wins, so the stack
-    keeps working — but it flaps, and the version the MCP client reports depends on which app ran
-    most recently. Removing the other copy is the user's call, not ours.
-    """
-    if SYSTEM_INSTALL.is_dir():
-        log(f"note: {SYSTEM_INSTALL} also exists (from install.sh). Both register the same "
-            f"LaunchAgent, so they will take the host from each other. Keep one — this wheel "
-            f"manages {INSTALLED_APP}.")
 
 
 def _activate(is_update: bool) -> None:
@@ -150,7 +139,13 @@ def _activate(is_update: bool) -> None:
     if not app_executable.is_file():
         return
     if is_update:
-        subprocess.run(["/usr/bin/pkill", "-x", HOST_PROCESS_NAME], check=False)
+        # By label, not by executable name: the /Applications build's host is also called
+        # MacControlHost, and stopping it here would reach into a different product.
+        subprocess.run(
+            ["/bin/launchctl", "kill", "SIGTERM",
+             f"gui/{os.getuid()}/{HOST_LAUNCH_AGENT_LABEL}"],
+            check=False,
+        )
         return
     try:
         subprocess.run([str(app_executable), "--register-and-exit"],

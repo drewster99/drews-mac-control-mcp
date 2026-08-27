@@ -125,9 +125,12 @@ install it anywhere else.
 brew install --cask drewster99/tap/maccontrol-mcp
 ```
 
-The same notarized bundle, installed to `/Applications` instead of `~/Applications`. Pick one
-channel or the other — both register the same host LaunchAgent, so two copies would take it from
-each other on every launch.
+The same app, installed to `/Applications` instead of `~/Applications`.
+
+The two builds are **separate products**, not two copies of one: the `~/Applications` build carries
+a `.user` suffix on its bundle identifiers, its LaunchAgent label, and its Mach service. Install
+both if you like — neither notices the other. The cost is that macOS sees two apps, so each needs
+its own Accessibility (and Screen Recording) grant. See [CLAUDE.md](./CLAUDE.md) for why.
 
 Each GitHub release also carries `MacControlMCP-<version>.zip` for a manual install, and a
 `SHA256SUMS` covering every download.
@@ -179,9 +182,17 @@ build and a notarization rejection — hardened runtime, secure timestamp, `Deve
 authority, no `get-task-allow`, no symlinks. Run it directly against any built bundle:
 
 ```bash
-./scripts/sign-app.sh --app dist/MacControlMCP.app            # signed for distribution
-./scripts/sign-app.sh --app dist/MacControlMCP.app --no-timestamp   # offline/local
+./scripts/sign-app.sh --app dist/system/MacControlMCP.app             # signed for distribution
+./scripts/sign-app.sh --app dist/system/MacControlMCP.app --no-timestamp   # offline/local
 ```
+
+It derives the relay's signing identifier from the bundle itself, so it signs a `.user` build's
+relay under the identifier that build's host actually requires — getting this wrong surfaces only
+as an unexplained "host unavailable" at first use.
+
+`scripts/gen-identity.sh` writes the identity a build compiles against (`--variant system|user`)
+and prints the `IDENTITY_SUFFIX` to pass to `xcodebuild`. It is the only place identifiers are
+defined; everything else derives from it.
 
 For a quick check of just the library/binary targets (no app bundle, won't hold the Accessibility grant):
 
@@ -205,9 +216,11 @@ packages the notarized bundle into the PyPI wheel instead of installing it local
 ```
 
 It bumps the version in lockstep across `AppVersion.swift`, `project.yml` and
-`python/pyproject.toml`, runs the tests, asserts both architecture slices are present (the wheel
-promises `universal2`), checks the signature the way notarization will, and finally extracts the
-app back out of the finished wheel to confirm it still verifies and staples. Nothing reaches PyPI,
+`python/pyproject.toml`, runs the tests, then builds **twice** — once per install identity, since
+the `/Applications` and `~/Applications` builds are different products. Each build is verified
+(both architecture slices, the embedded plist, and that it carries the identity it claims), signed,
+and notarized; the wheel gets the user build and the cask archive the system one. It finally
+extracts the app back out of the finished wheel to confirm it still verifies and staples. Nothing reaches PyPI,
 GitHub, or `origin` without `--publish` and a confirmation prompt.
 
 Publishing produces three release assets — the wheel, `MacControlMCP-<version>.zip`, and

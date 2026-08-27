@@ -54,8 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 enum HostLifecycle {
-    static let plistName = "com.nuclearcyborg.maccontrol.host.plist"
-    static let hostBundleID = "com.nuclearcyborg.maccontrol.host"
+    static let plistName = AppIdentity.launchAgentPlistName
+    static let hostBundleID = AppIdentity.hostBundleID
 
     /// Terminate any host running from a DIFFERENT bundle than this app's (a leftover from a prior
     /// install/location) so the current binary launches on the next on-demand connection. A host
@@ -260,7 +260,7 @@ final class AppModel: ObservableObject {
             .resolvingSymlinksInPath().path + "/",
     ]
 
-    private let agent = SMAppService.agent(plistName: "com.nuclearcyborg.maccontrol.host.plist")
+    private let agent = SMAppService.agent(plistName: HostLifecycle.plistName)
 
     var relayPath: String {
         Bundle.main.bundleURL

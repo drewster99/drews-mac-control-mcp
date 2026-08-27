@@ -178,6 +178,10 @@ step "Generating Xcode project (xcodegen)"
 # The version files are left modified; commit them after the install.
 ./scripts/bump-version.sh
 ./scripts/gen-build-stamp.sh
+# install.sh owns /Applications, so it builds the system identity. The wheel's ~/Applications build
+# carries the .user suffix instead, which is what lets the two coexist without taking the host from
+# each other.
+IDENTITY_SUFFIX="$(./scripts/gen-identity.sh --variant system)"
 NEW_VERSION=$(grep -oE 'marketingVersion = "[^"]+"' Sources/MacControlMCPCore/AppVersion.swift | sed -E 's/.*"([^"]+)".*/\1/')
 NEW_BUILD=$(grep -oE 'buildNumber = "[^"]+"' Sources/MacControlMCPCore/AppVersion.swift | sed -E 's/.*"([^"]+)".*/\1/')
 info "version: $NEW_VERSION ($NEW_BUILD)"
@@ -188,7 +192,7 @@ info "MacControlMCP.xcodeproj"
 step "Building Release scheme (xcodebuild)"
 DERIVED=".build/xcode"
 xcodebuild -project MacControlMCP.xcodeproj -scheme Release -configuration Release \
-  -derivedDataPath "$DERIVED" -quiet build
+  -derivedDataPath "$DERIVED" -quiet IDENTITY_SUFFIX="$IDENTITY_SUFFIX" build
 BUILT="$DERIVED/Build/Products/Release/MacControlMCP.app"
 [ -d "$BUILT" ] || die "Build succeeded but $BUILT is missing."
 info "$BUILT"
@@ -225,6 +229,12 @@ fi
 # ── 5. install ───────────────────────────────────────────────────────────────
 step "Installing to $PREFIX"
 DEST="$PREFIX/MacControlMCP.app"
+# This variant's process identities. The system build's label; the paths are what distinguish its
+# processes from a user (wheel) install whose executables have the very same names.
+HOST_LABEL="com.nuclearcyborg.maccontrol.host"
+HOST_EXECUTABLE="$DEST/Contents/Helpers/MacControlHost.app/Contents/MacOS/MacControlHost"
+APP_EXECUTABLE="$DEST/Contents/MacOS/MacControlMCP"
+RELAY="$DEST/Contents/Helpers/MacControlRelay"
 # Stage the new bundle next to the destination so the final swap is a pair of
 # atomic same-volume renames — no window where $DEST is missing or half-copied
 # while launchd can respawn the host. $$ suffixes keep concurrent runs apart.
@@ -250,15 +260,19 @@ fi
 # not relaunch the new binary — so an old app instance keeps running from the bundle this install
 # is about to delete, and its XPC link to the freshly-installed helper breaks ("can't communicate
 # with helper", then a crash on register). Quitting it here makes the later `open` start fresh.
-pkill -x -U "$TARGET_UID" MacControlHost 2>/dev/null || true
-pkill -x -U "$TARGET_UID" MacControlMCP 2>/dev/null || true
+# Matching by executable NAME would hit the wheel's ~/Applications install too — both variants ship
+# executables called MacControlHost, MacControlMCP and MacControlRelay, and only the bundle path and
+# the LaunchAgent label tell them apart. Everything below is addressed by label or by full path, so
+# a system install never disturbs a user install.
+launchctl kill SIGTERM "gui/${TARGET_UID}/${HOST_LABEL}" 2>/dev/null || true
+pkill -f -U "$TARGET_UID" "$APP_EXECUTABLE" 2>/dev/null || true
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  pgrep -x -U "$TARGET_UID" MacControlHost >/dev/null 2>&1 || \
-    pgrep -x -U "$TARGET_UID" MacControlMCP >/dev/null 2>&1 || break
+  pgrep -f -U "$TARGET_UID" "$HOST_EXECUTABLE" >/dev/null 2>&1 || \
+    pgrep -f -U "$TARGET_UID" "$APP_EXECUTABLE" >/dev/null 2>&1 || break
   sleep 0.2
 done
 # A GUI app wedged on a modal/alert can ignore SIGTERM; force it so the swap can delete its bundle.
-pkill -9 -x -U "$TARGET_UID" MacControlMCP 2>/dev/null || true
+pkill -9 -f -U "$TARGET_UID" "$APP_EXECUTABLE" 2>/dev/null || true
 
 if [ -e "$DEST" ] || [ -L "$DEST" ]; then
   if ! mv "$DEST" "$OLD" 2>/dev/null; then
@@ -274,10 +288,9 @@ fi
 # The Mach service may have relaunched the old host mid-swap; stop it BEFORE deleting its bundle
 # so we never unlink a bundle out from under a running host. It gets cycled again after the launch
 # below (a second kill is a no-op) — that later one is what puts the new binary in place.
-pkill -x -U "$TARGET_UID" MacControlHost 2>/dev/null || true
+launchctl kill SIGTERM "gui/${TARGET_UID}/${HOST_LABEL}" 2>/dev/null || true
 rm -rf "$OLD" 2>/dev/null || true
 trap - EXIT
-RELAY="$DEST/Contents/Helpers/MacControlRelay"
 info "$DEST"
 
 # ── 6. launch (self-bootstraps the host LaunchAgent + permission prompts) ─────
@@ -300,7 +313,7 @@ fi
 # ── 6b. cycle host + relays onto the new binary ──────────────────────────────
 # The Mach service may have relaunched the old host mid-swap; stop it so the next activation runs
 # the new binary. Safe now that the app is up: the service relaunches the host on demand.
-pkill -x -U "$TARGET_UID" MacControlHost 2>/dev/null || true
+launchctl kill SIGTERM "gui/${TARGET_UID}/${HOST_LABEL}" 2>/dev/null || true
 
 # Drop stale relays so MCP clients pick up the freshly-installed relay binary without a manual
 # client restart. A running relay is pinned to the bundle it was spawned from (the swap above just
@@ -312,17 +325,17 @@ pkill -x -U "$TARGET_UID" MacControlHost 2>/dev/null || true
 # survivors accumulate across installs — they were observed surviving two in a row, the oldest six
 # days old. Escalate to KILL exactly as the front-end app above does, then report anything left
 # rather than swallowing it, so a leak is visible instead of silent.
-pkill -x -U "$TARGET_UID" MacControlRelay 2>/dev/null || true
+pkill -f -U "$TARGET_UID" "$RELAY" 2>/dev/null || true
 for _ in 1 2 3 4 5; do
-  pgrep -x -U "$TARGET_UID" MacControlRelay >/dev/null 2>&1 || break
+  pgrep -f -U "$TARGET_UID" "$RELAY" >/dev/null 2>&1 || break
   sleep 0.2
 done
-if pgrep -x -U "$TARGET_UID" MacControlRelay >/dev/null 2>&1; then
-  pkill -9 -x -U "$TARGET_UID" MacControlRelay 2>/dev/null || true
+if pgrep -f -U "$TARGET_UID" "$RELAY" >/dev/null 2>&1; then
+  pkill -9 -f -U "$TARGET_UID" "$RELAY" 2>/dev/null || true
   sleep 0.2
 fi
-if pgrep -x -U "$TARGET_UID" MacControlRelay >/dev/null 2>&1; then
-  warn "relays still running after SIGKILL: $(pgrep -x -U "$TARGET_UID" MacControlRelay | tr '\n' ' ')"
+if pgrep -f -U "$TARGET_UID" "$RELAY" >/dev/null 2>&1; then
+  warn "relays still running after SIGKILL: $(pgrep -f -U "$TARGET_UID" "$RELAY" | tr '\n' ' ')"
 fi
 
 # ── 7. register MCP clients ──────────────────────────────────────────────────

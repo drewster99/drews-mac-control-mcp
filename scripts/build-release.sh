@@ -78,7 +78,9 @@ RESOURCE_ZIP="${PYTHON_DIR}/drews_mac_control_mcp/resources/MacControlMCP.app.zi
 WORK_DIR="${REPO_ROOT}/build/release"
 DERIVED_DATA="${WORK_DIR}/DerivedData"
 DIST_DIR="${REPO_ROOT}/dist"
-APP="${DIST_DIR}/${APP_NAME}"
+# Set by build_app to the variant currently being processed; the two live side by side under
+# dist/system and dist/user.
+APP=""
 
 NOTARY_PROFILE="${NOTARY_PROFILE:-ncc-cli-notarytool}"
 NOTARIZATION_TIMEOUT="${NOTARIZATION_TIMEOUT:-30m}"
@@ -339,29 +341,46 @@ run_tests() {
     info "${totals} tests across ${bundles} bundles, 0 failures"
 }
 
+# Only for the test run below; each build_app regenerates for its own identity.
 generate_project() {
     step "Generating the Xcode project"
+    ./scripts/gen-identity.sh --variant system >/dev/null
     ./scripts/gen-build-stamp.sh
     xcodegen generate >/dev/null
     info "MacControlMCP.xcodeproj"
 }
 
+# Builds one identity variant. `system` is what install.sh and the Homebrew cask install to
+# /Applications; `user` carries the .user identifier suffix and is what the wheel installs to
+# ~/Applications. They are separate products — separate bundle ids, LaunchAgent label and Mach
+# service — so a machine can hold both without them taking the host from each other. That
+# separation is decided at build time, which is why a release builds twice.
 build_app() {
-    step "Building $CONFIGURATION"
+    local variant="$1"
+    step "Building $CONFIGURATION (${variant} identity)"
+
+    local suffix
+    suffix="$(./scripts/gen-identity.sh --variant "$variant")"
+    ./scripts/gen-build-stamp.sh
+    xcodegen generate >/dev/null
+
+    local derived="${WORK_DIR}/DerivedData-${variant}"
+    local log="${WORK_DIR}/xcodebuild-${variant}.log"
     # Built unsigned and then signed explicitly below, so the Developer ID identity is applied
     # deterministically rather than through whatever automatic signing happens to resolve to.
     xcodebuild -project MacControlMCP.xcodeproj -scheme "$SCHEME" -configuration "$CONFIGURATION" \
-        -derivedDataPath "$DERIVED_DATA" \
+        -derivedDataPath "$derived" \
         -destination 'generic/platform=macOS' \
-        CODE_SIGNING_ALLOWED=NO \
-        clean build > "${WORK_DIR}/xcodebuild.log" 2>&1 \
-        || { tail -40 "${WORK_DIR}/xcodebuild.log"; die "Build failed. Full log: ${WORK_DIR}/xcodebuild.log"; }
+        CODE_SIGNING_ALLOWED=NO IDENTITY_SUFFIX="$suffix" \
+        clean build > "$log" 2>&1 \
+        || { tail -40 "$log"; die "Build failed (${variant}). Full log: $log"; }
 
-    local built="${DERIVED_DATA}/Build/Products/${CONFIGURATION}/${APP_NAME}"
+    local built="${derived}/Build/Products/${CONFIGURATION}/${APP_NAME}"
     [[ -d "$built" ]] || die "Built app not found at $built"
 
-    remove_generated "$DIST_DIR"
-    mkdir -p "$DIST_DIR"
+    APP="${DIST_DIR}/${variant}/${APP_NAME}"
+    mkdir -p "$(dirname "$APP")"
+    rm -rf "$APP"
     cp -R "$built" "$APP"
     # Strip anything an incremental build left at the top level; a valid bundle keeps everything
     # under Contents/.
@@ -378,7 +397,7 @@ bundle_executables() {
 }
 
 verify_built_product() {
-    step "Verifying the built product"
+    step "Verifying the built product (${1} identity)"
 
     local executable archs required
     while IFS= read -r executable; do
@@ -402,14 +421,26 @@ verify_built_product() {
         || die "Bundle reports version '$embedded_version', expected '$NEW_MARKETING'"
     [[ "$embedded_build" == "$NEW_BUILD" ]] \
         || die "Bundle reports build '$embedded_build', expected '$NEW_BUILD'"
-    [[ "$embedded_identifier" == "$BUNDLE_IDENTIFIER" ]] \
-        || die "Bundle identifier is '$embedded_identifier', expected '$BUNDLE_IDENTIFIER'"
     # bootstrap.py reads exactly these two keys to decide whether an install is current, and the
     # wheel's platform tag has to agree with the bundle's own floor.
     [[ "$WHEEL_PLATFORM_TAG" == *"$(tr '.' '_' <<<"$embedded_minimum")"* ]] \
         || die "Bundle requires macOS $embedded_minimum but the wheel is tagged $WHEEL_PLATFORM_TAG"
 
     info "version=$embedded_version ($embedded_build)  id=$embedded_identifier  minimum=macOS $embedded_minimum"
+
+    # The two variants must not collide, and each must be the one it claims to be — a mix-up here
+    # would ship the wheel a bundle that fights the cask's install, which is the whole thing this
+    # separation exists to prevent.
+    local label
+    label="$(plutil -extract Label raw -o - "${APP}/Contents/Library/LaunchAgents/com.nuclearcyborg.maccontrol.host.plist")"
+    case "$1" in
+        system) [[ "$embedded_identifier" == "$BUNDLE_IDENTIFIER" && "$label" == "${BUNDLE_IDENTIFIER}.host" ]] \
+                    || die "system build has identity '$embedded_identifier' / label '$label'" ;;
+        user)   [[ "$embedded_identifier" == "${BUNDLE_IDENTIFIER}.user" && "$label" == "${BUNDLE_IDENTIFIER}.host.user" ]] \
+                    || die "user build has identity '$embedded_identifier' / label '$label'" ;;
+        *) die "unknown variant '$1'" ;;
+    esac
+    info "identity: $embedded_identifier   launch agent: $label"
 
     # The relay is what MCP clients execute, and bootstrap.py execs it by this exact path.
     [[ -x "${APP}/Contents/Helpers/MacControlRelay" ]] || die "Relay is missing or not executable"
@@ -475,6 +506,10 @@ notarize_app() {
 
 build_wheel() {
     step "Packaging the app into the wheel"
+    # The wheel carries the USER identity: it installs to ~/Applications, alongside — not on top
+    # of — whatever the cask or install.sh put in /Applications.
+    APP="${DIST_DIR}/user/${APP_NAME}"
+    [[ -d "$APP" ]] || die "the user-identity build is missing at $APP"
 
     mkdir -p "$(dirname "${REPO_ROOT}/${RESOURCE_ZIP}")"
     remove_generated "${REPO_ROOT}/${RESOURCE_ZIP}"
@@ -555,6 +590,9 @@ PY
 # everywhere else here: the signature and the stapled ticket have to survive.
 make_app_archive() {
     step "Packaging the app for the Homebrew cask"
+    # The cask installs to /Applications, so it ships the SYSTEM identity.
+    APP="${DIST_DIR}/system/${APP_NAME}"
+    [[ -d "$APP" ]] || die "the system-identity build is missing at $APP"
 
     APP_ARCHIVE_NAME="MacControlMCP-${NEW_MARKETING}.zip"
     APP_ARCHIVE="${DIST_DIR}/${APP_ARCHIVE_NAME}"
@@ -867,8 +905,14 @@ adopt_existing_artifacts() {
     APP_ARCHIVE_SHA="$(awk -v f="$APP_ARCHIVE_NAME" '$2==f {print $1}' "${DIST_DIR}/SHA256SUMS")"
     [[ -n "$APP_ARCHIVE_SHA" ]] || die "SHA256SUMS has no entry for ${APP_ARCHIVE_NAME}."
 
-    xcrun stapler validate "$APP" || die "${APP} is not stapled; it was never notarized."
-    info "checksums match and the bundle is stapled"
+    # Both variants must still be stapled: the cask ships the system bundle, the wheel the user one.
+    local variant
+    for variant in system user; do
+        local bundle="${DIST_DIR}/${variant}/${APP_NAME}"
+        [[ -d "$bundle" ]] || die "Missing ${bundle}. Re-run without --finish-publish."
+        xcrun stapler validate "$bundle" || die "${bundle} is not stapled; it was never notarized."
+    done
+    info "checksums match and both bundles are stapled"
 }
 
 if [[ $FINISH_PUBLISH -eq 1 ]]; then
@@ -889,10 +933,19 @@ mkdir -p "$DERIVED_DATA"
 apply_version
 generate_project
 run_tests
-build_app
-verify_built_product
-sign_app
-notarize_app
+
+# Two products, so two builds. Each is signed and notarized in full: the wheel's ~/Applications
+# bundle and the cask's /Applications bundle carry different identifiers, and a notarization ticket
+# is bound to the bundle it was issued for.
+remove_generated "$DIST_DIR"
+mkdir -p "$DIST_DIR"
+for variant in system user; do
+    build_app "$variant"
+    verify_built_product "$variant"
+    sign_app
+    notarize_app
+done
+
 build_wheel
 verify_wheel
 make_app_archive
@@ -907,7 +960,8 @@ fi
 [[ $KEEP_WORK -eq 1 ]] || remove_generated "$WORK_DIR"
 
 printf '\n\033[1;32m✓ MacControlMCP %s (%s)\033[0m\n\n' "$NEW_MARKETING" "$NEW_BUILD"
-echo "  App:      $APP"
+echo "  App (system, for the cask):  ${DIST_DIR}/system/${APP_NAME}"
+echo "  App (user, in the wheel):    ${DIST_DIR}/user/${APP_NAME}"
 echo "  Wheel:    $WHEEL"
 echo "  Archive:  ${APP_ARCHIVE:-(none)}"
 echo
