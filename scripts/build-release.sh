@@ -50,7 +50,6 @@ SCHEME="Release"
 TEST_SCHEME="All"
 CONFIGURATION="Release"
 BUNDLE_IDENTIFIER="com.nuclearcyborg.maccontrol"
-RELAY_IDENTIFIER="com.nuclearcyborg.maccontrol.relay"
 REPO_SLUG="drewster99/drews-mac-control-mcp"
 PYPI_NAME="drews-mac-control-mcp"
 
@@ -687,8 +686,13 @@ verify_tap_cask() {
         || die "Could not read the cask back from ${TAP_REPOSITORY}"
     grep -q "$APP_ARCHIVE_SHA" <<<"$published" \
         || die "The cask in the tap does not carry this release's digest"
-    grep -q "/download/${TAG}/" <<<"$published" \
-        || die "The cask in the tap does not point at ${TAG}"
+    # The version stanza, not the URL: the URL derives its tag from #{version}, which is Ruby
+    # interpolation evaluated when Homebrew loads the cask — the file itself literally reads
+    # /download/v#{version}/, so grepping it for the expanded tag could never match.
+    grep -q "^  version \"${NEW_MARKETING}\"$" <<<"$published" \
+        || die "The cask in the tap is not version ${NEW_MARKETING}"
+    grep -q '/download/v#{version}/' <<<"$published" \
+        || die "The cask in the tap no longer derives its download URL from the version"
     info "brew install --cask ${TAP_REPOSITORY%/*}/${TAP_NAME}/${CASK_TOKEN}"
 }
 
@@ -698,8 +702,11 @@ verify_tap_cask() {
 
 release_notes() {
     NOTES_FILE="${WORK_DIR}/RELEASE_NOTES_${NEW_MARKETING}.md"
+    # Excluding the tag being released: this runs after `git tag`, so the newest v* tag is the one
+    # we just made — taking it would ask for the log from HEAD to HEAD and produce no changes at
+    # all. The previous release is the newest tag that is not this one.
     local previous
-    previous="$(git -C "$REPO_ROOT" tag --list 'v*' --sort=-v:refname | head -1)"
+    previous="$(git -C "$REPO_ROOT" tag --list 'v*' --sort=-v:refname | grep -v "^${TAG}\$" | head -1)"
     {
         echo "## Install"
         echo
