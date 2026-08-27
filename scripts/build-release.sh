@@ -27,6 +27,10 @@
 #   --skip-notarize        Sign but do not notarize/staple. Local testing only; cannot be published.
 #   --skip-tests           Do not run the test suite before building.
 #   --skip-tap             Do not update the Homebrew cask in drewster99/homebrew-tap.
+#   --finish-publish       Complete a release whose build succeeded but whose publish did not
+#                          finish. Reuses the artifacts already in dist/ rather than rebuilding,
+#                          and skips every step that is already done. Publishing is idempotent, so
+#                          this is safe to re-run.
 #   --identity NAME        Developer ID Application identity. Env: CODESIGN_IDENTITY.
 #   --notary-profile NAME  notarytool keychain profile. Env: NOTARY_PROFILE.
 #   --yes                  Do not prompt for confirmation before publishing.
@@ -91,6 +95,7 @@ NO_BUMP=0
 SKIP_NOTARIZE=0
 SKIP_TESTS=0
 SKIP_TAP=0
+FINISH_PUBLISH=0
 ASSUME_YES=0
 KEEP_WORK=0
 
@@ -105,6 +110,7 @@ while [[ $# -gt 0 ]]; do
         --skip-notarize)   SKIP_NOTARIZE=1; shift ;;
         --skip-tests)      SKIP_TESTS=1; shift ;;
         --skip-tap)        SKIP_TAP=1; shift ;;
+        --finish-publish)  FINISH_PUBLISH=1; PUBLISH=1; NO_BUMP=1; shift ;;
         --identity)        SIGNING_IDENTITY="${2:?--identity needs a value}"; shift 2 ;;
         --notary-profile)  NOTARY_PROFILE="${2:?--notary-profile needs a value}"; shift 2 ;;
         --yes)             ASSUME_YES=1; shift ;;
@@ -180,7 +186,9 @@ preflight() {
         fi
         # A dirty tree means the published wheel would not correspond to any commit. The version
         # bump this script makes is the one exception, so the check runs before it.
-        if [[ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]]; then
+        # Skipped when finishing a stranded publish: the previous run's version bump is legitimately
+        # sitting uncommitted, which is exactly the state we are recovering from.
+        if [[ $FINISH_PUBLISH -eq 0 && -n "$(git -C "$REPO_ROOT" status --porcelain)" ]]; then
             git -C "$REPO_ROOT" status --short
             die "Working tree is not clean. Commit or stash first."
         fi
@@ -658,6 +666,13 @@ update_tap() {
         cp "$CASK_FILE" "${checkout}/${CASK_PATH}"
 
         if [[ -z "$(git -C "$checkout" status --porcelain)" ]]; then
+            # Re-running a partly-finished publish lands here legitimately; a fresh release does
+            # not, and an unchanged cask would mean the digest never moved.
+            if [[ $FINISH_PUBLISH -eq 1 ]]; then
+                info "the tap already holds this cask"
+                verify_tap_cask
+                return
+            fi
             die "The tap already holds this exact cask, which cannot be right for a new release"
         fi
 
@@ -706,7 +721,10 @@ release_notes() {
     # we just made — taking it would ask for the log from HEAD to HEAD and produce no changes at
     # all. The previous release is the newest tag that is not this one.
     local previous
-    previous="$(git -C "$REPO_ROOT" tag --list 'v*' --sort=-v:refname | grep -v "^${TAG}\$" | head -1)"
+    # `|| true` is load-bearing: on a first release the only v* tag IS the one just created, so
+    # grep -v filters everything, exits 1, and under pipefail that would abort the release after
+    # PyPI had already been written to. No previous tag is a normal state, not a failure.
+    previous="$(git -C "$REPO_ROOT" tag --list 'v*' --sort=-v:refname | grep -v "^${TAG}\$" | head -1 || true)"
     {
         echo "## Install"
         echo
@@ -757,25 +775,56 @@ publish() {
         return
     fi
 
+    # Every step below is conditional on not already being done. A publish that dies partway —
+    # after PyPI but before the GitHub release, say — must be finishable by re-running rather than
+    # unwound by hand, because the PyPI half cannot be unwound at all.
     git -C "$REPO_ROOT" add "$VERSION_FILE" "$PROJECT_YML" "$PYPROJECT"
-    git -C "$REPO_ROOT" commit -m "Release ${NEW_MARKETING} (${NEW_BUILD})" >/dev/null
-    git -C "$REPO_ROOT" tag -a "$TAG" -m "Release ${NEW_MARKETING}"
+    if git -C "$REPO_ROOT" diff --cached --quiet; then
+        info "version bump already committed"
+    else
+        git -C "$REPO_ROOT" commit -m "Release ${NEW_MARKETING} (${NEW_BUILD})" >/dev/null
+        info "committed the version bump"
+    fi
+
+    if git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+        info "tag ${TAG} already exists"
+    else
+        git -C "$REPO_ROOT" tag -a "$TAG" -m "Release ${NEW_MARKETING}"
+    fi
 
     # Uploaded before the tag is pushed: PyPI is the irreversible half, so if it fails the tag has
     # not yet escaped this machine and the release can simply be retried.
-    twine upload "$WHEEL"
-    info "uploaded to PyPI"
+    if version_is_on_index; then
+        info "${NEW_MARKETING} is already on PyPI"
+    else
+        twine upload "$WHEEL"
+        info "uploaded to PyPI"
+    fi
 
     git -C "$REPO_ROOT" push origin HEAD
     git -C "$REPO_ROOT" push origin "$TAG"
 
-    release_notes
-    gh release create "$TAG" "$WHEEL" "$APP_ARCHIVE" "${DIST_DIR}/SHA256SUMS" \
-        --repo "$REPO_SLUG" \
-        --title "MacControlMCP ${NEW_MARKETING}" \
-        --notes-file "$NOTES_FILE"
+    if gh release view "$TAG" --repo "$REPO_SLUG" >/dev/null 2>&1; then
+        info "GitHub release ${TAG} already exists"
+    else
+        release_notes
+        gh release create "$TAG" "$WHEEL" "$APP_ARCHIVE" "${DIST_DIR}/SHA256SUMS" \
+            --repo "$REPO_SLUG" \
+            --title "MacControlMCP ${NEW_MARKETING}" \
+            --notes-file "$NOTES_FILE"
+    fi
     verify_published
     update_tap
+}
+
+# True when this exact version is already published on the target index.
+version_is_on_index() {
+    local index="https://pypi.org/pypi/${PYPI_NAME}/json"
+    [[ $TESTPYPI -eq 1 ]] && index="https://test.pypi.org/pypi/${PYPI_NAME}/json"
+    local existing
+    existing="$(curl -fsS "$index" 2>/dev/null \
+        | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin).get("releases",{})))' 2>/dev/null || true)"
+    [[ " $existing " == *" $NEW_MARKETING "* ]]
 }
 
 verify_published() {
@@ -792,6 +841,44 @@ verify_published() {
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Adopt the artifacts a previous, partly-finished run already built and verified, instead of
+# rebuilding them. A rebuild would produce a different binary for a version that is already on
+# PyPI, so the only correct thing to publish is what that run actually produced.
+adopt_existing_artifacts() {
+    step "Adopting the artifacts from the previous run"
+
+    read_current_version
+    NEW_MARKETING="$CURRENT_MARKETING"; NEW_BUILD="$CURRENT_BUILD"; TAG="v${NEW_MARKETING}"
+    info "version: ${NEW_MARKETING} (${NEW_BUILD})"
+
+    APP_ARCHIVE_NAME="MacControlMCP-${NEW_MARKETING}.zip"
+    APP_ARCHIVE="${DIST_DIR}/${APP_ARCHIVE_NAME}"
+    WHEEL="$(ls -t "${REPO_ROOT}/${PYTHON_DIR}"/dist/*-"${NEW_MARKETING}"-*.whl 2>/dev/null | head -1 || true)"
+
+    [[ -n "$WHEEL" ]] || die "No wheel for ${NEW_MARKETING} in ${PYTHON_DIR}/dist. Re-run without --finish-publish."
+    [[ -f "$APP_ARCHIVE" ]] || die "Missing ${APP_ARCHIVE}. Re-run without --finish-publish."
+    [[ -f "${DIST_DIR}/SHA256SUMS" ]] || die "Missing ${DIST_DIR}/SHA256SUMS. Re-run without --finish-publish."
+
+    # The recorded digests are the contract the cask is written against; if the files on disk no
+    # longer match them, they are not the artifacts that were verified.
+    ( cd "$DIST_DIR" && shasum -a 256 -c SHA256SUMS >/dev/null ) \
+        || die "The artifacts in ${DIST_DIR} do not match SHA256SUMS."
+    APP_ARCHIVE_SHA="$(awk -v f="$APP_ARCHIVE_NAME" '$2==f {print $1}' "${DIST_DIR}/SHA256SUMS")"
+    [[ -n "$APP_ARCHIVE_SHA" ]] || die "SHA256SUMS has no entry for ${APP_ARCHIVE_NAME}."
+
+    xcrun stapler validate "$APP" || die "${APP} is not stapled; it was never notarized."
+    info "checksums match and the bundle is stapled"
+}
+
+if [[ $FINISH_PUBLISH -eq 1 ]]; then
+    preflight
+    mkdir -p "$WORK_DIR"
+    adopt_existing_artifacts
+    publish
+    printf '\n\033[1;32m✓ Finished publishing MacControlMCP %s (%s)\033[0m\n\n' "$NEW_MARKETING" "$NEW_BUILD"
+    exit 0
+fi
 
 preflight
 compute_version
