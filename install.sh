@@ -177,15 +177,13 @@ step "Generating Xcode project (xcodegen)"
 # higher version — then stamp the exact-binary id — both BEFORE xcodegen so they're in the build.
 # The version files are left modified; commit them after the install.
 ./scripts/bump-version.sh
-./scripts/gen-build-stamp.sh
 # install.sh owns /Applications, so it builds the system identity. The wheel's ~/Applications build
 # carries the .user suffix instead, which is what lets the two coexist without taking the host from
-# each other.
-IDENTITY_SUFFIX="$(./scripts/gen-identity.sh --variant system)"
+# each other. generate.sh writes the generated sources and runs xcodegen in the one right order.
+IDENTITY_SUFFIX="$(./scripts/generate.sh --variant system)"
 NEW_VERSION=$(grep -oE 'marketingVersion = "[^"]+"' Sources/MacControlMCPCore/AppVersion.swift | sed -E 's/.*"([^"]+)".*/\1/')
 NEW_BUILD=$(grep -oE 'buildNumber = "[^"]+"' Sources/MacControlMCPCore/AppVersion.swift | sed -E 's/.*"([^"]+)".*/\1/')
 info "version: $NEW_VERSION ($NEW_BUILD)"
-xcodegen generate >/dev/null
 info "MacControlMCP.xcodeproj"
 
 # ── 2. build Release ─────────────────────────────────────────────────────────

@@ -344,9 +344,7 @@ run_tests() {
 # Only for the test run below; each build_app regenerates for its own identity.
 generate_project() {
     step "Generating the Xcode project"
-    ./scripts/gen-identity.sh --variant system >/dev/null
-    ./scripts/gen-build-stamp.sh
-    xcodegen generate >/dev/null
+    ./scripts/generate.sh --variant system >/dev/null 2>&1
     info "MacControlMCP.xcodeproj"
 }
 
@@ -360,9 +358,7 @@ build_app() {
     step "Building $CONFIGURATION (${variant} identity)"
 
     local suffix
-    suffix="$(./scripts/gen-identity.sh --variant "$variant")"
-    ./scripts/gen-build-stamp.sh
-    xcodegen generate >/dev/null
+    suffix="$(./scripts/generate.sh --variant "$variant" 2>/dev/null)"
 
     local derived="${WORK_DIR}/DerivedData-${variant}"
     local log="${WORK_DIR}/xcodebuild-${variant}.log"

@@ -26,6 +26,7 @@ import contextlib
 import fcntl
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,7 @@ HOST_EXECUTABLE_RELATIVE = "Contents/Helpers/MacControlHost.app/Contents/MacOS/M
 HOST_LAUNCH_AGENT_LABEL = "com.nuclearcyborg.maccontrol.host.user"
 INFO_PLIST_RELATIVE = "Contents/Info.plist"
 ARCHIVE_NAME = "MacControlMCP.app.zip"
+PACKAGE_NAME = "drews-mac-control-mcp"
 
 INSTALL_DIR = Path.home() / "Applications"
 INSTALLED_APP = INSTALL_DIR / APP_NAME
@@ -277,14 +279,21 @@ def main() -> None:
 
     if "--setup" in argv:
         open_app()
-        relay = INSTALLED_APP / RELAY_RELATIVE
         print(f"MacControlMCP {bundled_version()} installed to {INSTALL_DIR} and opened.")
         print()
         print("Grant Accessibility (and Screen Recording, for screenshots) when prompted, then")
         print("register the server with your MCP client:")
         print()
-        print(f"  claude mcp add --scope user maccontrol {relay}")
-        print(f"  codex mcp add maccontrol -- {relay}")
+        # Register THIS wrapper, not the relay inside the app. The wrapper re-checks on every
+        # launch that the installed app matches the version the wheel carries, and replaces it if
+        # not — which is the whole reason to install from PyPI. Pointing a client straight at the
+        # relay pins it to whatever is installed today and silently forfeits every future update.
+        launcher = shutil.which("uvx") or "uvx"
+        print(f"  claude mcp add --scope user maccontrol -- {launcher} {PACKAGE_NAME}")
+        print(f"  codex mcp add maccontrol -- {launcher} {PACKAGE_NAME}")
+        print()
+        print("Those run this wrapper, which keeps the app up to date. Registering the relay path")
+        print("inside the app instead would work today and never update.")
         return
 
     exec_relay(argv)

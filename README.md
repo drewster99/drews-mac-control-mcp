@@ -166,7 +166,7 @@ Useful flags:
 The script orchestrates the same steps you can run by hand:
 
 ```bash
-xcodegen generate          # generate MacControlMCP.xcodeproj from project.yml
+./scripts/generate.sh      # write the generated sources, then generate the .xcodeproj
 # build the Release scheme in Xcode, then sign (+ notarize) the result:
 ./notarize-app.sh          # produces a signed, notarized dist/MacControlMCP.app
 cp -R dist/MacControlMCP.app /Applications/
@@ -231,27 +231,30 @@ points at the tag that was just cut.
 
 ### Register with an MCP client
 
-The server is the relay binary inside the app bundle. Which folder it sits in depends on how the
-app got there: `~/Applications` for the PyPI install, `/Applications` for `install.sh`.
+What you register depends on how you installed, and the difference decides whether you get updates.
 
-```
-~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay   # uvx drews-mac-control-mcp
- /Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay   # ./install.sh
-```
+**Installed from PyPI — register the wrapper, not the relay.**
 
-**Codex:**
 ```bash
-codex mcp add maccontrol -- ~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
+claude mcp add --scope user maccontrol -- "$(command -v uvx)" drews-mac-control-mcp
+codex  mcp add maccontrol -- "$(command -v uvx)" drews-mac-control-mcp
 ```
 
-**Claude Code:**
+The wrapper checks on every launch that the app in `~/Applications` matches the version its wheel
+carries, and replaces it if not; `uvx` re-checks PyPI for a newer wheel. Together that is what
+makes this channel self-updating. Pointing a client at the relay path instead works today and
+never updates again.
+
+**Installed via Homebrew or `install.sh` — register the relay directly**, since `brew upgrade` and
+`install.sh` are what update it:
+
 ```bash
-claude mcp add --scope user maccontrol ~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
+claude mcp add --scope user maccontrol /Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
+codex  mcp add maccontrol -- /Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
 ```
 
-`install.sh` registers both clients for you; `--setup` prints the commands with the right path
-already filled in. Any MCP client that launches a stdio server works the same way — point it at
-the relay.
+`install.sh` registers both clients for you, and `uvx drews-mac-control-mcp --setup` prints the
+commands for its own channel. Any MCP client that launches a stdio server works the same way.
 
 ---
 

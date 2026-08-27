@@ -19,12 +19,18 @@ That installs the app, opens it so macOS prompts for permissions, and prints the
 registration command. Grant **Accessibility** — and **Screen Recording** if you want screenshots —
 in System Settings ▸ Privacy & Security.
 
-Then point your MCP client at the relay:
+Then register **this wrapper** as the MCP server command:
 
 ```sh
-claude mcp add --scope user maccontrol ~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
-codex  mcp add maccontrol -- ~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay
+claude mcp add --scope user maccontrol -- "$(command -v uvx)" drews-mac-control-mcp
+codex  mcp add maccontrol -- "$(command -v uvx)" drews-mac-control-mcp
 ```
+
+That is what keeps it current. On every launch the wrapper checks the app installed in
+`~/Applications` against the version this wheel carries and replaces it if they differ, and `uvx`
+re-checks PyPI for a newer wheel. Pointing a client straight at
+`~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay` also works, but it pins you to
+whatever is installed today and silently forfeits every future update.
 
 ## Requirements
 
