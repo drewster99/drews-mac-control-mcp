@@ -244,10 +244,13 @@ claude mcp add --scope user maccontrol -- "$(command -v uvx)" drews-mac-control-
 codex  mcp add maccontrol -- "$(command -v uvx)" drews-mac-control-mcp
 ```
 
-The wrapper checks on every launch that the app in `~/Applications` matches the version its wheel
-carries, and replaces it if not; `uvx` re-checks PyPI for a newer wheel. Together that is what
-makes this channel self-updating. Pointing a client at the relay path instead works today and
-never updates again.
+The wrapper checks on **every** launch that the app in `~/Applications` matches the version its
+wheel carries, and replaces it if not. `uvx` supplies the other half: it caches PyPI's index for
+the ten minutes PyPI asks for (`cache-control: max-age=600`) and re-resolves once that lapses, so a
+new release is picked up on its own — within minutes, not necessarily on the very next call.
+`uvx --refresh drews-mac-control-mcp` forces it immediately.
+
+Pointing a client at the relay path instead works today and never updates again.
 
 **Installed via Homebrew or `install.sh` — register the relay directly**, since `brew upgrade` and
 `install.sh` are what update it:

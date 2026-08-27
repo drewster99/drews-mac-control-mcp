@@ -35,10 +35,14 @@ codex  mcp add maccontrol -- "$(command -v uvx)" drews-mac-control-mcp
 ```
 
 That is what keeps it current. On every launch the wrapper checks the app installed in
-`~/Applications` against the version this wheel carries and replaces it if they differ, and `uvx`
-re-checks PyPI for a newer wheel. Pointing a client straight at
-`~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay` also works, but it pins you to
-whatever is installed today and silently forfeits every future update.
+`~/Applications` against the version this wheel carries and replaces it if they differ. `uvx`
+supplies the other half: it caches PyPI's index for the ten minutes PyPI asks for and re-resolves
+once that lapses, so a new release arrives on its own — within minutes, not necessarily on the very
+next call. `uvx --refresh drews-mac-control-mcp` forces it immediately.
+
+Pointing a client straight at `~/Applications/MacControlMCP.app/Contents/Helpers/MacControlRelay`
+also works, but it pins you to whatever is installed today and silently forfeits every future
+update.
 
 ## Requirements
 
