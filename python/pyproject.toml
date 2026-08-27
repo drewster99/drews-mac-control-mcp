@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drews-mac-control-mcp"
-version = "0.2.38"
+version = "0.2.39"
 description = "An MCP server that lets an LLM drive macOS apps and the iOS Simulator, delivered as a signed macOS app."
 readme = "README.md"
 requires-python = ">=3.9"
