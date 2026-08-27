@@ -281,6 +281,13 @@ def main() -> None:
         open_app()
         print(f"MacControlMCP {bundled_version()} installed to {INSTALL_DIR} and opened.")
         print()
+        # Registering the host creates a login/background item, and macOS asks about it. Naming it
+        # here matters: dismissing that prompt leaves the agent unapproved, so the host never
+        # launches and every later tool call fails with nothing to explain why.
+        print("macOS will ask to allow a new background item — approve it, or the host cannot")
+        print("start. If you dismissed it, enable MacControlMCP under")
+        print("System Settings > General > Login Items & Extensions.")
+        print()
         print("Grant Accessibility (and Screen Recording, for screenshots) when prompted, then")
         print("register the server with your MCP client:")
         print()

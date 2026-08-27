@@ -16,8 +16,16 @@ uvx drews-mac-control-mcp --setup
 ```
 
 That installs the app, opens it so macOS prompts for permissions, and prints the client
-registration command. Grant **Accessibility** — and **Screen Recording** if you want screenshots —
-in System Settings ▸ Privacy & Security.
+registration command.
+
+Two approvals are needed, and both are easy to miss:
+
+1. **A new background item.** Registering the host creates a login item, and macOS asks about it.
+   Dismissing that prompt leaves the agent unapproved, so the host never starts and every tool call
+   fails with nothing to explain why. If you dismissed it, enable **MacControlMCP** under
+   System Settings ▸ General ▸ Login Items & Extensions.
+2. **Accessibility** — and **Screen Recording** if you want screenshots — in
+   System Settings ▸ Privacy & Security.
 
 Then register **this wrapper** as the MCP server command:
 

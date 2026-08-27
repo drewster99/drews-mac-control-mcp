@@ -109,8 +109,12 @@ uvx drews-mac-control-mcp --setup
 ```
 
 The wheel carries the signed, notarized app. It installs to `~/Applications` on first run, opens
-it so macOS raises the permission prompts, and prints the client registration command. Grant
-**Accessibility** — and **Screen Recording** if you want screenshots.
+it so macOS raises the permission prompts, and prints the client registration command.
+
+Approve **both** prompts. The first allows a new **background item** — that is the host agent, and
+dismissing it leaves the host unable to start, with every later tool call failing and nothing to
+say why (re-enable it under System Settings ▸ General ▸ Login Items & Extensions). The second
+grants **Accessibility**, plus **Screen Recording** if you want screenshots.
 
 Later releases replace the installed app by themselves: the wrapper compares the version it
 carries against the one in `~/Applications` on every launch, so a `uvx` upgrade brings the app
