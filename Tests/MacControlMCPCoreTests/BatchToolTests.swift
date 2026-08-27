@@ -21,7 +21,7 @@ final class BatchToolTests: XCTestCase {
     private func run(_ steps: [[String: Any]], stopOnError: Bool? = nil, recorder: Recorder) throws -> [String: Any] {
         var arguments: [String: Any] = ["steps": steps]
         if let stopOnError { arguments["stopOnError"] = stopOnError }
-        return try object(BatchTool(dispatch: recorder.dispatch).call(arguments))
+        return try object(BatchTool(dispatch: recorder.dispatch, declaredParameters: { _ in nil }).call(arguments))
     }
 
     func testRunsEveryStepInOrder() throws {
@@ -75,7 +75,7 @@ final class BatchToolTests: XCTestCase {
     }
 
     func testMissingStepsIsRejected() throws {
-        let result = try object(BatchTool(dispatch: { _, _ in "{}" }).call([:]))
+        let result = try object(BatchTool(dispatch: { _, _ in "{}" }, declaredParameters: { _ in nil }).call([:]))
         XCTAssertEqual(result["ok"] as? Bool, false)
         XCTAssertEqual(result["error"] as? String, "missing_steps")
     }
@@ -91,7 +91,7 @@ final class BatchToolTests: XCTestCase {
 
     func testDeadlineAbortsBeforeDispatch() throws {
         let recorder = Recorder()
-        let result = try object(BatchTool(overallBudget: 0, dispatch: recorder.dispatch).call(["steps": [step("a")]]))
+        let result = try object(BatchTool(overallBudget: 0, dispatch: recorder.dispatch, declaredParameters: { _ in nil }).call(["steps": [step("a")]]))
         XCTAssertTrue(recorder.calls.isEmpty)
         XCTAssertEqual(result["aborted"] as? Bool, true)
         XCTAssertEqual(result["failedAt"] as? Int, 0)

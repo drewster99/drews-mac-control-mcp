@@ -106,6 +106,15 @@ public final class MCPServer {
         guard let tool = tools.first(where: { $0.name == name }) else {
             return JSONRPC.errorData(id: request.id, code: -32602, message: "unknown tool: \(name)")
         }
+        // Validated here, on what the caller sent, before any wrapper runs: DeferringTool injects a
+        // `timeout` into the inner tool's arguments for tools that never declare one, so checking
+        // any later would reject the server's own bookkeeping. -32602 is JSON-RPC's own
+        // "Invalid params", and matches how an unknown *tool* is reported immediately above.
+        if let rejection = ToolArgumentValidation.rejection(for: arguments, tool: tool) {
+            let howToFix = (rejection["howToFix"] as? String) ?? "unknown parameter"
+            return JSONRPC.errorData(id: request.id, code: -32602, message: howToFix,
+                                     data: rejection)
+        }
         let text = tool.call(arguments)
         // Fold the current user-idle snapshot into the tool's own JSON result as a top-level
         // `userActivity` key, so the response is one object rather than two concatenated blobs.
