@@ -44,6 +44,17 @@ Pointing a client straight at `~/Applications/MacControlMCP.app/Contents/Helpers
 also works, but it pins you to whatever is installed today and silently forfeits every future
 update.
 
+## Uninstall
+
+```sh
+uvx drews-mac-control-mcp --uninstall
+```
+
+Removes the host agent's registration **first**, then the app. That order is the point: deleting
+the bundle on its own does not clear its registration, which leaves a login item pointing at an app
+that is gone and only findable by hand in System Settings. If the registration cannot be removed,
+nothing is deleted — pressing on is exactly what strands it.
+
 ## Requirements
 
 macOS 14 or later. The wheel is tagged `macosx_14_0_universal2`, so pip and uv decline to install

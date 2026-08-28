@@ -139,6 +139,18 @@ its own Accessibility (and Screen Recording) grant. See [CLAUDE.md](./CLAUDE.md)
 Each GitHub release also carries `MacControlMCP-<version>.zip` for a manual install, and a
 `SHA256SUMS` covering every download.
 
+### Uninstalling
+
+```bash
+uvx drews-mac-control-mcp --uninstall          # PyPI install
+brew uninstall --cask drewster99/tap/maccontrol-mcp   # Homebrew install
+```
+
+Both remove the host agent's registration **before** deleting the app, which is the only order that
+works: deleting the bundle on its own leaves the registration behind as a login item pointing at
+nothing, findable only by hand in System Settings. The app exposes `--unregister-and-exit` for
+exactly this, so neither path needs the GUI.
+
 ---
 
 ## Build & install from source

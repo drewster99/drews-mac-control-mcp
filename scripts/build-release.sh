@@ -637,8 +637,15 @@ cask "${CASK_TOKEN}" do
     system_command "/usr/bin/open", args: ["--background", "#{appdir}/MacControlMCP.app"]
   end
 
-  uninstall launchctl: "com.nuclearcyborg.maccontrol.host",
-            quit:      "com.nuclearcyborg.maccontrol"
+  # early_script runs while the bundle still exists, which is the only moment the registration can
+  # be removed: deleting the app does not clear its Background Task Management record, leaving a
+  # login item pointing at nothing that only the user can find and remove.
+  uninstall early_script: {
+              executable: "MacControlMCP.app/Contents/MacOS/MacControlMCP",
+              args:       ["--unregister-and-exit"],
+            },
+            launchctl:    "com.nuclearcyborg.maccontrol.host",
+            quit:         "com.nuclearcyborg.maccontrol"
 
   zap trash: [
     "~/Library/Logs/MacControlMCP",

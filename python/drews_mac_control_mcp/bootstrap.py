@@ -264,11 +264,66 @@ def open_app() -> None:
     subprocess.run(["/usr/bin/open", str(INSTALLED_APP)], check=False)
 
 
+def uninstall() -> None:
+    """Remove the app and, first, its LaunchAgent registration.
+
+    Order matters and is the whole point. Deleting the bundle does NOT remove its Background Task
+    Management record: the login item survives, pointing at an app that is gone, and the only way
+    left to clear it is for the user to hunt it down in System Settings. So the registration is
+    torn down while the bundle still exists to do it with.
+
+    A failure to unregister stops the removal rather than pressing on, because deleting anyway is
+    exactly what strands the record.
+    """
+    if not INSTALLED_APP.is_dir():
+        print(f"Nothing to remove: {INSTALLED_APP} does not exist.")
+        return
+
+    app_executable = INSTALLED_APP / APP_EXECUTABLE_RELATIVE
+    if app_executable.is_file():
+        try:
+            result = subprocess.run([str(app_executable), "--unregister-and-exit"],
+                                    timeout=REGISTER_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise BootstrapError(
+                "unregistering the host agent timed out; nothing was removed. "
+                f"Retry, or remove the login item under System Settings > General > "
+                f"Login Items & Extensions and then delete {INSTALLED_APP}."
+            )
+        if result.returncode != 0:
+            raise BootstrapError(
+                "could not remove the host agent's registration; nothing was removed. "
+                f"Remove the login item under System Settings > General > Login Items & "
+                f"Extensions, then delete {INSTALLED_APP}."
+            )
+
+    subprocess.run(["/bin/rm", "-rf", str(INSTALLED_APP)], check=False)
+    _reap_retired_bundles()
+    with contextlib.suppress(Exception):
+        LOCK_FILE.unlink()
+        STATE_DIR.rmdir()
+
+    print(f"Removed {INSTALLED_APP} and its host agent registration.")
+    print()
+    print("Your MCP client still has the server registered. Remove it with:")
+    print("  claude mcp remove maccontrol")
+    print("  codex mcp remove maccontrol")
+
+
 def main() -> None:
     argv = sys.argv[1:]
 
     if "--version" in argv:
         print(f"drews-mac-control-mcp (wrapper), bundled app {bundled_version()}")
+        return
+
+    # Before ensure_installed: uninstalling must not begin by installing.
+    if "--uninstall" in argv:
+        try:
+            uninstall()
+        except BootstrapError as error:
+            log(str(error))
+            sys.exit(1)
         return
 
     try:
@@ -301,6 +356,8 @@ def main() -> None:
         print()
         print("Those run this wrapper, which keeps the app up to date. Registering the relay path")
         print("inside the app instead would work today and never update.")
+        print()
+        print("To remove everything later: uvx drews-mac-control-mcp --uninstall")
         return
 
     exec_relay(argv)

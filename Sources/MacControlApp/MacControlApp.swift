@@ -33,9 +33,23 @@ struct MacControlApp: App {
 /// the current bundle across updates) and boots any *stale* host so launchd relaunches the current
 /// binary on demand. With `--register-and-exit` — the relay's quiet self-bootstrap — it does this
 /// headlessly and quits before showing UI, so a cold MCP-client start needs no manual launch.
+///
+/// `--unregister-and-exit` is its counterpart, and the only way to remove the registration without
+/// the GUI. Deleting the app does NOT remove its Background Task Management record: the login item
+/// survives, pointing at a bundle that is gone, and the only other way to clear it is for the user
+/// to find it in System Settings. An uninstaller — `drews-mac-control-mcp --uninstall`, or the
+/// Homebrew cask's uninstall stanza — runs this first, while the bundle still exists.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         let agent = SMAppService.agent(plistName: HostLifecycle.plistName)
+
+        // Before the auto-register below, not after: registering and then immediately undoing it
+        // would leave a moment where this build owns a registration it is in the middle of
+        // removing, and on a failed unregister it would leave one it never had.
+        if CommandLine.arguments.contains("--unregister-and-exit") {
+            exit(HostLifecycle.unregisterAndStopOwnHosts(agent) ? 0 : 1)
+        }
+
         do {
             try agent.register()
         } catch {
@@ -68,6 +82,33 @@ enum HostLifecycle {
 
     /// Same as `terminateStaleHost`, returning the hosts that were asked to terminate so a caller
     /// can wait for them to actually exit.
+    /// Remove this build's LaunchAgent registration and stop the hosts it left running.
+    ///
+    /// Returns false only when the registration could not be removed — which is what an
+    /// uninstaller needs to know, because deleting the bundle afterwards would then strand the
+    /// record with no way left to reach it.
+    ///
+    /// Hosts are stopped BEFORE unregistering: tearing down the job while one is live leaves
+    /// launchd holding a process for a service that no longer exists. `terminateStaleHosts…`
+    /// deliberately spares hosts from this bundle, so it is the wrong tool here — uninstalling
+    /// means stopping our own.
+    static func unregisterAndStopOwnHosts(_ agent: SMAppService) -> Bool {
+        let ours = NSRunningApplication.runningApplications(withBundleIdentifier: hostBundleID)
+        ours.forEach { $0.terminate() }
+        waitForExit(of: ours, deadline: 3.0)
+
+        // Already absent is the outcome the caller wanted, not a failure.
+        guard agent.status != .notRegistered else { return true }
+        do {
+            try agent.unregister()
+            return true
+        } catch {
+            FileHandle.standardError.write(
+                Data("unregister failed: \(error.localizedDescription)\n".utf8))
+            return false
+        }
+    }
+
     static func terminateStaleHostsReturningThem() -> [NSRunningApplication] {
         let current = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Helpers/MacControlHost.app").standardizedFileURL
