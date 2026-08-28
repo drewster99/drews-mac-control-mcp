@@ -40,7 +40,23 @@ struct MacControlApp: App {
 /// to find it in System Settings. An uninstaller — `drews-mac-control-mcp --uninstall`, or the
 /// Homebrew cask's uninstall stanza — runs this first, while the bundle still exists.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Flags that do their work and quit without ever showing UI.
+    private static let headlessFlags = ["--register-and-exit", "--unregister-and-exit"]
+
+    private static var isHeadlessLaunch: Bool {
+        CommandLine.arguments.contains { headlessFlags.contains($0) }
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // First, before anything can put a window on screen. The app has no LSUIElement — it is a
+        // regular app — so launching its binary directly (which install.sh, the wheel's bootstrap
+        // and the cask's uninstall all do) otherwise flashes the window for as long as the work
+        // below takes, stealing focus from whatever the user was doing. The relay avoids this by
+        // going through `open -gj`; nothing else can, so the app has to refuse to present itself.
+        if Self.isHeadlessLaunch {
+            NSApp.setActivationPolicy(.prohibited)
+        }
+
         let agent = SMAppService.agent(plistName: HostLifecycle.plistName)
 
         // Before the auto-register below, not after: registering and then immediately undoing it
