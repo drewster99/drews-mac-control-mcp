@@ -8,16 +8,21 @@
 //
 
 import Foundation
+import MacControlMCPCore
 
-public let mcpMachServiceName = "P8MA38JTXY.com.nuclearcyborg.maccontrol.host"
+// All three derive from AppIdentity, which scripts/gen-identity.sh writes for the variant being
+// built. The system build (/Applications) and the user build (~/Applications) therefore pin
+// different identifiers and talk over different Mach services, so their stacks cannot cross.
+
+public let mcpMachServiceName = AppIdentity.machServiceName
 
 /// What the host accepts from a connecting caller — our team AND specifically the signed
 /// relay or registrar/GUI (not just any same-team binary). Pins identifier, closing the
 /// confused-deputy hole.
-public let mcpCallerRequirement = "anchor apple generic and certificate leaf[subject.OU] = \"P8MA38JTXY\" and (identifier \"com.nuclearcyborg.maccontrol.relay\" or identifier \"com.nuclearcyborg.maccontrol\")"
+public let mcpCallerRequirement = AppIdentity.callerRequirement
 
 /// What the relay requires of the host it connects to (mutual auth).
-public let mcpHostRequirement = "anchor apple generic and certificate leaf[subject.OU] = \"P8MA38JTXY\" and identifier \"com.nuclearcyborg.maccontrol.host\""
+public let mcpHostRequirement = AppIdentity.hostRequirement
 
 @objc(MCPHostProtocol)
 public protocol MCPHostProtocol {

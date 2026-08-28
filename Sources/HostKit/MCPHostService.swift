@@ -92,7 +92,14 @@ public func makeFullServer() -> MCPServer {
     // `batch` dispatches over the UNDECORATED base tools, so its steps never re-defer — the batch
     // scope defers once and restores once. The server list, in contrast, exposes each interrupting
     // tool wrapped in DeferringTool so a direct call defers.
-    let serverTools = (baseTools + [BatchTool(dispatch: dispatch)]).map { tool -> Tool in
+    // Same list `dispatch` resolves against, so a step's arguments are checked against the very
+    // tool that will run them.
+    let declaredParameters: (String) -> Set<String>? = { name in
+        baseTools.first(where: { $0.name == name })
+            .map { ToolArgumentValidation.declaredParameterNames(of: $0) }
+    }
+    let serverTools = (baseTools + [BatchTool(dispatch: dispatch,
+                                              declaredParameters: declaredParameters)]).map { tool -> Tool in
         guard let profile = interruptionProfiles[tool.name] else { return tool }
         return DeferringTool(inner: tool, profile: profile)
     }

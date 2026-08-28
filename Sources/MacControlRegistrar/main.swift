@@ -11,6 +11,7 @@
 //
 
 import Foundation
+import MacControlMCPCore
 import ServiceManagement
 
 func statusName(_ status: SMAppService.Status) -> String {
@@ -27,7 +28,7 @@ func printError(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
-let agent = SMAppService.agent(plistName: "com.nuclearcyborg.maccontrol.host.plist")
+let agent = SMAppService.agent(plistName: AppIdentity.launchAgentPlistName)
 print("agent status: \(statusName(agent.status))")
 
 if CommandLine.arguments.dropFirst().contains("--unregister") {

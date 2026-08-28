@@ -128,9 +128,13 @@ and toolbars — without losing anything actionable:
   Truly instant replacement would need the host to self-detect a changed bundle/binary and exit
   (or a version handshake on connect). Stale-host-from-a-*different*-path is already terminated
   on launch (`HostLifecycle.terminateStaleHost`); same-path is the remaining gap.
-- **Distribution as signed `.pkg`** — a `postinstall` that registers in the user context would
-  make first-install zero-touch (no app launch, even via the relay self-bootstrap). Bigger change
-  to `release.sh`/distribution. CONTROL_APP_DESIGN §15.
+- **Zero-touch first install** — largely delivered, but unevenly across the three channels. The
+  PyPI wheel gets there: `bootstrap.py` runs the app's headless `--register-and-exit` straight
+  after extracting, so the LaunchAgent exists before the first MCP call and nothing has to be
+  launched by hand. The Homebrew cask still leans on a `postflight` that opens the app, and a
+  manual unzip relies on the relay's own self-bootstrap. A signed `.pkg` with a `postinstall` that
+  registers in the user context would close the gap for those two — a change to
+  `scripts/build-release.sh`. CONTROL_APP_DESIGN §15.
 
 ## Debug logging
 

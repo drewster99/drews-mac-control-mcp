@@ -1,6 +1,8 @@
 #!/bin/bash
 # Bumps the committed version on every install: the marketing patch (0.2.0 -> 0.2.1 -> ...) AND the
-# monotonic build number ((2) -> (3) -> ...), in lockstep across AppVersion.swift and project.yml.
+# monotonic build number ((2) -> (3) -> ...), in lockstep across AppVersion.swift, project.yml and
+# python/pyproject.toml. The wheel carries the app, so a wheel whose version disagrees with the
+# bundle inside it would report one thing and install another.
 # The counter lives in git (these tracked files), so it increases forever across installs and
 # machines once committed. install.sh runs this before building; commit the result afterward.
 set -euo pipefail
@@ -8,6 +10,7 @@ cd "$(dirname "$0")/.."
 
 APPVER="Sources/MacControlMCPCore/AppVersion.swift"
 PROJ="project.yml"
+PYPROJECT="python/pyproject.toml"
 
 # Read the current values from the source of truth (AppVersion.swift).
 MARKETING="$(grep -oE 'marketingVersion = "[^"]+"' "$APPVER" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -40,5 +43,14 @@ NEW_BUILD="$((BUILD + 1))"
   -e "s/(MARKETING_VERSION: )\"[^\"]+\"/\1\"${NEW_MARKETING}\"/" \
   -e "s/(CURRENT_PROJECT_VERSION: )\"[^\"]+\"/\1\"${NEW_BUILD}\"/" \
   "$PROJ"
+
+# ...and to the wheel, which has no build number of its own — PyPI versions are the marketing one.
+/usr/bin/sed -i '' -E "s/^version = \"[^\"]+\"$/version = \"${NEW_MARKETING}\"/" "$PYPROJECT"
+
+# Re-read every file: a sed that matches nothing still exits 0, and a silently-skipped write here
+# is a version disagreement that only shows up in a published artifact.
+grep -q "marketingVersion = \"${NEW_MARKETING}\"" "$APPVER" || { echo "bump-version: not written to $APPVER" >&2; exit 1; }
+grep -q "MARKETING_VERSION: \"${NEW_MARKETING}\"" "$PROJ" || { echo "bump-version: not written to $PROJ" >&2; exit 1; }
+grep -q "^version = \"${NEW_MARKETING}\"$" "$PYPROJECT" || { echo "bump-version: not written to $PYPROJECT" >&2; exit 1; }
 
 echo "bumped: ${MARKETING} (${BUILD})  ->  ${NEW_MARKETING} (${NEW_BUILD})"

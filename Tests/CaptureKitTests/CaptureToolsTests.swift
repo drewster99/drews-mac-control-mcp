@@ -100,8 +100,22 @@ final class CaptureToolsTests: XCTestCase {
 
     // MARK: live (skipped unless Screen Recording is granted)
 
+    /// True when at least one display is awake.
+    ///
+    /// The Screen Recording grant says we are *allowed* to capture, not that there is anything to
+    /// capture. `ListConnectedDisplaysTool` reads `SCShareableContent`, which reports no displays
+    /// while they are all asleep — an empty list is the correct answer then, not a defect. Without
+    /// this, the test fails whenever the machine's screen has slept, which also fails the release
+    /// pipeline's test gate for a reason that has nothing to do with the build.
+    private var hasAwakeDisplay: Bool {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success else { return false }
+        return count > 0
+    }
+
     func testLiveListDisplaysReturnsAtLeastOne() throws {
         try XCTSkipUnless(CGPreflightScreenCaptureAccess(), "needs Screen Recording grant")
+        try XCTSkipUnless(hasAwakeDisplay, "needs an awake display")
         let out = ListConnectedDisplaysTool().call([:])
         XCTAssertTrue(out.contains("\"displays\""), out)
         XCTAssertTrue(out.contains("\"isMain\""), out)

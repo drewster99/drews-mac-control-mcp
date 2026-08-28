@@ -33,14 +33,44 @@ struct MacControlApp: App {
 /// the current bundle across updates) and boots any *stale* host so launchd relaunches the current
 /// binary on demand. With `--register-and-exit` — the relay's quiet self-bootstrap — it does this
 /// headlessly and quits before showing UI, so a cold MCP-client start needs no manual launch.
+///
+/// `--unregister-and-exit` is its counterpart, and the only way to remove the registration without
+/// the GUI. Deleting the app does NOT remove its Background Task Management record: the login item
+/// survives, pointing at a bundle that is gone, and the only other way to clear it is for the user
+/// to find it in System Settings. An uninstaller — `drews-mac-control-mcp --uninstall`, or the
+/// Homebrew cask's uninstall stanza — runs this first, while the bundle still exists.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Flags that do their work and quit without ever showing UI.
+    private static let headlessFlags = ["--register-and-exit", "--unregister-and-exit"]
+
+    private static var isHeadlessLaunch: Bool {
+        CommandLine.arguments.contains { headlessFlags.contains($0) }
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // First, before anything can put a window on screen. The app has no LSUIElement — it is a
+        // regular app — so launching its binary directly (which install.sh, the wheel's bootstrap
+        // and the cask's uninstall all do) otherwise flashes the window for as long as the work
+        // below takes, stealing focus from whatever the user was doing. The relay avoids this by
+        // going through `open -gj`; nothing else can, so the app has to refuse to present itself.
+        if Self.isHeadlessLaunch {
+            NSApp.setActivationPolicy(.prohibited)
+        }
+
         let agent = SMAppService.agent(plistName: HostLifecycle.plistName)
+
+        // Before the auto-register below, not after: registering and then immediately undoing it
+        // would leave a moment where this build owns a registration it is in the middle of
+        // removing, and on a failed unregister it would leave one it never had.
+        if CommandLine.arguments.contains("--unregister-and-exit") {
+            exit(HostLifecycle.unregisterAndStopOwnHosts(agent) ? 0 : 1)
+        }
+
         do {
             try agent.register()
         } catch {
-            // Unsigned/dev builds (or not in /Applications) can't register; the UI surfaces this.
-            // Nothing actionable headlessly.
+            // Unsigned/dev builds (or not in an Applications folder) can't register; the UI
+            // surfaces this. Nothing actionable headlessly.
         }
         let stale = HostLifecycle.terminateStaleHostsReturningThem()
         if CommandLine.arguments.contains("--register-and-exit") {
@@ -54,8 +84,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 enum HostLifecycle {
-    static let plistName = "com.nuclearcyborg.maccontrol.host.plist"
-    static let hostBundleID = "com.nuclearcyborg.maccontrol.host"
+    static let plistName = AppIdentity.launchAgentPlistName
+    static let hostBundleID = AppIdentity.hostBundleID
 
     /// Terminate any host running from a DIFFERENT bundle than this app's (a leftover from a prior
     /// install/location) so the current binary launches on the next on-demand connection. A host
@@ -68,6 +98,33 @@ enum HostLifecycle {
 
     /// Same as `terminateStaleHost`, returning the hosts that were asked to terminate so a caller
     /// can wait for them to actually exit.
+    /// Remove this build's LaunchAgent registration and stop the hosts it left running.
+    ///
+    /// Returns false only when the registration could not be removed — which is what an
+    /// uninstaller needs to know, because deleting the bundle afterwards would then strand the
+    /// record with no way left to reach it.
+    ///
+    /// Hosts are stopped BEFORE unregistering: tearing down the job while one is live leaves
+    /// launchd holding a process for a service that no longer exists. `terminateStaleHosts…`
+    /// deliberately spares hosts from this bundle, so it is the wrong tool here — uninstalling
+    /// means stopping our own.
+    static func unregisterAndStopOwnHosts(_ agent: SMAppService) -> Bool {
+        let ours = NSRunningApplication.runningApplications(withBundleIdentifier: hostBundleID)
+        ours.forEach { $0.terminate() }
+        waitForExit(of: ours, deadline: 3.0)
+
+        // Already absent is the outcome the caller wanted, not a failure.
+        guard agent.status != .notRegistered else { return true }
+        do {
+            try agent.unregister()
+            return true
+        } catch {
+            FileHandle.standardError.write(
+                Data("unregister failed: \(error.localizedDescription)\n".utf8))
+            return false
+        }
+    }
+
     static func terminateStaleHostsReturningThem() -> [NSRunningApplication] {
         let current = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Helpers/MacControlHost.app").standardizedFileURL
@@ -241,12 +298,26 @@ final class AppModel: ObservableObject {
 
     /// SMAppService only registers a LaunchAgent for a SIGNED app in a stable location. The
     /// unsigned Xcode/DerivedData build fails to register (silently, before this fix) — so warn
-    /// when we're not the notarized build in /Applications.
-    var runningFromApplications: Bool {
-        Bundle.main.bundleURL.path.hasPrefix("/Applications/")
+    /// when we're not the notarized build in an Applications folder.
+    ///
+    /// Both `/Applications` and `~/Applications` qualify. The PyPI wheel installs to the user's
+    /// folder because an unattended `uvx` bootstrap has no way to obtain the privileges the system
+    /// folder needs; `install.sh` still uses the system folder. launchd treats either as stable.
+    var isInstalledInApplicationsFolder: Bool {
+        let bundle = Bundle.main.bundleURL.resolvingSymlinksInPath().path
+        return Self.applicationsFolderPrefixes.contains { bundle.hasPrefix($0) }
     }
 
-    private let agent = SMAppService.agent(plistName: "com.nuclearcyborg.maccontrol.host.plist")
+    /// Trailing separator included so a sibling like `/ApplicationsOld/…` can't satisfy the
+    /// prefix test.
+    private static let applicationsFolderPrefixes: [String] = [
+        "/Applications/",
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications", isDirectory: true)
+            .resolvingSymlinksInPath().path + "/",
+    ]
+
+    private let agent = SMAppService.agent(plistName: HostLifecycle.plistName)
 
     var relayPath: String {
         Bundle.main.bundleURL
@@ -462,8 +533,8 @@ final class AppModel: ObservableObject {
     }
 
     func register() {
-        guard runningFromApplications else {
-            lastMessage = "This isn't the /Applications build — SMAppService only registers a signed app from a stable location. Run ./install.sh, then open /Applications/MacControlMCP.app."
+        guard isInstalledInApplicationsFolder else {
+            lastMessage = "This isn't an installed build — SMAppService only registers a signed app from a stable location. Install it (./install.sh, or `uvx drews-mac-control-mcp --setup`), then open MacControlMCP.app from the Applications folder it was installed into."
             return
         }
         do {
@@ -502,12 +573,12 @@ final class AppModel: ObservableObject {
                 SMAppService.openSystemSettingsLoginItems()
                 lastMessage = "Approve MacControlMCP in System Settings ▸ General ▸ Login Items to enable the host."
             case .notRegistered, .notFound:
-                lastMessage = "Register returned but the host is still \(statusName(agent.status)) — try quitting and reopening the app from /Applications (a running copy whose bundle was replaced by an update can't re-register)."
+                lastMessage = "Register returned but the host is still \(statusName(agent.status)) — try quitting and reopening MacControlMCP.app from the Applications folder it's installed in (a running copy whose bundle was replaced by an update can't re-register)."
             @unknown default:
                 lastMessage = "Register returned an unexpected status: \(statusName(agent.status))."
             }
         } catch {
-            lastMessage = "Register failed: \(error.localizedDescription). If you just updated, quit and reopen /Applications/MacControlMCP.app — a running copy whose bundle was replaced can't register."
+            lastMessage = "Register failed: \(error.localizedDescription). If you just updated, quit and reopen MacControlMCP.app from the Applications folder it's installed in — a running copy whose bundle was replaced can't register."
         }
         refresh()
     }
@@ -714,8 +785,8 @@ struct ContentView: View {
 
                 GroupBox("1 · Host agent") {
                     VStack(alignment: .leading, spacing: 8) {
-                        if !model.runningFromApplications {
-                            Text("⚠︎ Run the notarized build from /Applications — an unsigned dev build can't register the host agent.")
+                        if !model.isInstalledInApplicationsFolder {
+                            Text("⚠︎ Run the notarized build from /Applications or ~/Applications — an unsigned dev build can't register the host agent.")
                                 .font(.callout).foregroundStyle(.orange)
                         }
                         Text("Status: \(model.agentStatus)")

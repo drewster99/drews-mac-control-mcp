@@ -811,7 +811,7 @@ public struct KillTool: Tool {
         guard pid != getpid() else {
             return JSONText.from([
                 "success": false, "error": "cannot_kill_self", "pid": Int(pid),
-                "howToFix": "This pid is the MacControl server itself. To restart it, run: launchctl kickstart -k gui/$UID/com.nuclearcyborg.maccontrol.host"
+                "howToFix": "This pid is the MacControl server itself. To restart it, run: launchctl kickstart -k gui/$UID/\(AppIdentity.launchAgentLabel)"
             ])
         }
 

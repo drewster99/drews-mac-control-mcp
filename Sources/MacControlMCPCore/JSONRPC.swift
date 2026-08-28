@@ -34,9 +34,14 @@ public enum JSONRPC {
         encode(["jsonrpc": "2.0", "id": id ?? NSNull(), "result": result])
     }
 
-    public static func errorData(id: Any?, code: Int, message: String) -> Data {
-        encode(["jsonrpc": "2.0", "id": id ?? NSNull(),
-                "error": ["code": code, "message": message]])
+    /// `data` carries the machine-readable detail behind `message` — JSON-RPC's own slot for it.
+    /// Used for an argument rejection, where the caller needs the offending names and the accepted
+    /// ones, not just prose.
+    public static func errorData(id: Any?, code: Int, message: String,
+                                 data: [String: Any]? = nil) -> Data {
+        var error: [String: Any] = ["code": code, "message": message]
+        if let data { error["data"] = data }
+        return encode(["jsonrpc": "2.0", "id": id ?? NSNull(), "error": error])
     }
 
     static func encode(_ object: [String: Any]) -> Data {

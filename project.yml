@@ -18,14 +18,55 @@ settings:
     ENABLE_USER_SCRIPT_SANDBOXING: "NO"
     # Native-bundle version. Keep in lockstep with AppVersion.swift (the compiled-in source of
     # truth every target reports); the "Verify version" pre-build phase fails the build on drift.
-    MARKETING_VERSION: "0.2.36"
-    CURRENT_PROJECT_VERSION: "38"
+    MARKETING_VERSION: "0.2.46"
+    CURRENT_PROJECT_VERSION: "48"
+    # Identifier suffix for the build variant. Empty is the /Applications build; the wheel's
+    # ~/Applications build passes ".user" so it is a genuinely different product rather than a
+    # second copy contending for one LaunchAgent Label and Mach service. Set it and the compiled-in
+    # constants together via scripts/gen-identity.sh, which prints the value to pass here.
+    IDENTITY_SUFFIX: ""
 
 targets:
   MacControlMCPCore:
     type: library.static
     platform: macOS
     sources: [Sources/MacControlMCPCore]
+    preBuildScripts:
+      # Verifies, never regenerates. BuildStamp.swift and AppIdentity.swift are generated and
+      # gitignored, so a fresh clone has neither — and xcodegen enumerates this directory when it
+      # generates the project, so a missing file is absent from the TARGET, not just from disk.
+      # Regenerating here cannot put it back in the compile list; it can only mask the real cause
+      # or, worse, overwrite the identity the caller asked for with a different one.
+      #
+      # So this fails early with the actionable message instead, and additionally catches the
+      # compiled-in identity disagreeing with the identifiers this build is producing — which is
+      # precisely the silent mismatch the two-variant split exists to prevent.
+      - name: Verify generated sources and identity
+        basedOnDependencyAnalysis: false
+        script: |
+          cd "$SRCROOT"
+          for generated in Sources/MacControlMCPCore/AppIdentity.swift \
+                           Sources/MacControlMCPCore/BuildStamp.swift \
+                           Generated/host.launchagent.plist; do
+            if [ ! -f "$generated" ]; then
+              echo "error: $generated is missing. Run ./scripts/generate.sh — a bare 'xcodegen generate' leaves the generated sources out of the target."
+              exit 1
+            fi
+          done
+          EXPECTED="com.nuclearcyborg.maccontrol${IDENTITY_SUFFIX}"
+          ACTUAL=$(grep -oE 'appBundleID = "[^"]+"' Sources/MacControlMCPCore/AppIdentity.swift | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "error: identity drift — AppIdentity.swift says '$ACTUAL' but IDENTITY_SUFFIX makes this build '$EXPECTED'. Run ./scripts/generate.sh --variant system|user."
+            exit 1
+          fi
+          # The suffix appends to each COMPLETE identifier, so the host is "<base>.host<suffix>",
+          # not "<app id>.host".
+          EXPECTED_LABEL="com.nuclearcyborg.maccontrol.host${IDENTITY_SUFFIX}"
+          LABEL=$(/usr/libexec/PlistBuddy -c 'Print :Label' Generated/host.launchagent.plist)
+          if [ "$LABEL" != "$EXPECTED_LABEL" ]; then
+            echo "error: identity drift — the LaunchAgent label is '$LABEL', expected '$EXPECTED_LABEL'. Run ./scripts/generate.sh --variant system|user."
+            exit 1
+          fi
 
   AXKit:
     type: library.static
@@ -79,7 +120,7 @@ targets:
     info:
       path: Generated/MacControlHost-Info.plist
       properties:
-        CFBundleIdentifier: com.nuclearcyborg.maccontrol.host
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleName: MacControlHost
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
@@ -87,7 +128,7 @@ targets:
         LSMinimumSystemVersion: "14.0"
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.nuclearcyborg.maccontrol.host
+        PRODUCT_BUNDLE_IDENTIFIER: com.nuclearcyborg.maccontrol.host$(IDENTITY_SUFFIX)
     dependencies:
       - target: HostKit
       - target: AXKit
@@ -101,7 +142,7 @@ targets:
     sources: [Sources/MacControlRelay]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.nuclearcyborg.maccontrol.relay
+        PRODUCT_BUNDLE_IDENTIFIER: com.nuclearcyborg.maccontrol.relay$(IDENTITY_SUFFIX)
     dependencies:
       - target: HostKit
       - target: AXKit
@@ -113,6 +154,10 @@ targets:
     type: tool
     platform: macOS
     sources: [Sources/MacControlRegistrar]
+    dependencies:
+      # For AppIdentity: the LaunchAgent it registers must be this build's variant, not a
+      # hardcoded name that only matches the /Applications build.
+      - target: MacControlMCPCore
 
   MacControlApp:
     type: application
@@ -128,7 +173,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: MacControlMCP
-        PRODUCT_BUNDLE_IDENTIFIER: com.nuclearcyborg.maccontrol
+        PRODUCT_BUNDLE_IDENTIFIER: com.nuclearcyborg.maccontrol$(IDENTITY_SUFFIX)
     dependencies:
       - target: MacControlHost
         embed: true
@@ -163,13 +208,16 @@ targets:
     postCompileScripts:
       - name: Copy LaunchAgent plist
         inputFiles:
-          - $(SRCROOT)/packaging/host.launchagent.plist
+          - $(SRCROOT)/Generated/host.launchagent.plist
         outputFiles:
           - $(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/com.nuclearcyborg.maccontrol.host.plist
         script: |
           DEST="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchAgents"
           mkdir -p "$DEST"
-          cp "${SRCROOT}/packaging/host.launchagent.plist" "$DEST/com.nuclearcyborg.maccontrol.host.plist"
+          # Generated by scripts/gen-identity.sh for the variant being built; its Label and Mach
+          # service carry the identity suffix, while the FILE NAME stays constant (SMAppService
+          # resolves it inside the calling app's own bundle, so it needs no suffix).
+          cp "${SRCROOT}/Generated/host.launchagent.plist" "$DEST/com.nuclearcyborg.maccontrol.host.plist"
 
   MacControlMCPCoreTests:
     type: bundle.unit-test

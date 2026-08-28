@@ -17,6 +17,11 @@ public struct BatchTool: Tool {
 
     private let dispatch: (String, [String: Any]) -> String
 
+    /// The parameter names a step's tool declares, or `nil` when the name is unknown. Injected for
+    /// the same reason `dispatch` is: the batcher holds no tool knowledge and must not acquire a
+    /// registry just to validate.
+    private let declaredParameters: (String) -> Set<String>?
+
     /// Overall wall-clock ceiling, kept under the relay's per-call XPC budget so a long batch can't
     /// wedge the transport; on overrun the batch stops and reports what completed.
     private let overallBudget: TimeInterval
@@ -26,9 +31,11 @@ public struct BatchTool: Tool {
     private static let minimumStepSeconds: TimeInterval = 1
 
     public init(overallBudget: TimeInterval = 45,
-                dispatch: @escaping (String, [String: Any]) -> String) {
+                dispatch: @escaping (String, [String: Any]) -> String,
+                declaredParameters: @escaping (String) -> Set<String>?) {
         self.overallBudget = overallBudget
         self.dispatch = dispatch
+        self.declaredParameters = declaredParameters
     }
 
     public var descriptor: [String: Any] {
@@ -51,7 +58,8 @@ public struct BatchTool: Tool {
                         ]
                     ],
                     "stopOnError": ["type": "boolean", "description": "Abort at the first failing step (default true)."],
-                    "pauseMs": ["type": "integer", "description": "Optional extra pause between steps, in milliseconds (default 0; steps already wait for the UI to settle)."]
+                    "pauseMs": ["type": "integer", "description": "Optional extra pause between steps, in milliseconds (default 0; steps already wait for the UI to settle)."],
+                    "timeout": ["type": "number", "description": "Total seconds for the whole batch (defer wait included). Steps are scope-ceilinged to what remains."]
                 ],
                 "required": ["steps"]
             ]
@@ -97,6 +105,20 @@ public struct BatchTool: Tool {
             }
 
             let stepArguments = (step["arguments"] as? [String: Any]) ?? [:]
+            // Step arguments never pass through MCPServer's entry point, so they get the same
+            // check here — otherwise a misspelled parameter would still be silently dropped as
+            // long as it was wrapped in a batch.
+            if let declared = declaredParameters(toolName),
+               let rejection = ToolArgumentValidation.rejection(for: stepArguments,
+                                                                toolName: toolName,
+                                                                declaredNames: declared) {
+                var entry: [String: Any] = ["step": index, "tool": toolName, "ok": false]
+                entry.merge(rejection) { current, _ in current }
+                results.append(entry)
+                failedAt = failedAt ?? index
+                if stopOnError { aborted = true; break }
+                continue
+            }
             // Scope-ceiling the step so its own clamped timeout can never exceed what's left of
             // the batch's budget.
             let raw = ToolTimeout.withScopeCeiling(remaining) { dispatch(toolName, stepArguments) }
