@@ -18,8 +18,8 @@ settings:
     ENABLE_USER_SCRIPT_SANDBOXING: "NO"
     # Native-bundle version. Keep in lockstep with AppVersion.swift (the compiled-in source of
     # truth every target reports); the "Verify version" pre-build phase fails the build on drift.
-    MARKETING_VERSION: "0.2.45"
-    CURRENT_PROJECT_VERSION: "47"
+    MARKETING_VERSION: "0.2.46"
+    CURRENT_PROJECT_VERSION: "48"
     # Identifier suffix for the build variant. Empty is the /Applications build; the wheel's
     # ~/Applications build passes ".user" so it is a genuinely different product rather than a
     # second copy contending for one LaunchAgent Label and Mach service. Set it and the compiled-in
