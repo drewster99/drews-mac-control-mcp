@@ -116,6 +116,14 @@ public enum Guidance {
     /// never announced as `[N hidden]`, so nothing else in the output hints that more is loadable.
     public static let deviceScreenType = "iOSContentGroup"
 
+    /// Container types whose children arrive over a cross-process AX bridge, so a bulk snapshot can
+    /// capture an empty-but-present `AXChildren` slot and classify the node `.none` —
+    /// indistinguishable from genuinely childless. `expand` must re-read these live rather than trust
+    /// that emptiness: the device-screen mirror streams its iOS UI in, and a WebKit `webArea`'s
+    /// subtree lives in the web-content process. (The device screen is the proven case; `webArea` is
+    /// included by the same cross-process-bridge reasoning.)
+    public static let bridgedContentTypes: Set<String> = [deviceScreenType, "webArea"]
+
     private static let maxPendingPerWindow = 3
     /// Across all windows. Guidance rides on every response, so this section cannot scale with the
     /// number of windows an app happens to have open.
