@@ -600,7 +600,8 @@ public struct WindowTool: Tool {
                     "action": ["type": "string", "enum": ["move", "resize", "minimize", "unminimize", "raise"]],
                     "x": ["type": "number"], "y": ["type": "number"],
                     "w": ["type": "number"], "h": ["type": "number"],
-                    "observe": ["type": "string", "enum": ["none", "settle"], "description": "settle = act then return the post-action UI diff (§6). Default none."]
+                    "observe": ["type": "string", "enum": ["none", "settle"], "description": "settle = act then return the post-action UI diff (§6). Default none."],
+                    "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["ref", "action"]
             ]
@@ -659,7 +660,8 @@ public struct OpenMenuTool: Tool {
                 "properties": [
                     "pid": ["type": "integer"],
                     "path": ["type": "array", "items": ["type": "string"]],
-                    "observe": ["type": "string", "enum": ["none", "settle"], "description": "settle = act then return the post-action UI diff (§6). Default none."]
+                    "observe": ["type": "string", "enum": ["none", "settle"], "description": "settle = act then return the post-action UI diff (§6). Default none."],
+                    "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["pid", "path"]
             ]
@@ -793,7 +795,11 @@ public struct KillTool: Tool {
             }
             pid = parsed
         } else {
-            switch AppResolver.resolve(identity: identity) {
+            // Destructive: never resolve a kill target by window title. A browser tab or document
+            // titled "…Simulator…" must not make kill("Simulator") terminate the browser. Kill's
+            // contract is pid / bundle-id / name substring only (see its description); the exact and
+            // ranked-substring tiers stay, the window-title last resort does not.
+            switch AppResolver.resolve(identity: identity, includeWindowTitle: false) {
             case .app(let resolved, _, _, _):
                 pid = resolved
             case .ambiguous(let candidates, let total):

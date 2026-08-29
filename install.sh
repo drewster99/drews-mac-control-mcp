@@ -159,6 +159,18 @@ esac
 # resolves to `/`), then re-reject the root against the resolved path.
 PREFIX=$(cd "$PREFIX" && pwd -P) || die "--prefix could not be resolved"
 [ "$PREFIX" != "/" ] || die "--prefix cannot be the filesystem root."
+# install.sh builds the SYSTEM identity (its own bundle ids, LaunchAgent label and Mach service).
+# ~/Applications is the USER identity's home, owned by the PyPI wheel — installing the system
+# identity there would put two different products at one path and register the wrong LaunchAgent for
+# that location (see CLAUDE.md "Two install identities"). Route user-location installs to the wheel,
+# which carries the .user identity that coexists with a /Applications install.
+USER_APPLICATIONS="$HOME/Applications"
+[ -d "$USER_APPLICATIONS" ] && USER_APPLICATIONS=$(cd "$USER_APPLICATIONS" && pwd -P)
+if [ "$PREFIX" = "$USER_APPLICATIONS" ]; then
+  die "install.sh installs the system build to /Applications. For a ~/Applications install use the \
+PyPI wheel — uvx drews-mac-control-mcp --setup — which carries the .user identity that coexists with \
+a /Applications install."
+fi
 ensure_xcodegen
 command -v xcodebuild >/dev/null || die "xcodebuild not found. Install the Xcode command-line tools / full Xcode."
 
@@ -233,6 +245,17 @@ HOST_LABEL="com.nuclearcyborg.maccontrol.host"
 HOST_EXECUTABLE="$DEST/Contents/Helpers/MacControlHost.app/Contents/MacOS/MacControlHost"
 APP_EXECUTABLE="$DEST/Contents/MacOS/MacControlMCP"
 RELAY="$DEST/Contents/Helpers/MacControlRelay"
+# pkill/pgrep -f match an extended regex against a process's whole argv, and BOTH install variants
+# ship executables with these exact names — only the bundle PATH tells their processes apart. The
+# system path (/Applications/…) is a literal SUBSTRING of the user path (/Users/<u>/Applications/…),
+# so an unanchored -f pattern from a system install would also match — and kill — the user (wheel)
+# install's processes. Anchor each pattern to the start of argv0 and escape regex metacharacters so
+# it matches only THIS bundle. (argv0 for both the LaunchServices-started app and the client-spawned
+# relay is the bare absolute executable path.)
+escape_ere() { printf '%s' "$1" | sed 's/[][(){}.^$*+?|\\]/\\&/g'; }
+APP_PATTERN="^$(escape_ere "$APP_EXECUTABLE")"
+HOST_PATTERN="^$(escape_ere "$HOST_EXECUTABLE")"
+RELAY_PATTERN="^$(escape_ere "$RELAY")"
 # Stage the new bundle next to the destination so the final swap is a pair of
 # atomic same-volume renames — no window where $DEST is missing or half-copied
 # while launchd can respawn the host. $$ suffixes keep concurrent runs apart.
@@ -263,14 +286,14 @@ fi
 # the LaunchAgent label tell them apart. Everything below is addressed by label or by full path, so
 # a system install never disturbs a user install.
 launchctl kill SIGTERM "gui/${TARGET_UID}/${HOST_LABEL}" 2>/dev/null || true
-pkill -f -U "$TARGET_UID" "$APP_EXECUTABLE" 2>/dev/null || true
+pkill -f -U "$TARGET_UID" "$APP_PATTERN" 2>/dev/null || true
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  pgrep -f -U "$TARGET_UID" "$HOST_EXECUTABLE" >/dev/null 2>&1 || \
-    pgrep -f -U "$TARGET_UID" "$APP_EXECUTABLE" >/dev/null 2>&1 || break
+  pgrep -f -U "$TARGET_UID" "$HOST_PATTERN" >/dev/null 2>&1 || \
+    pgrep -f -U "$TARGET_UID" "$APP_PATTERN" >/dev/null 2>&1 || break
   sleep 0.2
 done
 # A GUI app wedged on a modal/alert can ignore SIGTERM; force it so the swap can delete its bundle.
-pkill -9 -f -U "$TARGET_UID" "$APP_EXECUTABLE" 2>/dev/null || true
+pkill -9 -f -U "$TARGET_UID" "$APP_PATTERN" 2>/dev/null || true
 
 if [ -e "$DEST" ] || [ -L "$DEST" ]; then
   if ! mv "$DEST" "$OLD" 2>/dev/null; then
@@ -303,7 +326,7 @@ if [ "$LAUNCH" -eq 1 ]; then
   # Wait for the app to actually be up, so the LaunchAgent registration has happened before the
   # cycle below. Bounded — a wedged permission prompt must not hang the install.
   for _ in $(seq 1 25); do
-    pgrep -x -U "$TARGET_UID" MacControlMCP >/dev/null 2>&1 && break
+    pgrep -f -U "$TARGET_UID" "$APP_PATTERN" >/dev/null 2>&1 && break
     sleep 0.2
   done
 fi
@@ -323,17 +346,17 @@ launchctl kill SIGTERM "gui/${TARGET_UID}/${HOST_LABEL}" 2>/dev/null || true
 # survivors accumulate across installs — they were observed surviving two in a row, the oldest six
 # days old. Escalate to KILL exactly as the front-end app above does, then report anything left
 # rather than swallowing it, so a leak is visible instead of silent.
-pkill -f -U "$TARGET_UID" "$RELAY" 2>/dev/null || true
+pkill -f -U "$TARGET_UID" "$RELAY_PATTERN" 2>/dev/null || true
 for _ in 1 2 3 4 5; do
-  pgrep -f -U "$TARGET_UID" "$RELAY" >/dev/null 2>&1 || break
+  pgrep -f -U "$TARGET_UID" "$RELAY_PATTERN" >/dev/null 2>&1 || break
   sleep 0.2
 done
-if pgrep -f -U "$TARGET_UID" "$RELAY" >/dev/null 2>&1; then
-  pkill -9 -f -U "$TARGET_UID" "$RELAY" 2>/dev/null || true
+if pgrep -f -U "$TARGET_UID" "$RELAY_PATTERN" >/dev/null 2>&1; then
+  pkill -9 -f -U "$TARGET_UID" "$RELAY_PATTERN" 2>/dev/null || true
   sleep 0.2
 fi
-if pgrep -f -U "$TARGET_UID" "$RELAY" >/dev/null 2>&1; then
-  warn "relays still running after SIGKILL: $(pgrep -f -U "$TARGET_UID" "$RELAY" | tr '\n' ' ')"
+if pgrep -f -U "$TARGET_UID" "$RELAY_PATTERN" >/dev/null 2>&1; then
+  warn "relays still running after SIGKILL: $(pgrep -f -U "$TARGET_UID" "$RELAY_PATTERN" | tr '\n' ' ')"
 fi
 
 # ── 7. register MCP clients ──────────────────────────────────────────────────

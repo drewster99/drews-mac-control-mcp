@@ -274,15 +274,20 @@ public enum AppResolver {
         // Bounded overall, not just per read: 20–40 apps own an on-screen window on a working Mac,
         // and this tier is already the last resort — it must not become the slowest thing we do.
         let scanDeadline = Date().addingTimeInterval(windowScanBudget)
+        var scanComplete = true
         for app in apps where onScreenPIDs.contains(app.pid) {
-            guard Date() < scanDeadline else { break }
+            guard Date() < scanDeadline else { scanComplete = false; break }
             let titles = windowTitles(pid: app.pid)
             if titles.contains(where: { folded($0).contains(needle) }) {
                 matched.append((app: app, titles: titles))
             }
         }
-        if matched.count == 1 { return resolved(matched[0].app, by: .windowTitle) }
-        if matched.count > 1 {
+        // A single hit only means "the one" if the scan actually reached every on-screen app. If the
+        // budget cut it short, an unscanned app could hold the same title, and resolving the lone hit
+        // as a confident unique match would let a caller drive — or `kill` terminate — the wrong app.
+        // Hand back what was found for confirmation instead; a completed scan still resolves outright.
+        if scanComplete, matched.count == 1 { return resolved(matched[0].app, by: .windowTitle) }
+        if matched.count >= 1 {
             return .ambiguous(candidates: matched.prefix(maxAmbiguousCandidates)
                                                  .map { candidate($0.app, windowTitles: $0.titles) },
                               total: matched.count)

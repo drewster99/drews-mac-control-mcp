@@ -82,7 +82,11 @@ def _version_from_info_plist(data: bytes) -> str:
     return f"{short} ({build})"
 
 
-def bundled_version() -> str:
+def _identifier_from_info_plist(data: bytes) -> str:
+    return str(plistlib.loads(data).get("CFBundleIdentifier", ""))
+
+
+def _bundled_info_plist_bytes() -> bytes:
     with zipfile.ZipFile(bundled_zip_path()) as archive:
         member = next(
             (name for name in archive.namelist()
@@ -91,7 +95,15 @@ def bundled_version() -> str:
         )
         if member is None:
             raise BootstrapError("Info.plist not found inside bundled archive")
-        return _version_from_info_plist(archive.read(member))
+        return archive.read(member)
+
+
+def bundled_version() -> str:
+    return _version_from_info_plist(_bundled_info_plist_bytes())
+
+
+def bundled_identifier() -> str:
+    return _identifier_from_info_plist(_bundled_info_plist_bytes())
 
 
 def installed_version() -> str | None:
@@ -100,6 +112,15 @@ def installed_version() -> str | None:
         return None
     with contextlib.suppress(Exception):
         return _version_from_info_plist(info_plist.read_bytes())
+    return None
+
+
+def installed_identifier() -> str | None:
+    info_plist = INSTALLED_APP / INFO_PLIST_RELATIVE
+    if not info_plist.is_file():
+        return None
+    with contextlib.suppress(Exception):
+        return _identifier_from_info_plist(info_plist.read_bytes())
     return None
 
 
@@ -114,10 +135,19 @@ def ensure_installed() -> None:
     with open(LOCK_FILE, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         wanted = bundled_version()
+        wanted_id = bundled_identifier()
         current = installed_version()
-        if current == wanted and (INSTALLED_APP / RELAY_RELATIVE).is_file():
+        current_id = installed_identifier()
+        # Version equality alone is not enough: a same-version app of a DIFFERENT identity can sit
+        # here (a system-identity build copied or installed into ~/Applications). Reusing it would
+        # exec its relay — the wrong product — instead of this wheel's .user build. Require the
+        # installed bundle to carry the identity this wheel ships before trusting it.
+        same_product = current_id == wanted_id
+        if current == wanted and same_product and (INSTALLED_APP / RELAY_RELATIVE).is_file():
             return
-        is_update = current is not None
+        # Only a same-identity predecessor already has our LaunchAgent registered; a different-identity
+        # (or absent) app there does not, so treat that as a fresh install and re-register.
+        is_update = current is not None and same_product
         log(f"installing app version {wanted} (was {current or 'absent'})")
         _install_from_zip()
         _activate(is_update=is_update)
@@ -146,12 +176,13 @@ def _activate(is_update: bool) -> None:
         subprocess.run(
             ["/bin/launchctl", "kill", "SIGTERM",
              f"gui/{os.getuid()}/{HOST_LAUNCH_AGENT_LABEL}"],
-            check=False,
+            check=False, stdout=subprocess.DEVNULL,
         )
         return
     try:
         subprocess.run([str(app_executable), "--register-and-exit"],
-                       check=False, timeout=REGISTER_TIMEOUT_SECONDS)
+                       check=False, timeout=REGISTER_TIMEOUT_SECONDS,
+                       stdout=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         # Not fatal: the relay bootstraps the host itself on its first call, so this only costs
         # the cold-start wait it was meant to save.
@@ -167,7 +198,7 @@ def _install_from_zip() -> None:
         # ditto too (scripts/build-release.sh), so this is the matching half of one round trip.
         subprocess.run(
             ["/usr/bin/ditto", "-x", "-k", str(bundled_zip_path()), str(staging)],
-            check=True,
+            check=True, stdout=subprocess.DEVNULL,
         )
         staged_app = staging / APP_NAME
         if not staged_app.is_dir():
@@ -186,7 +217,7 @@ def _verify_signature(app: Path) -> None:
     cause can still be named.
     """
     result = subprocess.run(
-        ["/usr/bin/codesign", "--verify", "--strict", str(app)],
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -328,7 +359,9 @@ def main() -> None:
 
     try:
         ensure_installed()
-    except BootstrapError as error:
+    except (BootstrapError, OSError, subprocess.SubprocessError) as error:
+        # ditto (CalledProcessError) and the mkdir/open/rename OSErrors are not BootstrapError, but
+        # they still deserve the clean one-line exit this path gives, not a raw traceback.
         log(str(error))
         sys.exit(1)
 

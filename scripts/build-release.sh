@@ -895,11 +895,19 @@ adopt_existing_artifacts() {
 
     APP_ARCHIVE_NAME="MacControlMCP-${NEW_MARKETING}.zip"
     APP_ARCHIVE="${DIST_DIR}/${APP_ARCHIVE_NAME}"
-    WHEEL="$(ls -t "${REPO_ROOT}/${PYTHON_DIR}"/dist/*-"${NEW_MARKETING}"-*.whl 2>/dev/null | head -1 || true)"
-
-    [[ -n "$WHEEL" ]] || die "No wheel for ${NEW_MARKETING} in ${PYTHON_DIR}/dist. Re-run without --finish-publish."
     [[ -f "$APP_ARCHIVE" ]] || die "Missing ${APP_ARCHIVE}. Re-run without --finish-publish."
     [[ -f "${DIST_DIR}/SHA256SUMS" ]] || die "Missing ${DIST_DIR}/SHA256SUMS. Re-run without --finish-publish."
+
+    # Publish the wheel SHA256SUMS was written against — the copy in dist/, NOT the one in
+    # python/dist. A wheel is not byte-reproducible, so if python/dist was rebuilt since the
+    # interrupted run its wheel no longer matches the recorded digest; republishing that copy would
+    # ship an artifact this run never verified. The dist/ copy is the one the checksum pass re-checks.
+    local wheel_name
+    wheel_name="$(awk '$2 ~ /\.whl$/ {print $2}' "${DIST_DIR}/SHA256SUMS" | head -1)"
+    [[ -n "$wheel_name" ]] || die "SHA256SUMS has no wheel entry. Re-run without --finish-publish."
+    [[ "$wheel_name" == *"-${NEW_MARKETING}-"* ]] || die "SHA256SUMS wheel ${wheel_name} is not version ${NEW_MARKETING}."
+    WHEEL="${DIST_DIR}/${wheel_name}"
+    [[ -f "$WHEEL" ]] || die "Missing ${WHEEL}. Re-run without --finish-publish."
 
     # The recorded digests are the contract the cask is written against; if the files on disk no
     # longer match them, they are not the artifacts that were verified.

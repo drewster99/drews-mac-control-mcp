@@ -30,6 +30,11 @@ public struct BatchTool: Tool {
     /// report batch_timeout instead so the caller sees an honest partial result.
     private static let minimumStepSeconds: TimeInterval = 1
 
+    /// The keys a batch step object may carry — the item schema in `descriptor` declares exactly
+    /// `tool` and `arguments`. Kept beside that schema so the two cannot drift, and used to reject a
+    /// misspelled wrapper key (`argumnts`) the same way a misspelled tool parameter is rejected.
+    private static let stepKeys: Set<String> = ["tool", "arguments"]
+
     public init(overallBudget: TimeInterval = 45,
                 dispatch: @escaping (String, [String: Any]) -> String,
                 declaredParameters: @escaping (String) -> Set<String>?) {
@@ -104,6 +109,19 @@ public struct BatchTool: Tool {
                 continue
             }
 
+            // The step OBJECT's own keys need the same strict check as the tool arguments below: a
+            // typo on the wrapper key (`argumnts` for `arguments`) would otherwise be dropped
+            // silently and the tool would run with empty/default arguments — the very misspelled-
+            // optional trap strict validation exists to close.
+            if let rejection = ToolArgumentValidation.rejection(for: step, toolName: "\(name) step",
+                                                                declaredNames: Self.stepKeys) {
+                var entry: [String: Any] = ["step": index, "tool": toolName, "ok": false]
+                entry.merge(rejection) { current, _ in current }
+                results.append(entry)
+                failedAt = failedAt ?? index
+                if stopOnError { aborted = true; break }
+                continue
+            }
             let stepArguments = (step["arguments"] as? [String: Any]) ?? [:]
             // Step arguments never pass through MCPServer's entry point, so they get the same
             // check here — otherwise a misspelled parameter would still be silently dropped as

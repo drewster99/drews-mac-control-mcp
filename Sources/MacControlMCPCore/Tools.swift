@@ -93,6 +93,19 @@ public enum ToolArguments {
     }
 }
 
+/// The `timeout` schema property shared by every tool that `DeferringTool` wraps but that carries
+/// no timeout of its own: the physical-input verbs (`click_point`, `hover`, `drag`, `scroll`,
+/// `key`), the ref-based control verbs (`click`, `type`, `window`, `menu_pick`), and `open`.
+/// `DeferringTool` reads a caller `timeout` as the TOTAL wall-clock for the call — the wait for the
+/// user to go idle plus the tool's own work — so strict argument validation must see the parameter
+/// declared, or the wrapper would honor a value the entry point has already rejected (the same
+/// reason `batch` declares it). Tools with their own work-budget `timeout` (`app`, `control_app`,
+/// `launch_app`) declare it themselves and do not use this.
+public func deferredCallTimeoutSchemaProperty() -> [String: Any] {
+    ["type": "number",
+     "description": "Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget."]
+}
+
 /// Carries captured subprocess bytes back from the background read queue. Safe because all access
 /// is ordered by the `readDone` semaphore (write before signal, read after wait).
 private final class DataBox: @unchecked Sendable { var data = Data() }
@@ -160,7 +173,14 @@ public enum Shell {
                 if process.isRunning { kill(process.processIdentifier, SIGKILL) }
                 // Bounded: a child wedged in an uninterruptible wait never reaps, and an unbounded
                 // wait here would hold the caller — and in the host, the request lock — forever.
-                if exited.wait(timeout: .now() + 2) == .timedOut { return (-1, box.data) }
+                if exited.wait(timeout: .now() + 2) == .timedOut {
+                    // The drain thread is still blocked in readToEnd (no readDone signal), so
+                    // box.data has no happens-before here — reading it would race the thread's later
+                    // write. Force-close the read end to unblock the drain and drop the bytes,
+                    // exactly as the readDone-timeout branch below does; never touch box.data.
+                    do { try readHandle.close() } catch { /* best-effort unblock; nothing actionable */ }
+                    return (-1, Data())
+                }
             }
         }
         // Bound the drain. The read returns only once EVERY write-end of the pipe closes, so a
@@ -319,7 +339,8 @@ public struct OpenTool: Tool {
                     "target": ["type": "string", "description": "What to open: an absolute or ~-rooted file/folder path, a URL, an app name, a bundle identifier, or a .app path. Relative paths are rejected (the server's working directory is not yours)."],
                     "application": ["type": "string", "description": "Optional. Open `target` using this application (name, bundle id, or absolute .app path) instead of the default handler."],
                     "background": ["type": "boolean", "description": "Open without bringing the app to the foreground (open -g). Default false."],
-                    "newInstance": ["type": "boolean", "description": "Open a new instance even if the app is already running (open -n). Default false."]
+                    "newInstance": ["type": "boolean", "description": "Open a new instance even if the app is already running (open -n). Default false."],
+                    "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["target"]
             ]

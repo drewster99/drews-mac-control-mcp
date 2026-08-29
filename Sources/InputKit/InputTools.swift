@@ -173,7 +173,7 @@ public struct ClickTool: Tool {
                     "x": ["type": "number"], "y": ["type": "number"],
                     "button": ["type": "string", "enum": ["left", "right"]],
                     "count": ["type": "integer", "description": "1=single, 2=double, 3=triple."],
-                    "observe": observeProp(), "pid": pidProp()
+                    "observe": observeProp(), "pid": pidProp(), "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["x", "y"]
             ]
@@ -226,7 +226,7 @@ public struct ScrollTool: Tool {
                 "type": "object",
                 "properties": [
                     "dx": ["type": "integer"], "dy": ["type": "integer"],
-                    "observe": observeProp(), "pid": pidProp()
+                    "observe": observeProp(), "pid": pidProp(), "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["dy"]
             ]
@@ -266,7 +266,7 @@ public struct KeyTool: Tool {
                 "type": "object",
                 "properties": [
                     "keys": ["type": "string"],
-                    "observe": observeProp(), "pid": pidProp()
+                    "observe": observeProp(), "pid": pidProp(), "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["keys"]
             ]
@@ -309,7 +309,7 @@ public struct HoverTool: Tool {
                 "type": "object",
                 "properties": [
                     "x": ["type": "number"], "y": ["type": "number"],
-                    "observe": observeProp(), "pid": pidProp()
+                    "observe": observeProp(), "pid": pidProp(), "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["x", "y"]
             ]
@@ -356,7 +356,7 @@ public struct DragTool: Tool {
                 "properties": [
                     "fromX": ["type": "number"], "fromY": ["type": "number"],
                     "toX": ["type": "number"], "toY": ["type": "number"],
-                    "observe": observeProp(), "pid": pidProp()
+                    "observe": observeProp(), "pid": pidProp(), "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["fromX", "fromY", "toX", "toY"]
             ]

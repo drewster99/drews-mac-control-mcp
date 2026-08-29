@@ -630,7 +630,8 @@ public struct ClickRefTool: Tool {
                 "properties": [
                     "ref": ["type": "string"],
                     "count": ["type": "integer", "description": "1=single (default), 2=double, 3=triple."],
-                    "refresh": refreshScopeProp()
+                    "refresh": refreshScopeProp(),
+                    "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["ref"]
             ]
@@ -781,7 +782,8 @@ public struct TypeTool: Tool {
                     "text": ["type": "string"],
                     "ref": ["type": "string", "description": "Optional: the field to focus first (recommended)."],
                     "via": ["type": "string", "enum": ["keys", "paste"]],
-                    "refresh": refreshScopeProp()
+                    "refresh": refreshScopeProp(),
+                    "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["text"]
             ]
