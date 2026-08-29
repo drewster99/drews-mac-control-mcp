@@ -36,14 +36,14 @@ final class DeferringToolTests: XCTestCase {
 
     func testFeatureOffRunsImmediately() throws {
         let spy = SpyTool()
-        let d = tool(spy, alwaysProfile, idle: { 0 }, config: .disabled)   // minIdle 0 = off
+        let d = tool(spy, alwaysProfile, idle: { 0 }, config: .disabled)   // master toggle off = off
         _ = d.call([:])
         XCTAssertEqual(spy.callCount, 1)
     }
 
     func testRunsImmediatelyWhenAlreadyIdleEnough() throws {
         let spy = SpyTool()
-        let config = ActivityConfig(minIdleSeconds: 5, deferBudgetSeconds: 60)
+        let config = ActivityConfig(minIdleSeconds: 5, deferBudgetSeconds: 60, deferOnUserActivity: true)
         let d = tool(spy, alwaysProfile, idle: { 30 }, config: config)   // 30s idle ≥ 5s required
         _ = d.call([:])
         XCTAssertEqual(spy.callCount, 1)
@@ -52,7 +52,7 @@ final class DeferringToolTests: XCTestCase {
     func testUserBusyWhenBudgetExhaustedAndReportBusy() throws {
         let spy = SpyTool()
         // deferBudget 0 → the wait deadline is immediate, so with the user active we bail at once.
-        let config = ActivityConfig(minIdleSeconds: 5, deferBudgetSeconds: 0, onDeferTimeout: .reportBusy)
+        let config = ActivityConfig(minIdleSeconds: 5, deferBudgetSeconds: 0, onDeferTimeout: .reportBusy, deferOnUserActivity: true)
         let d = tool(spy, alwaysProfile, idle: { 0 }, config: config)
         let out = try parse(d.call([:]))
         XCTAssertEqual(out["error"] as? String, "user_busy")
@@ -61,7 +61,7 @@ final class DeferringToolTests: XCTestCase {
 
     func testExecuteAnywayRunsAndFlags() throws {
         let spy = SpyTool()
-        let config = ActivityConfig(minIdleSeconds: 5, deferBudgetSeconds: 0, onDeferTimeout: .executeAnyway)
+        let config = ActivityConfig(minIdleSeconds: 5, deferBudgetSeconds: 0, onDeferTimeout: .executeAnyway, deferOnUserActivity: true)
         let d = tool(spy, alwaysProfile, idle: { 0 }, config: config)
         let out = try parse(d.call([:]))
         XCTAssertEqual(spy.callCount, 1)
@@ -72,13 +72,13 @@ final class DeferringToolTests: XCTestCase {
     func testFocusToolNotDeferredUnlessOptedIn() throws {
         let spy = SpyTool(name: "launch_app")
         // deferFocusTools = false → a focus tool runs immediately even with the user active.
-        let off = ActivityConfig(minIdleSeconds: 5, deferBudgetSeconds: 0, deferFocusTools: false)
+        let off = ActivityConfig(minIdleSeconds: 5, deferBudgetSeconds: 0, deferFocusTools: false, deferOnUserActivity: true)
         _ = tool(spy, focusProfile, idle: { 0 }, config: off).call([:])
         XCTAssertEqual(spy.callCount, 1)
 
         // deferFocusTools = true → now it defers, and with the user busy + reportBusy returns user_busy.
         let on = ActivityConfig(minIdleSeconds: 5, deferBudgetSeconds: 0,
-                                onDeferTimeout: .reportBusy, deferFocusTools: true)
+                                onDeferTimeout: .reportBusy, deferFocusTools: true, deferOnUserActivity: true)
         let out = try parse(tool(SpyTool(name: "launch_app"), focusProfile, idle: { 0 }, config: on).call([:]))
         XCTAssertEqual(out["error"] as? String, "user_busy")
     }
@@ -87,7 +87,7 @@ final class DeferringToolTests: XCTestCase {
         let spy = SpyTool()
         // Idle enough immediately, so ~no defer elapsed; a caller total of 30 should reach the inner
         // as a remaining work budget close to 30 (not the original 30 untouched, and > 0).
-        let config = ActivityConfig(minIdleSeconds: 1, deferBudgetSeconds: 60)
+        let config = ActivityConfig(minIdleSeconds: 1, deferBudgetSeconds: 60, deferOnUserActivity: true)
         let d = tool(spy, alwaysProfile, idle: { 10 }, config: config)
         _ = d.call(["timeout": 30])
         let handed = try XCTUnwrap((spy.lastArguments["timeout"] as? NSNumber)?.doubleValue)

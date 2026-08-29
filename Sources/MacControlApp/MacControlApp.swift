@@ -873,43 +873,64 @@ struct ContentView: View {
                         }
 
                         Group {
-                            HStack {
-                                Text("Wait for user idle")
-                                Slider(value: Binding(
-                                    get: { Double(model.activityConfig.minIdleSeconds) },
-                                    set: { model.activityConfig.minIdleSeconds = Int($0) }),
-                                    in: 0...Double(ActivityConfig.minIdleCeiling),
-                                    onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
-                                Text(model.activityConfig.minIdleSeconds == 0 ? "Off"
-                                     : "\(model.activityConfig.minIdleSeconds)s")
-                                    .monospacedDigit().frame(width: 48, alignment: .trailing)
+                            Toggle("Wait for the user to be idle before interrupting", isOn: Binding(
+                                get: { model.activityConfig.deferOnUserActivity },
+                                set: { on in
+                                    model.activityConfig.deferOnUserActivity = on
+                                    // Turning it on against a zeroed threshold (a config migrated from
+                                    // the old "0 = off") would still do nothing — seed a sensible level
+                                    // so the toggle actually takes effect.
+                                    if on && model.activityConfig.minIdleSeconds == 0 {
+                                        model.activityConfig.minIdleSeconds = 10
+                                    }
+                                    model.saveActivityConfig()
+                                }))
+
+                            Group {
+                                HStack {
+                                    Text("User must be idle at least")
+                                    Slider(value: Binding(
+                                        get: { Double(model.activityConfig.minIdleSeconds) },
+                                        set: { model.activityConfig.minIdleSeconds = Int($0) }),
+                                        in: 0...Double(ActivityConfig.minIdleCeiling),
+                                        onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
+                                    Text("\(model.activityConfig.minIdleSeconds)s")
+                                        .monospacedDigit().frame(width: 48, alignment: .trailing)
+                                }
+
+                                HStack {
+                                    Text("Defer up to")
+                                    Slider(value: Binding(
+                                        get: { Double(model.activityConfig.deferBudgetSeconds) },
+                                        set: { model.activityConfig.deferBudgetSeconds = Int($0) }),
+                                        in: 0...Double(ActivityConfig.deferBudgetCeiling),
+                                        onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
+                                    Text("\(model.activityConfig.deferBudgetSeconds)s")
+                                        .monospacedDigit().frame(width: 48, alignment: .trailing)
+                                }
+
+                                Picker("If still not idle by then", selection: Binding(
+                                    get: { model.activityConfig.onDeferTimeout },
+                                    set: { model.activityConfig.onDeferTimeout = $0; model.saveActivityConfig() })) {
+                                    Text("Execute anyway").tag(OnDeferTimeout.executeAnyway)
+                                    Text("Report user busy").tag(OnDeferTimeout.reportBusy)
+                                }
+                                .pickerStyle(.segmented)
+
+                                Toggle("Also defer app-launch / open / focus tools", isOn: Binding(
+                                    get: { model.activityConfig.deferFocusTools },
+                                    set: { model.activityConfig.deferFocusTools = $0; model.saveActivityConfig() }))
                             }
+                            .padding(.leading, 20)
+                            .disabled(!model.activityConfig.deferOnUserActivity)
 
                             HStack {
-                                Text("Defer up to")
-                                Slider(value: Binding(
-                                    get: { Double(model.activityConfig.deferBudgetSeconds) },
-                                    set: { model.activityConfig.deferBudgetSeconds = Int($0) }),
-                                    in: 0...Double(ActivityConfig.deferBudgetCeiling),
-                                    onEditingChanged: { editing in if !editing { model.saveActivityConfig() } })
-                                Text("\(model.activityConfig.deferBudgetSeconds)s")
-                                    .monospacedDigit().frame(width: 48, alignment: .trailing)
+                                Spacer()
+                                Button("Restore Defaults") {
+                                    model.activityConfig = ActivityConfig()
+                                    model.saveActivityConfig()
+                                }
                             }
-                            .disabled(model.activityConfig.minIdleSeconds == 0)
-
-                            Picker("When defer time is reached", selection: Binding(
-                                get: { model.activityConfig.onDeferTimeout },
-                                set: { model.activityConfig.onDeferTimeout = $0; model.saveActivityConfig() })) {
-                                Text("Execute anyway").tag(OnDeferTimeout.executeAnyway)
-                                Text("Report user busy").tag(OnDeferTimeout.reportBusy)
-                            }
-                            .pickerStyle(.segmented)
-                            .disabled(model.activityConfig.minIdleSeconds == 0)
-
-                            Toggle("Also defer app-launch / open / focus tools", isOn: Binding(
-                                get: { model.activityConfig.deferFocusTools },
-                                set: { model.activityConfig.deferFocusTools = $0; model.saveActivityConfig() }))
-                                .disabled(model.activityConfig.minIdleSeconds == 0)
                         }
                         // Editing is meaningless until the host's real settings have arrived — and
                         // saving before then could clobber them with the placeholder default.

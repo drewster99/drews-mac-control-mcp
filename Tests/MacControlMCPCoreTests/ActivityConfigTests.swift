@@ -4,8 +4,18 @@ import XCTest
 final class ActivityConfigTests: XCTestCase {
     func testDefaultIsFeatureOff() {
         let c = ActivityConfig.disabled
-        XCTAssertEqual(c.minIdleSeconds, 0)
-        XCTAssertFalse(c.deferralEnabled)
+        XCTAssertFalse(c.deferOnUserActivity)          // master toggle off
+        XCTAssertEqual(c.minIdleSeconds, 10)           // but the threshold has a sensible default
+        XCTAssertFalse(c.deferralEnabled)              // so nothing defers until the toggle is on
+    }
+
+    func testDeferralNeedsBothToggleAndThreshold() {
+        // The master toggle alone isn't enough — a zero threshold means "act immediately".
+        XCTAssertFalse(ActivityConfig(minIdleSeconds: 0, deferOnUserActivity: true).deferralEnabled)
+        // A threshold alone isn't enough either — the toggle gates it.
+        XCTAssertFalse(ActivityConfig(minIdleSeconds: 10, deferOnUserActivity: false).deferralEnabled)
+        // Both → active.
+        XCTAssertTrue(ActivityConfig(minIdleSeconds: 10, deferOnUserActivity: true).deferralEnabled)
     }
 
     func testClampBringsFieldsIntoRange() {
@@ -19,8 +29,23 @@ final class ActivityConfigTests: XCTestCase {
 
     func testJSONRoundTrips() {
         let c = ActivityConfig(minIdleSeconds: 30, deferBudgetSeconds: 120,
-                               onDeferTimeout: .executeAnyway, deferFocusTools: true)
+                               onDeferTimeout: .executeAnyway, deferFocusTools: true,
+                               deferOnUserActivity: true)
         XCTAssertEqual(ActivityConfig.decoded(fromJSON: c.jsonString()), c)
+    }
+
+    func testLegacyConfigMigratesToTheNewToggle() {
+        // A config written before `deferOnUserActivity` existed: any nonzero threshold meant on.
+        let wasOn = ActivityConfig.decoded(fromJSON:
+            #"{"minIdleSeconds":30,"deferBudgetSeconds":60,"onDeferTimeout":"reportBusy","deferFocusTools":false}"#)
+        XCTAssertTrue(wasOn.deferOnUserActivity)
+        XCTAssertTrue(wasOn.deferralEnabled)
+
+        // A zero threshold meant off, and must not come back on after migration.
+        let wasOff = ActivityConfig.decoded(fromJSON:
+            #"{"minIdleSeconds":0,"deferBudgetSeconds":60,"onDeferTimeout":"reportBusy","deferFocusTools":false}"#)
+        XCTAssertFalse(wasOff.deferOnUserActivity)
+        XCTAssertFalse(wasOff.deferralEnabled)
     }
 
     func testDecodeClampsAndDefaultsOnGarbage() {

@@ -139,6 +139,20 @@ its own Accessibility (and Screen Recording) grant. See [CLAUDE.md](./CLAUDE.md)
 Each GitHub release also carries `MacControlMCP-<version>.zip` for a manual install, and a
 `SHA256SUMS` covering every download.
 
+### Updating
+
+```bash
+uvx --refresh drews-mac-control-mcp                   # PyPI (or just wait ~10 min for it to self-update)
+brew upgrade --cask drewster99/tap/maccontrol-mcp     # Homebrew
+./install.sh                                          # from a source checkout
+```
+
+The PyPI wrapper self-updates on its own — every launch it re-checks PyPI's index (cached ~10 min)
+and swaps `~/Applications` when a newer wheel appears; `--refresh` just forces it now. Homebrew and
+`install.sh` replace the `/Applications` build in place. Any of these take effect the next time your
+MCP client spawns the server, so reconnect it afterward (e.g. `/mcp reconnect maccontrol` in Claude
+Code).
+
 ### Uninstalling
 
 ```bash

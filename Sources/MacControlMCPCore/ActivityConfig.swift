@@ -15,8 +15,9 @@ public enum OnDeferTimeout: String, Codable, Sendable {
 }
 
 public struct ActivityConfig: Codable, Equatable, Sendable {
-    /// How idle the user (mouse+keyboard combined) must be before an interrupting action runs.
-    /// A *threshold*, so it can legitimately be large. 0 = feature off (act immediately). Max 3600.
+    /// How long the user (mouse+keyboard combined) must have been idle before an interrupting action
+    /// runs — a *threshold*, so it can legitimately be large. Retained across toggling the feature
+    /// off (see `deferOnUserActivity`), so a set level survives being disabled. Max 3600.
     public var minIdleSeconds: Int
     /// How long a deferrable call waits (parking the client's connection) for the user to go idle
     /// before giving up. Capped at 600 (10 min) — this is the transport-bounded wait, not the
@@ -27,16 +28,23 @@ public struct ActivityConfig: Codable, Equatable, Sendable {
     /// Whether the "focus-grab is the intent" tools (open / launch_app / app / control_app
     /// auto-launch) are also deferred. Off by default — their interruption is usually wanted.
     public var deferFocusTools: Bool
+    /// Whether the idle-defer feature is on at all. Kept separate from `minIdleSeconds` so turning it
+    /// off no longer means zeroing (and forgetting) the threshold — the slider level survives.
+    /// Configs written before this field existed migrate to `minIdleSeconds > 0` on decode, which
+    /// preserves the old "0 = off" behavior exactly (see the `Codable` extension below).
+    public var deferOnUserActivity: Bool
 
     public static let minIdleCeiling = 3600
     public static let deferBudgetCeiling = 600
 
-    public init(minIdleSeconds: Int = 0, deferBudgetSeconds: Int = 60,
-                onDeferTimeout: OnDeferTimeout = .reportBusy, deferFocusTools: Bool = false) {
+    public init(minIdleSeconds: Int = 10, deferBudgetSeconds: Int = 60,
+                onDeferTimeout: OnDeferTimeout = .reportBusy, deferFocusTools: Bool = false,
+                deferOnUserActivity: Bool = false) {
         self.minIdleSeconds = minIdleSeconds
         self.deferBudgetSeconds = deferBudgetSeconds
         self.onDeferTimeout = onDeferTimeout
         self.deferFocusTools = deferFocusTools
+        self.deferOnUserActivity = deferOnUserActivity
     }
 
     /// The default (feature off).
@@ -49,11 +57,13 @@ public struct ActivityConfig: Codable, Equatable, Sendable {
             minIdleSeconds: max(0, min(minIdleSeconds, Self.minIdleCeiling)),
             deferBudgetSeconds: max(0, min(deferBudgetSeconds, Self.deferBudgetCeiling)),
             onDeferTimeout: onDeferTimeout,
-            deferFocusTools: deferFocusTools)
+            deferFocusTools: deferFocusTools,
+            deferOnUserActivity: deferOnUserActivity)
     }
 
-    /// True when the defer feature is active at all.
-    public var deferralEnabled: Bool { minIdleSeconds > 0 }
+    /// True when the defer feature is active at all: the master toggle is on AND a real threshold is
+    /// set (a zero threshold would mean "act immediately," i.e. no wait).
+    public var deferralEnabled: Bool { deferOnUserActivity && minIdleSeconds > 0 }
 
     // MARK: - JSON transport (over XPC)
 
@@ -71,5 +81,35 @@ public struct ActivityConfig: Codable, Equatable, Sendable {
         } catch {
             return .disabled
         }
+    }
+}
+
+extension ActivityConfig {
+    private enum CodingKeys: String, CodingKey {
+        case minIdleSeconds, deferBudgetSeconds, onDeferTimeout, deferFocusTools, deferOnUserActivity
+    }
+
+    /// Custom decode purely to MIGRATE a config written before `deferOnUserActivity` existed: back
+    /// then any nonzero `minIdleSeconds` meant the feature was on, so an absent flag maps to
+    /// `minIdleSeconds > 0`. Everything else decodes exactly as the synthesized version would. In an
+    /// extension so the memberwise initializer is preserved (a custom init in the type body suppresses it).
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let minIdle = try container.decode(Int.self, forKey: .minIdleSeconds)
+        self.init(
+            minIdleSeconds: minIdle,
+            deferBudgetSeconds: try container.decode(Int.self, forKey: .deferBudgetSeconds),
+            onDeferTimeout: try container.decode(OnDeferTimeout.self, forKey: .onDeferTimeout),
+            deferFocusTools: try container.decode(Bool.self, forKey: .deferFocusTools),
+            deferOnUserActivity: try container.decodeIfPresent(Bool.self, forKey: .deferOnUserActivity) ?? (minIdle > 0))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(minIdleSeconds, forKey: .minIdleSeconds)
+        try container.encode(deferBudgetSeconds, forKey: .deferBudgetSeconds)
+        try container.encode(onDeferTimeout, forKey: .onDeferTimeout)
+        try container.encode(deferFocusTools, forKey: .deferFocusTools)
+        try container.encode(deferOnUserActivity, forKey: .deferOnUserActivity)
     }
 }
