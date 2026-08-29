@@ -19,7 +19,8 @@ public struct AppSummary: Equatable, Sendable {
         public let detail: String
         /// The control's own name, when it has one — `detail` may be a compound rendering (a text
         /// field shows title + placeholder + contents), and guidance needs the bare name to say
-        /// which control a suggested call would act on.
+        /// which control a suggested call would act on. Rendered as "Kind [ref]: detail" — the ref
+        /// is the handle, so no ordinal is emitted.
         public let label: String?
     }
     public struct Group: Equatable, Sendable {
@@ -250,17 +251,17 @@ public enum AppRenderer {
         if summary.windows.isEmpty {
             lines.append("Windows: (none)")
         } else {
-            lines.append("Windows:")
-            for (index, window) in summary.windows.enumerated() {
+            lines.append("Windows (\(summary.windows.count)):")
+            for window in summary.windows {
                 let active = window.isActive ? " ACTIVE" : ""
-                lines.append("  Window \(index + 1)\(active) [\(window.ref)]: \(window.title)")
+                lines.append("  Window\(active) [\(window.ref)]: \(window.title)")
             }
         }
 
         if !summary.menus.isEmpty {
-            lines.append("Menus:")
-            for (index, menu) in summary.menus.enumerated() {
-                lines.append("  Menu \(index + 1) [\(menu.ref)]: \(menu.title)")
+            lines.append("Menus (\(summary.menus.count)):")
+            for menu in summary.menus {
+                lines.append("  Menu [\(menu.ref)]: \(menu.title)")
             }
         }
 
@@ -274,8 +275,8 @@ public enum AppRenderer {
                 if group.more > 0 { header += " [+\(group.more) more]" }
                 if group.unnamed > 0 { header += " [+\(group.unnamed) unnamed]" }
                 lines.append(header + ":")
-                for (index, entry) in group.entries.enumerated() {
-                    lines.append("    \(group.itemLabel) \(index + 1) [\(entry.ref)]: \(entry.detail)")
+                for entry in group.entries {
+                    lines.append("    \(group.itemLabel) [\(entry.ref)]: \(entry.detail)")
                 }
             }
         } else {

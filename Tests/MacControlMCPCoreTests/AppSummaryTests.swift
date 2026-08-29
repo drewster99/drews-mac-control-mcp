@@ -93,17 +93,17 @@ final class AppSummaryTests: XCTestCase {
         let summary = AppProjection.project(tree: fixture(), name: "Notes", pid: 123, bundleId: "com.apple.Notes")
         let text = AppRenderer.render(summary)
         XCTAssertTrue(text.contains("App: Notes  pid 123  com.apple.Notes"))
-        XCTAssertTrue(text.contains("Windows:"))
-        XCTAssertTrue(text.contains("  Window 1 ACTIVE [e10]: Vacation plan"))
-        XCTAssertTrue(text.contains("  Window 2 [e17]: New Note"))
-        XCTAssertTrue(text.contains("Menus:"))
-        XCTAssertTrue(text.contains("  Menu 1 [e3]: File"))
-        XCTAssertTrue(text.contains("  Menu 2 [e7]: Edit"))
+        XCTAssertTrue(text.contains("Windows (2):"))
+        XCTAssertTrue(text.contains("  Window ACTIVE [e10]: Vacation plan"))
+        XCTAssertTrue(text.contains("  Window [e17]: New Note"))
+        XCTAssertTrue(text.contains("Menus (2):"))
+        XCTAssertTrue(text.contains("  Menu [e3]: File"))
+        XCTAssertTrue(text.contains("  Menu [e7]: Edit"))
         XCTAssertTrue(text.contains("Active window [e10]: Vacation plan"))
         XCTAssertTrue(text.contains("  Buttons (2) [+1 unnamed]:"))    // elision on the header, not a trailing line
-        XCTAssertTrue(text.contains("    Button 1 [e11]: Save"))
-        XCTAssertTrue(text.contains("    Button 2 [e12]: Cancel"))
-        XCTAssertTrue(text.contains("    Text field 1 [e14]: title \"Title\", placeholder \"\", contents: \"My note\""))
+        XCTAssertTrue(text.contains("    Button [e11]: Save"))
+        XCTAssertTrue(text.contains("    Button [e12]: Cancel"))
+        XCTAssertTrue(text.contains("    Text field [e14]: title \"Title\", placeholder \"\", contents: \"My note\""))
     }
 
     func testActiveWindowOverride() {
@@ -147,7 +147,7 @@ final class AppSummaryTests: XCTestCase {
         XCTAssertTrue(text.contains("Press\\nMe"))                  // escaped
         XCTAssertFalse(text.contains("Press\nMe"))                 // no RAW newline inside a label
         XCTAssertTrue(text.contains("contents: \"line1\\nline2\""))
-        XCTAssertTrue(text.contains("Window 1 ACTIVE [e2]: Win\\nTwo"))
+        XCTAssertTrue(text.contains("Window ACTIVE [e2]: Win\\nTwo"))
         XCTAssertTrue(text.contains("Active window [e2]: Win\\nTwo"))
     }
 }

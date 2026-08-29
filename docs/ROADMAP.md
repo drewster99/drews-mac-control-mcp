@@ -53,6 +53,26 @@ See [CONTROL_APP_DESIGN.md](./CONTROL_APP_DESIGN.md) and [MCP_DESIGN.md](./MCP_D
   be interleaved by another client (atomic-ish per client). Trade: less action parallelism for no
   UI interleaving — acceptable since the desktop is physically serial anyway.
 
+- **Name the running app on a simulator / connected device** — `App("Simulator")` shows the
+  device window title (device + iOS version) but never which app is on screen, because the macOS
+  AX bridge grafts the app's UI under an `iOSContentGroup` whose own title and `AXIdentifier` are
+  empty — the tree carries no app identity at any level (verified). There is **no frontmost/
+  foreground query** in `simctl` or `devicectl`: `simctl … launchctl list` and
+  `devicectl device info processes` return *running* processes (the latter the entire OS table),
+  `listapps`/`info apps` return *installed* apps, and `devicectl … appResize` is unsupported.
+  Two implementation paths:
+  (a) **pragmatic, public** — filter the running UIKit apps to user apps (`launchctl list` minus
+  `com.apple.*`, or `appinfo` `IsFirstParty=0`) and resolve the display name via `appinfo`; on a
+  physical device use `devicectl` for the equivalent. Surface it honestly as *running user
+  app(s), may not be frontmost* (plural, only when ≥1) — a true statement, not a guess, so it
+  stays inside the no-silent-default rule. Correct in the common one-app-under-test case;
+  ambiguous once two third-party apps are running.
+  (b) **authoritative** — the private device-AX channel Accessibility Inspector uses (the same one
+  XCUITest drives), which connects to the app directly and reads its identity from the app's own
+  root. Gives true frontmost + bundle id for both simulators and physical devices, but needs
+  private frameworks — fragile across Xcode versions, with entitlement/notarization risk.
+  Lean: (a), clearly labeled, unless exact frontmost is required.
+
 ---
 
 ## Security & trust model

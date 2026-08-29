@@ -229,13 +229,13 @@ extension Guidance {
                 switch group.name {
                 case AppProjection.buttonsGroup.plural:
                     steps.append(.init(call: #"action(ref: "\#(entry.ref)", action: "press")"#,
-                                       purpose: "press \(group.itemLabel) 1\(named)"))
+                                       purpose: "press \(group.itemLabel)\(named)"))
                 case AppProjection.textFieldsGroup.plural:
                     steps.append(.init(call: #"change_text(ref: "\#(entry.ref)", value: "your text")"#,
-                                       purpose: "set \(group.itemLabel) 1\(named)"))
+                                       purpose: "set \(group.itemLabel)\(named)"))
                 case AppProjection.otherGroup.plural:
                     steps.append(.init(call: #"element_detail(ref: "\#(entry.ref)")"#,
-                                       purpose: "see what \(group.itemLabel) 1\(named) supports"))
+                                       purpose: "see what \(group.itemLabel)\(named) supports"))
                 default:
                     continue
                 }
