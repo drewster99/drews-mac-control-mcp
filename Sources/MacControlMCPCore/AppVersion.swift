@@ -72,6 +72,14 @@ public struct BuildInfo: Codable, Equatable, Sendable {
         marketingVersion == other.marketingVersion && buildNumber == other.buildNumber
     }
 
+    /// True when this component comes from a newer install than `other`, judged by the monotonic
+    /// build number (bumped on every install, never reused, so higher is always newer). `nil` when
+    /// either build number isn't numeric and the direction can't be judged.
+    public func isFromNewerInstall(than other: BuildInfo) -> Bool? {
+        guard let mine = Int(buildNumber), let theirs = Int(other.buildNumber) else { return nil }
+        return mine > theirs
+    }
+
     /// "0.1.0 (1)" — for display, mirroring `AppVersion.displayString`.
     public var displayString: String { "\(marketingVersion) (\(buildNumber))" }
 

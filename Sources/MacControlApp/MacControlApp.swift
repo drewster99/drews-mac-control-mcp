@@ -752,7 +752,18 @@ struct ContentView: View {
         case let .matched(agent):
             return "Agent: v\(agent.displayString) ✓ matches this app"
         case let .versionMismatch(client, agent):
-            return "Agent: v\(agent.displayString) ⚠︎ differs from this app (v\(client.displayString)) — re-register to update"
+            // Re-registering points launchd at the host inside *this* app's bundle, so it only
+            // helps when this app is the newer side. When the agent is newer, this running app is
+            // the stale image of an older install — relaunching from the installed bundle is the fix.
+            if agent.isFromNewerInstall(than: client) == true {
+                return "Agent: v\(agent.displayString) ⚠︎ is newer than this app (v\(client.displayString)) — "
+                    + "this app is running from an older install; quit it and reopen MacControlMCP from its Applications folder"
+            }
+            if client.isFromNewerInstall(than: agent) == true {
+                return "Agent: v\(agent.displayString) ⚠︎ is older than this app (v\(client.displayString)) — re-register to update"
+            }
+            return "Agent: v\(agent.displayString) ⚠︎ differs from this app (v\(client.displayString)) — "
+                + "quit and reopen MacControlMCP from its Applications folder, then re-register"
         case .staleBuild:
             return "Agent: same version but a different (stale) build is running — re-register to update"
         case let .unreachable(reason):
