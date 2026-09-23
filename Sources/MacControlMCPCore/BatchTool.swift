@@ -88,6 +88,13 @@ public struct BatchTool: Tool {
         var aborted = false
         var overranBudget = false
 
+        let mouseCloser = ActivityMonitor.shared.openScope(kind: .mouse, toolName: "Batch")
+        let keyboardCloser = ActivityMonitor.shared.openScope(kind: .keyboard, toolName: "Batch")
+        defer {
+            mouseCloser()
+            keyboardCloser()
+        }
+
         for (index, step) in steps.enumerated() {
             let remaining = deadline.timeIntervalSinceNow
             if remaining < Self.minimumStepSeconds {
@@ -139,7 +146,11 @@ public struct BatchTool: Tool {
             }
             // Scope-ceiling the step so its own clamped timeout can never exceed what's left of
             // the batch's budget.
-            let raw = ToolTimeout.withScopeCeiling(remaining) { dispatch(toolName, stepArguments) }
+            let raw = ToolTimeout.withScopeCeiling(remaining) {
+                ActivityMonitor.shared.withOwnedInput(kind: .mouse, toolName: "Batch \(toolName)") {
+                    dispatch(toolName, stepArguments)
+                }
+            }
             let failed = BatchTool.stepFailed(raw)
             results.append(["step": index, "tool": toolName, "ok": !failed, "result": BatchTool.parse(raw)])
             // The scope ceiling only bounds tools that consult ToolTimeout; a fixed-duration tool

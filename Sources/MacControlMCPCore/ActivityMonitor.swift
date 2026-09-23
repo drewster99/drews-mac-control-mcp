@@ -34,6 +34,48 @@ public final class ActivityMonitor: @unchecked Sendable {
     private var lastUserMouseEventAt: TimeInterval?
     private var lastUserKeyboardEventAt: TimeInterval?
 
+    /// Per-group ownership scopes currently open (as a stack to support nesting)
+    private var ownedScopes: [SyntheticKind: [OwnedScope]] = [:]
+
+    /// Track an open scope. Returns a closure to close it.
+    public func openScope(kind: SyntheticKind, toolName: String) -> () -> Void {
+        lock.lock(); defer { lock.unlock() }
+        ownedScopes[kind, default: []].append(OwnedScope(id: UUID(), startedAt: ProcessInfo.processInfo.systemUptime, toolName: toolName))
+        return { [weak self] in self?.closeScope(kind: kind) }
+    }
+
+    /// Wraps an operation in an ownership scope for the given kind.
+    public func withOwnedInput<T>(kind: SyntheticKind, toolName: String, _ body: () throws -> T) rethrows -> T {
+        let closer = openScope(kind: kind, toolName: toolName)
+        defer { closer() }
+        return try body()
+    }
+
+    /// Close the scope for a given group
+    private func closeScope(kind: SyntheticKind) {
+        lock.lock(); defer { lock.unlock() }
+        ownedScopes[kind]?.removeLast()
+        if ownedScopes[kind]?.isEmpty == true {
+            ownedScopes.removeValue(forKey: kind)
+        }
+    }
+
+    /// Is any scope currently open for the given group?
+    public func isScopeOpen(kind: SyntheticKind) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _isScopeOpen(kind: kind)
+    }
+
+    private func _isScopeOpen(kind: SyntheticKind) -> Bool {
+        return !(ownedScopes[kind]?.isEmpty ?? true)
+    }
+
+    private struct OwnedScope {
+        let id: UUID
+        let startedAt: TimeInterval
+        let toolName: String
+    }
+
     /// Record that we just posted synthetic input. Called from every posting path in SyntheticInput.
     public func noteSyntheticInput(_ kind: SyntheticKind) {
         let now = ProcessInfo.processInfo.systemUptime
@@ -74,7 +116,16 @@ public final class ActivityMonitor: @unchecked Sendable {
     /// baseline). `raw` is the group's raw idle counter sampled by the caller.
     private func groupReading(raw: TimeInterval, uptime: TimeInterval,
                               lastSyntheticAt: TimeInterval?,
-                              lastUserEventAt: inout TimeInterval?) -> GroupReading {
+                              lastUserEventAt: inout TimeInterval?,
+                              isOwned: Bool) -> GroupReading {
+        if isOwned {
+            // During an owned scope, we don't advance the baseline.
+            // We report the time since the last known human event.
+            // If no human event exists, we report a large idle to avoid misclassifying the user as active.
+            let idle = lastUserEventAt.map { uptime - $0 } ?? 3600.0
+            return GroupReading(userIdle: idle, masked: true)
+        }
+
         // Both ages advance at 1s/s, so the ±0.3s match is elapsed-time-invariant: a reading is
         // masked exactly when the last event's age lines up with our own last post's age.
         var masked = false
@@ -93,17 +144,19 @@ public final class ActivityMonitor: @unchecked Sendable {
     /// Both groups' synthetic-aware readings (plus the raw counters they derive from), taken as one
     /// consistent sample under the lock.
     private func readings() -> (rawMouse: TimeInterval, rawKeyboard: TimeInterval,
-                                mouse: GroupReading, keyboard: GroupReading) {
+                              mouse: GroupReading, keyboard: GroupReading) {
         let rawMouse = mouseIdleSeconds()
         let rawKeyboard = keyboardIdleSeconds()
         let uptime = ProcessInfo.processInfo.systemUptime
         lock.lock(); defer { lock.unlock() }
         let mouse = groupReading(raw: rawMouse, uptime: uptime,
                                  lastSyntheticAt: lastSyntheticMouseAt,
-                                 lastUserEventAt: &lastUserMouseEventAt)
+                                 lastUserEventAt: &lastUserMouseEventAt,
+                                 isOwned: _isScopeOpen(kind: .mouse))
         let keyboard = groupReading(raw: rawKeyboard, uptime: uptime,
                                     lastSyntheticAt: lastSyntheticKeyboardAt,
-                                    lastUserEventAt: &lastUserKeyboardEventAt)
+                                    lastUserEventAt: &lastUserKeyboardEventAt,
+                                    isOwned: _isScopeOpen(kind: .keyboard))
         return (rawMouse, rawKeyboard, mouse, keyboard)
     }
 
@@ -115,6 +168,34 @@ public final class ActivityMonitor: @unchecked Sendable {
     public func userIdleSeconds() -> TimeInterval {
         let sample = readings()
         return min(sample.mouse.userIdle, sample.keyboard.userIdle)
+    }
+
+    /// Returns the idle seconds for a specific group, considering ownership and masking.
+    public func userIdleSeconds(mouseOrKeyboard: SyntheticKind) -> TimeInterval {
+        let raw = mouseOrKeyboard == .mouse ? mouseIdleSeconds() : keyboardIdleSeconds()
+        let uptime = ProcessInfo.processInfo.systemUptime
+        lock.lock(); defer { lock.unlock() }
+        
+        var lastUserEvent: TimeInterval?
+        if mouseOrKeyboard == .mouse {
+            lastUserEvent = lastUserMouseEventAt
+        } else {
+            lastUserEvent = lastUserKeyboardEventAt
+        }
+        
+        let reading = groupReading(raw: raw, uptime: uptime,
+                                   lastSyntheticAt: mouseOrKeyboard == .mouse ? lastSyntheticMouseAt : lastSyntheticKeyboardAt,
+                                   lastUserEventAt: &lastUserEvent,
+                                   isOwned: _isScopeOpen(kind: mouseOrKeyboard))
+        
+        // Important: update the actual state if groupReading modified the inout parameter
+        if mouseOrKeyboard == .mouse {
+            lastUserMouseEventAt = lastUserEvent ?? lastUserMouseEventAt
+        } else {
+            lastUserKeyboardEventAt = lastUserEvent ?? lastUserKeyboardEventAt
+        }
+        
+        return reading.userIdle
     }
 
     public struct Snapshot: Sendable, Equatable {
