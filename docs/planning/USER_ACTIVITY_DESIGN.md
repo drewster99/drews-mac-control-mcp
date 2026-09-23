@@ -434,9 +434,13 @@ public final class ActivityMonitor: @unchecked Sendable {
     }
 
     /// Is any scope currently open for the given group?
-    private func isScopeOpen(kind: SyntheticKind) -> Bool {
+    public func isScopeOpen(kind: SyntheticKind) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return ownedScopes[kind] != nil
+        return _isScopeOpen(kind: kind)
+    }
+
+    private func _isScopeOpen(kind: SyntheticKind) -> Bool {
+        return !(ownedScopes[kind]?.isEmpty ?? true)
     }
 
     private struct OwnedScope {
@@ -454,17 +458,27 @@ Update `ActivityMonitor.groupReading` (lines 75-91) to skip samples during owned
 ```swift
 private func groupReading(raw: TimeInterval, uptime: TimeInterval,
                           lastSyntheticAt: TimeInterval?,
-                          lastUserEventAt: inout TimeInterval?) -> GroupReading {
+                          lastUserEventAt: inout TimeInterval?,
+                          isOwned: Bool) -> GroupReading {
+    if isOwned {
+        // During an owned scope, we don't advance the baseline.
+        // We report the time since the last known human event.
+        // If no human event exists, we report a large idle to avoid misclassifying the user as active.
+        let idle = lastUserEventAt.map { uptime - $0 } ?? 3600.0
+        return GroupReading(userIdle: idle, masked: true)
+    }
+
     var masked = false
     if let lastSyntheticAt, abs((uptime - lastSyntheticAt) - raw) < 0.3 { masked = true }
     if masked {
-        // ... existing masked logic ...
+        // Report the age of the last KNOWN-real event instead of the raw counter. No baseline
+        // yet → err toward "active" (never interrupt) by using the raw counter.
+        guard let lastUserEventAt else { return GroupReading(userIdle: raw, masked: true) }
+        return GroupReading(userIdle: max(raw, uptime - lastUserEventAt), masked: true)
     }
-    // NEW: Skip baseline advancement during owned periods
-    if isScopeOpen(kind: kind) {
-        return GroupReading(userIdle: lastUserEventAt.map { uptime - $0 } ?? 3600.0, masked: true)  // Treat as owned, no baseline update
-    }
-    // ... rest of unmasked logic ...
+    // Unmasked → the event was the real user; advance the monotonic baseline.
+    lastUserEventAt = max(lastUserEventAt ?? .zero, uptime - raw)
+    return GroupReading(userIdle: raw, masked: false)
 }
 ```
 
