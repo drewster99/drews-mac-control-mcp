@@ -462,7 +462,7 @@ private func groupReading(raw: TimeInterval, uptime: TimeInterval,
     }
     // NEW: Skip baseline advancement during owned periods
     if isScopeOpen(kind: kind) {
-        return GroupReading(userIdle: raw, masked: true)  // Treat as owned, no baseline update
+        return GroupReading(userIdle: lastUserEventAt.map { uptime - $0 } ?? 3600.0, masked: true)  // Treat as owned, no baseline update
     }
     // ... rest of unmasked logic ...
 }
@@ -476,10 +476,15 @@ public func userIdleSeconds(mouseOrKeyboard: SyntheticKind) -> TimeInterval {
     let raw = mouseOrKeyboard == .mouse ? mouseIdleSeconds() : keyboardIdleSeconds()
     let uptime = ProcessInfo.processInfo.systemUptime
     lock.lock(); defer { lock.unlock() }
+    var lastUserEvent: TimeInterval?
+    if mouseOrKeyboard == .mouse { lastUserEvent = lastUserMouseEventAt }
+    else { lastUserEvent = lastUserKeyboardEventAt }
     let reading = groupReading(raw: raw, uptime: uptime,
-                               lastSyntheticAt: lastSyntheticMouseAt,
-                               lastUserEventAt: &lastUserMouseEventAt,
-                               isOwned: isScopeOpen(kind: .mouse))
+                               lastSyntheticAt: mouseOrKeyboard == .mouse ? lastSyntheticMouseAt : lastSyntheticKeyboardAt,
+                               lastUserEventAt: &lastUserEvent,
+                               isOwned: isScopeOpen(kind: mouseOrKeyboard))
+    if mouseOrKeyboard == .mouse { lastUserMouseEventAt = lastUserEvent ?? lastUserMouseEventAt }
+    else { lastUserKeyboardEventAt = lastUserEvent ?? lastUserKeyboardEventAt }
     return reading.userIdle
 }
 ```
