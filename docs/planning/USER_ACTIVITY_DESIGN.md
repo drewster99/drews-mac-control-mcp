@@ -461,7 +461,7 @@ private func groupReading(raw: TimeInterval, uptime: TimeInterval,
         // ... existing masked logic ...
     }
     // NEW: Skip baseline advancement during owned periods
-    if isScopeOpen(kind: /* determine from calling context */) {
+    if isScopeOpen(kind: kind) {
         return GroupReading(userIdle: raw, masked: true)  // Treat as owned, no baseline update
     }
     // ... rest of unmasked logic ...
