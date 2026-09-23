@@ -54,7 +54,7 @@ public struct DeferringTool: Tool {
     public init(
         inner: Tool,
         profile: InterruptionProfile,
-        idle: @escaping @Sendable () -> TimeInterval = { ActivityMonitor.shared.userIdleSeconds() },
+        idle: @escaping @Sendable () -> TimeInterval = { ActivityMonitor.shared.userIdleSeconds(mouseOrKeyboard: .mouse) },
         config: @escaping @Sendable () -> ActivityConfig = { ActivityConfigStore.shared.current },
         saveMouse: @escaping @Sendable () -> CGPoint? = { CGEvent(source: nil)?.location },
         restoreMouse: @escaping @Sendable (CGPoint) -> Void = { CGWarpMouseCursorPosition($0) },
@@ -152,7 +152,7 @@ public struct DeferringTool: Tool {
         defer { sampler.cancel() }
 
         let result = inner.call(innerArguments)
-        sampler?.cancel()
+        sampler.cancel()
 
         // Never yank the pointer or steal focus back from a user who returned while we worked.
         var restoreSkipped = false
@@ -174,10 +174,11 @@ public struct DeferringTool: Tool {
     private final class IdleSampler {
         private let timer: DispatchSourceTimer
         private let activityMonitor: ActivityMonitor
-        private let kind: SyntheticInput.SyntheticKind
+        private let kind: ActivityMonitor.SyntheticKind
+
         private var sampleHandler: (() -> TimeInterval)?
 
-        init(interval: TimeInterval, activityMonitor: ActivityMonitor, kind: SyntheticInput.SyntheticKind, handler: @escaping @Sendable () -> TimeInterval) {
+        init(interval: TimeInterval, activityMonitor: ActivityMonitor, kind: ActivityMonitor.SyntheticKind, handler: @escaping @Sendable () -> TimeInterval) {
             self.activityMonitor = activityMonitor
             self.kind = kind
             self.sampleHandler = handler
