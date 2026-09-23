@@ -165,9 +165,12 @@ public final class ActivityMonitor: @unchecked Sendable {
     /// advance at 1s/s, so the match is elapsed-time-invariant. Unmasked readings advance a monotonic
     /// last-user-event baseline; masked groups report the age of that baseline instead of the raw
     /// counter. Errs toward "active" (never interrupt) when no baseline exists yet.
-    public func userIdleSeconds() -> TimeInterval {
-        let sample = readings()
-        return min(sample.mouse.userIdle, sample.keyboard.userIdle)
+    public func rawIdleSeconds() -> TimeInterval {
+        return min(mouseIdleSeconds(), keyboardIdleSeconds())
+    }
+
+    public func rawIdleSeconds(mouseOrKeyboard: SyntheticKind) -> TimeInterval {
+        return mouseOrKeyboard == .mouse ? mouseIdleSeconds() : keyboardIdleSeconds()
     }
 
     /// Returns the idle seconds for a specific group, considering ownership and masking.

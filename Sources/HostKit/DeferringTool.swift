@@ -146,11 +146,10 @@ public struct DeferringTool: Tool {
         }
 
         let workStart = Date()
-        // Batch posts synthetic input repeatedly with no idle readings between steps, so a user
-        // event landing mid-run would otherwise never advance the real-user baseline before the
-        // restore decision below. Sample while the work runs so those events are seen unmasked.
-        let sampler = (savedMouse != nil || savedApp != nil) ? IdleSampler(interval: 0.15, sample: idle) : nil
-        defer { sampler?.cancel() }
+        // Batch is a single defer scope, so it doesn't restore mouse/focus per-step.
+        // But it still needs a sampler to advance the baseline if the user interrupts the batch.
+        let sampler = IdleSampler(interval: 0.15, activityMonitor: .shared, kind: .mouse, handler: idle)
+        defer { sampler.cancel() }
 
         let result = inner.call(innerArguments)
         sampler?.cancel()
@@ -174,16 +173,26 @@ public struct DeferringTool: Tool {
     /// each unmasked reading advances ActivityMonitor's real-user baseline.
     private final class IdleSampler {
         private let timer: DispatchSourceTimer
+        private let activityMonitor: ActivityMonitor
+        private let kind: SyntheticInput.SyntheticKind
+        private var sampleHandler: (() -> TimeInterval)?
 
-        init(interval: TimeInterval, sample: @escaping @Sendable () -> TimeInterval) {
+        init(interval: TimeInterval, activityMonitor: ActivityMonitor, kind: SyntheticInput.SyntheticKind, handler: @escaping @Sendable () -> TimeInterval) {
+            self.activityMonitor = activityMonitor
+            self.kind = kind
+            self.sampleHandler = handler
             timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
             timer.schedule(deadline: .now() + interval, repeating: interval)
-            timer.setEventHandler(handler: { _ = sample() })
+            timer.setEventHandler(handler: { [weak self] in self?.sample() })
             timer.resume()
         }
 
+        private func sample() {
+            guard !activityMonitor.isScopeOpen(kind: kind), let handler = sampleHandler else { return }
+            _ = handler()
+        }
+
         func cancel() {
-            // cancel() is idempotent, so the belt-and-suspenders defer at the call site is safe.
             timer.cancel()
         }
     }
