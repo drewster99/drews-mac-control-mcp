@@ -249,10 +249,14 @@ public enum ControlWalker {
             node.hidden = hidden
             for (offset, childElement) in childElements.enumerated() {
                 // Re-check the budget between a node's child reads — `draft` is the heavy per-node
-                // AX cost, so a wide node dequeued just before the deadline could otherwise overrun
-                // it by its whole fan-out. Advertise the children we didn't reach as hidden,
-                // ADDING to (never clobbering) a collection remainder already recorded above.
-                if Date() >= deadline {
+                // AX cost, so a wide node dequeued just before the deadline (or, for a non-root node,
+                // one whose own fan-out alone would blow the node budget — a single huge collection
+                // encountered below the root) could otherwise overrun it by its whole fan-out.
+                // Advertise the children we didn't reach as hidden, ADDING to (never clobbering) a
+                // collection remainder already recorded above. The root is exempt from the node
+                // budget here too, for the same reason it's exempt above.
+                let overBudget = node !== rootBuild && (maxNodes.map { visited.count >= $0 } ?? false)
+                if Date() >= deadline || overBudget {
                     // Only children we never drafted are hidden; already-visited duplicates would
                     // have been skipped anyway, so they must not inflate the count.
                     let unvisited = childElements[offset...].count(where: { !visited.contains($0) })

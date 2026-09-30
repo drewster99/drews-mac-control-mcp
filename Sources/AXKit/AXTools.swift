@@ -628,10 +628,11 @@ public struct WindowTool: Tool {
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return permissionError }
         guard let ref = arguments["ref"] as? String, !ref.isEmpty else {
-            let pid = (arguments["ref"] as? String).flatMap(session.lastKnownPid(of:))
+            // No ref was given at all, so there's nothing to look a last-known pid up by — this is
+            // the one guidance path that can never scope a window list to a specific app.
             return JSONText.from(["success": false, "error": "missing_ref",
                                   "guidance": "`ref` is required — the ref of a window (e.g. from control_app/app). "
-                                            + windowRefGuidance(session, pid: pid)])
+                                            + windowRefGuidance(session, pid: nil)])
         }
         guard let action = arguments["action"] as? String, !action.isEmpty else {
             return JSONText.from(["success": false, "error": "missing_action", "ref": ref,
@@ -642,9 +643,12 @@ public struct WindowTool: Tool {
                                   "guidance": "\"\(action)\" isn't a valid window action. Valid actions: "
                                             + "\(Self.validActions.joined(separator: ", "))."])
         }
+        // Captured BEFORE resolving: a dead ref gets evicted as part of resolution, which would
+        // otherwise make this lookup always fail for exactly the case it exists to help with.
+        let pidBeforeResolve = session.lastKnownPid(of: ref)
         switch resolvedElement(session, ref) {
         case .element(let element):
-            guard isWindow(session, ref) else {
+            guard isWindow(element) else {
                 let pid = element.pid
                 return JSONText.from(["success": false, "error": "not_a_window", "ref": ref,
                                       "guidance": "\(ref) is not a window. " + windowRefGuidance(session, pid: pid)])
@@ -684,7 +688,15 @@ public struct WindowTool: Tool {
             // geometry/state change is cheap enough to always report the settled result for.
             return actResult(session, element, observe: "settle", base: ["ref": ref, "action": action], perform: op)
         case .errorJSON(let error):
-            return error
+            // Enrich the shared stale/ambiguous-ref error with window's own success:false +
+            // guidance convention, without changing `resolvedElement`'s shared output shape (every
+            // other tool using it keeps its existing error format).
+            guard var obj = (try? JSONSerialization.jsonObject(with: Data(error.utf8))) as? [String: Any] else {
+                return error
+            }
+            obj["success"] = false
+            obj["guidance"] = "Couldn't resolve \(ref). " + windowRefGuidance(session, pid: pidBeforeResolve)
+            return JSONText.from(obj)
         }
     }
 }

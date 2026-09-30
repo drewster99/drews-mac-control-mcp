@@ -48,11 +48,14 @@ private let refreshMaxNodes = 250
 
 // MARK: - Shared: window classification + app activation (window tool, action's raise handling)
 
-/// Whether `ref` IS a window (not merely inside one) — `windowAncestor` starts its climb at `ref`
-/// itself, so this is a free reuse of the same classification the tree already applies (which
-/// counts AXStandardWindow as a window too; a raw `role == "AXWindow"` string check would miss it).
-func isWindow(_ registry: ElementRegistry, _ ref: String) -> Bool {
-    registry.windowAncestor(of: ref) == ref
+/// Whether `element` IS a window — read LIVE (not from the cached control tree) so it's correct
+/// for any ref, including one that was never spliced into a stored tree at all (e.g. a match from
+/// find_elements, which mints its own handle without touching controlTrees/controlParents — a
+/// tree-cache-based check, such as `windowAncestor(of:) == ref`, would silently read those as
+/// "not a window"). Matches the same classification the render tree applies (RoleNames' alias map,
+/// so AXStandardWindow counts too — a raw `role == "AXWindow"` string check would miss it).
+func isWindow(_ element: AXElement) -> Bool {
+    RoleNames.humanize(role: element.role ?? "", subrole: element.subrole) == "window"
 }
 
 /// Whether `pid`'s app is the frontmost one.
@@ -518,7 +521,7 @@ public struct ControlActionTool: Tool {
             // acted-upon ref's OWN new content what the caller actually wants next — not "one level
             // up" (the app, or the whole menu bar with every OTHER item's cached subtree too, which
             // is what produced the multi-thousand-line dumps this default scope used to return).
-            let raisingWindow = action == "raise" && isWindow(registry, ref)
+            let raisingWindow = action == "raise" && isWindow(element)
             let openingMenu = ActionVocab.matches(input: action, rawName: "AXPress")
                 && (element.role == "AXMenuBarItem" || element.role == "AXMenuItem")
             let defaultScope = (raisingWindow || openingMenu) ? "self" : "parent"
