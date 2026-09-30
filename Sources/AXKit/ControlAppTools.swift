@@ -39,6 +39,34 @@ private enum ResolvedRef {
 ///              is merely appearing.
 private let controlReadinessWait: TimeInterval = 0.3
 
+/// Node budget for a post-action refresh (action/change_text/change_value/expand/refresh/window).
+/// These responses cover one localized result, not a full-app survey, so the budget is far tighter
+/// than control_app's own (which tracks its caller-adjustable `maxLines`, up to 20,000) — walking
+/// more nodes than this could ever render back is wasted AX round-trip work for nothing the caller
+/// would see.
+private let refreshMaxNodes = 250
+
+// MARK: - Shared: window classification + app activation (window tool, action's raise handling)
+
+/// Whether `ref` IS a window (not merely inside one) — `windowAncestor` starts its climb at `ref`
+/// itself, so this is a free reuse of the same classification the tree already applies (which
+/// counts AXStandardWindow as a window too; a raw `role == "AXWindow"` string check would miss it).
+func isWindow(_ registry: ElementRegistry, _ ref: String) -> Bool {
+    registry.windowAncestor(of: ref) == ref
+}
+
+/// Whether `pid`'s app is the frontmost one.
+func appIsActive(pid: pid_t) -> Bool {
+    NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+}
+
+/// Best-effort app activation. `false` means the pid didn't resolve to a running app right now —
+/// the caller still proceeds with its own action; activation is an aid, not a precondition.
+@discardableResult
+func activateApp(pid: pid_t) -> Bool {
+    NSRunningApplication(processIdentifier: pid)?.activate() ?? false
+}
+
 private func staleRefError(_ ref: String) -> String {
     JSONText.from(["success": false, "error": "stale_ref", "ref": ref,
                    "howToFix": "Re-run control_app to refresh refs."])
@@ -112,43 +140,64 @@ private func toggleDisclosure(_ element: AXElement, _ flag: Bool) -> Bool {
     return false
 }
 
+/// One-line, concrete guidance when the rendered hierarchy cut a field short — built from a REAL
+/// ref/field/size in THIS response (never a generic placeholder), so the exact fetch-the-rest call
+/// is ready to paste.
+private func truncationGuidance(_ tree: ControlNode) -> [String]? {
+    guard let hit = ControlRenderer.findTruncation(tree) else { return nil }
+    return ["Some values are shown truncated (marked …[+N more]). Example: \(hit.ref)'s \(hit.field) is "
+          + "showing \(hit.shown) of \(hit.total) chars — call element_detail(ref: \"\(hit.ref)\", "
+          + "maxValueLength: \(hit.total)) for the full value."]
+}
+
 /// Full live re-walk rooted at the nearest live element at/above `ref` (parent-climb), spliced
-/// back into the stored tree. Returns the rendered subtree + the ref it resolved at, or `nil`
-/// when nothing live remains at/above `ref` (the caller decides how to report that).
-private func refreshSubtree(_ registry: ElementRegistry, ref: String, deadline: Date) -> (hierarchy: String, usedRef: String)? {
+/// back into the stored tree. Returns the rendered subtree + the ref it resolved at + guidance on
+/// any truncated field, or `nil` when nothing live remains at/above `ref` (the caller decides how
+/// to report that).
+private func refreshSubtree(_ registry: ElementRegistry, ref: String, deadline: Date)
+    -> (hierarchy: String, usedRef: String, guidance: [String]?)? {
     guard let (element, usedRef) = registry.liveAncestor(of: ref) else { return nil }
-    let subtree = ControlWalker.build(root: element, registry: registry, pid: element.pid, deadline: deadline)
+    let subtree = ControlWalker.build(root: element, registry: registry, pid: element.pid, deadline: deadline,
+                                      maxNodes: refreshMaxNodes)
     registry.updateControlTree(ref: usedRef, subtree: subtree)
-    return (ControlRenderer.render(subtree, includeLegend: false), usedRef)
+    return (ControlRenderer.render(subtree, includeLegend: false), usedRef, truncationGuidance(subtree))
 }
 
 /// `expand`/`refresh` reporting: a fresh subtree, or a loud `stale_ref` when nothing live remains.
 private func subtreeResponse(_ registry: ElementRegistry, ref: String, deadline: Date) -> String {
-    guard let (hierarchy, usedRef) = refreshSubtree(registry, ref: ref, deadline: deadline) else {
+    guard let (hierarchy, usedRef, guidance) = refreshSubtree(registry, ref: ref, deadline: deadline) else {
         return JSONText.from(["success": false, "error": "stale_ref", "ref": ref,
                             "howToFix": "Re-run control_app to refresh refs."])
     }
     var obj: [String: Any] = ["success": true, "ref": ref, "hierarchy": hierarchy]
     if usedRef != ref { obj["resolvedFrom"] = usedRef }
+    if let guidance { obj["guidance"] = guidance }
     return JSONText.from(obj)
 }
 
 /// Mutating-verb reporting: the action's own `ok` is authoritative for `success`; we append the
-/// settled post-action hierarchy one level up when one is still available (the parent may have
-/// vanished *because* the action worked — that's still a success).
+/// settled post-action hierarchy when one is still available (the parent may have vanished
+/// *because* the action worked — that's still a success).
+///
+/// `scope`: "parent" (default, one level up) · "window" (the ref's window ancestor) · "self" (the
+/// ref's own post-action subtree — no climb) · "none" (fire-and-forget, just `base`).
 private func actedResponse(_ registry: ElementRegistry, ref: String, deadline: Date, base: [String: Any],
                            scope: String = "parent") -> String {
     var obj = base
     if scope == "none" { return JSONText.from(obj) }   // fire-and-forget
     let from: String
-    if scope == "window", let window = registry.windowAncestor(of: ref) {
-        from = window                                  // after navigation, reflect the whole window
-    } else {
+    switch scope {
+    case "self":
+        from = ref                                     // the acted-upon ref's own new content
+    case "window":
+        from = registry.windowAncestor(of: ref) ?? (registry.parentRef(of: ref) ?? ref)
+    default:
         from = registry.parentRef(of: ref) ?? ref      // default: local context, one level up
     }
-    if let (hierarchy, usedRef) = refreshSubtree(registry, ref: from, deadline: deadline) {
+    if let (hierarchy, usedRef, guidance) = refreshSubtree(registry, ref: from, deadline: deadline) {
         obj["hierarchy"] = hierarchy
         if usedRef != from { obj["resolvedFrom"] = usedRef }
+        if let guidance { obj["guidance"] = guidance }
     }
     return JSONText.from(obj)
 }
@@ -157,21 +206,24 @@ private func actedResponse(_ registry: ElementRegistry, ref: String, deadline: D
 /// (A function, not a global `let`: a non-Sendable `[String:Any]` global isn't concurrency-safe.)
 private func refreshScopeProp() -> [String: Any] {
     [
-        "type": "string", "enum": ["parent", "window", "none"],
-        "description": "Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · none (just {ok})."
+        "type": "string", "enum": ["parent", "window", "self", "none"],
+        "description": "Post-action refresh scope: parent (default, local context) · window (after a "
+                      + "navigation/pane swap) · self (the acted-upon ref's own new content — the "
+                      + "default when raising a window, or pressing a menu bar item/menu) · none (just {ok})."
     ]
 }
-/// The requested post-action refresh scope: absent → "parent" (the default); present but not one
-/// of parent/window/none → nil, so the verb can reject the request BEFORE acting — a typo like
-/// refresh:"widnow" must not silently perform the action with the default scope.
-private func refreshScope(_ arguments: [String: Any]) -> String? {
-    guard let raw = arguments["refresh"] as? String else { return "parent" }
-    return ["parent", "window", "none"].contains(raw) ? raw : nil
+/// The requested post-action refresh scope: absent → `fallback` (the verb's own smart default,
+/// normally "parent"); present but not one of parent/window/self/none → nil, so the verb can reject
+/// the request BEFORE acting — a typo like refresh:"widnow" must not silently perform the action
+/// with the default scope.
+private func refreshScope(_ arguments: [String: Any], fallback: String = "parent") -> String? {
+    guard let raw = arguments["refresh"] as? String else { return fallback }
+    return ["parent", "window", "self", "none"].contains(raw) ? raw : nil
 }
 
 /// The shared rejection for a `refresh` value outside parent/window/none.
 private func invalidRefreshScopeError() -> String {
-    JSONText.from(["success": false, "error": "invalid_refresh_scope", "valid": ["parent", "window", "none"]])
+    JSONText.from(["success": false, "error": "invalid_refresh_scope", "valid": ["parent", "window", "self", "none"]])
 }
 
 /// Best-effort launch for control_app's auto-launch: open `identity` (a bundle id, app name, or
@@ -317,7 +369,8 @@ public struct ControlAppTool: Tool {
             let app = AXElement.application(pid: pid)
             app.setMessagingTimeout(5)
             let tree = ControlWalker.build(root: app, registry: registry, pid: pid,
-                                           deadline: Date().addingTimeInterval(timeout), windowFilter: windowArg)
+                                           deadline: Date().addingTimeInterval(timeout), windowFilter: windowArg,
+                                           maxNodes: maxLines)
             // An empty tree is ambiguous — a menu-bar-only app looks the same as a pid that answers
             // nothing — so only an empty tree whose app element is ALSO unready is an error. A
             // just-launched app is exempt: it can legitimately be mid-layout with nothing drawn yet.
@@ -332,7 +385,9 @@ public struct ControlAppTool: Tool {
             // The legend covers the verbs; what it can't know is which containers in THIS tree are
             // still holding content back — a device screen looks complete and says nothing.
             let pending = Guidance.pendingContent(in: tree)
-            if !pending.isEmpty { obj["guidance"] = Guidance.pendingContentLines(pending) }
+            var guidance = pending.isEmpty ? [] : Guidance.pendingContentLines(pending)
+            if let truncation = truncationGuidance(tree) { guidance += truncation }
+            if !guidance.isEmpty { obj["guidance"] = guidance }
             if launched { obj["launched"] = true }
             if let matchedBy { obj["matchedBy"] = matchedBy.rawValue }
             if matchedBy == .windowTitle {
@@ -432,8 +487,6 @@ public struct ControlActionTool: Tool {
         guard let ref = arguments["ref"] as? String, let action = arguments["action"] as? String else {
             return JSONText.from(["success": false, "error": "missing_ref_or_action"])
         }
-        // Validate-before-act: a malformed refresh scope must fail here, not after the action fired.
-        guard let scope = refreshScope(arguments) else { return invalidRefreshScopeError() }
         switch resolveRef(registry, ref) {
         case .error(let json):
             return json
@@ -443,6 +496,16 @@ public struct ControlActionTool: Tool {
                 return JSONText.from(["success": false, "error": "no_such_action", "ref": ref,
                                     "valid": element.rawActionNames.map { ActionVocab.displayLabel(forRaw: $0) }])
             }
+            // Raising a window, or opening a menu (pressing a menuBarItem/menuItem), makes the
+            // acted-upon ref's OWN new content what the caller actually wants next — not "one level
+            // up" (the app, or the whole menu bar with every OTHER item's cached subtree too, which
+            // is what produced the multi-thousand-line dumps this default scope used to return).
+            let raisingWindow = action == "raise" && isWindow(registry, ref)
+            let openingMenu = ActionVocab.matches(input: action, rawName: "AXPress")
+                && (element.role == "AXMenuBarItem" || element.role == "AXMenuItem")
+            let defaultScope = (raisingWindow || openingMenu) ? "self" : "parent"
+            // Validate-before-act: a malformed refresh scope must fail here, not after the action fired.
+            guard let scope = refreshScope(arguments, fallback: defaultScope) else { return invalidRefreshScopeError() }
             var ok = false
             let perform: () -> Void = {
                 if isDisclosure {
@@ -456,9 +519,13 @@ public struct ControlActionTool: Tool {
             } else {
                 perform()
             }
+            var base: [String: Any] = ["success": ok, "ok": ok, "ref": ref, "action": action]
+            if raisingWindow, let pid = element.pid, !appIsActive(pid: pid) {
+                base["notes"] = ["This window's app is not frontmost — menu bar items require the "
+                               + "owning app to be active. Call `app` (activate defaults to true) first."]
+            }
             return actedResponse(registry, ref: ref, deadline: Date().addingTimeInterval(4),
-                                 base: ["success": ok, "ok": ok, "ref": ref, "action": action],
-                                 scope: scope)
+                                 base: base, scope: scope)
         }
     }
 }
@@ -1210,13 +1277,15 @@ public struct LaunchAppTool: Tool {
         Thread.sleep(forTimeInterval: 0.3)            // brief grace for the first window to render
         let ready = app.hasWindow
         let tree = ControlWalker.build(root: app, registry: registry, pid: pid,
-                                       deadline: Date().addingTimeInterval(10))
+                                       deadline: Date().addingTimeInterval(10), maxNodes: ControlRenderer.defaultMaxLines)
         registry.storeControlTree(tree, pid: pid)
         var obj: [String: Any] = ["success": true, "pid": Int(pid), "bundleId": bundleId, "name": name,
                                   "launched": launched, "ready": ready,
                                   "hierarchy": ControlRenderer.render(tree, includeLegend: true)]
         let pending = Guidance.pendingContent(in: tree)
-        if !pending.isEmpty { obj["guidance"] = Guidance.pendingContentLines(pending) }
+        var guidance = pending.isEmpty ? [] : Guidance.pendingContentLines(pending)
+        if let truncation = truncationGuidance(tree) { guidance += truncation }
+        if !guidance.isEmpty { obj["guidance"] = guidance }
         return JSONText.from(obj)
     }
 }

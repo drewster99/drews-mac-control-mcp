@@ -50,8 +50,9 @@ final class ActToolsTests: XCTestCase {
         XCTAssertEqual(observeEnum(SetValueTool(session: session).descriptor), ["none", "settle"])
         XCTAssertEqual(observeEnum(FocusKeyboardTool(session: session).descriptor), ["none", "settle"])
         XCTAssertEqual(observeEnum(RevealTool(session: session).descriptor), ["none", "settle"])
-        XCTAssertEqual(observeEnum(WindowTool(session: session).descriptor), ["none", "settle"])
         XCTAssertEqual(observeEnum(OpenMenuTool(session: session).descriptor), ["none", "settle"])
+        // window dropped `observe`/settle-opt-out entirely — it always settles now.
+        XCTAssertNil(observeEnum(WindowTool(session: session).descriptor))
     }
 
     func testObserveSettleStillHonorsStaleRefGuard() {
@@ -73,7 +74,7 @@ final class ActToolsTests: XCTestCase {
         XCTAssertTrue(OpenMenuTool(session: session, isTrusted: notTrusted).call(["pid": 1, "path": ["File"]]).contains("accessibility_not_granted"))
         // trusted but unknown ref / missing args → no effect fired
         XCTAssertTrue(WindowTool(session: session, isTrusted: trusted).call(["ref": "never", "action": "raise"]).contains("stale_ref"))
-        XCTAssertTrue(WindowTool(session: session, isTrusted: trusted).call(["ref": "never"]).contains("missing_ref_or_action"))
+        XCTAssertTrue(WindowTool(session: session, isTrusted: trusted).call(["ref": "never"]).contains("missing_action"))
         XCTAssertTrue(OpenMenuTool(session: session, isTrusted: trusted).call(["pid": 1]).contains("missing_pid_or_path"))
     }
 

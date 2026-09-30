@@ -578,6 +578,21 @@ public struct WaitForTool: Tool {
     }
 }
 
+/// Window-ref guidance for a failing `window` call: lists the windows of whichever single app we
+/// can unambiguously pin `pid` to (from the last-cached tree, zero new AX calls); falls back to a
+/// generic "run control_app first" when there's no pid to scope the list to.
+private func windowRefGuidance(_ session: ElementRegistry, pid: pid_t?) -> String {
+    guard let pid else {
+        return "Run control_app (or app) first to get window refs."
+    }
+    let windows = session.windowRefs(forPid: pid)
+    guard !windows.isEmpty else {
+        return "No windows are currently cached for this app — run control_app (or app) to refresh."
+    }
+    let list = windows.map { w in w.label.map { "\(w.ref) (\"\($0)\")" } ?? w.ref }.joined(separator: ", ")
+    return "Windows currently known for this app: \(list)."
+}
+
 public struct WindowTool: Tool {
     private let session: ElementRegistry
     private let isTrusted: @Sendable () -> Bool
@@ -589,18 +604,20 @@ public struct WindowTool: Tool {
 
     public let name = "window"
 
+    private static let validActions = ["move", "resize", "minimize", "unminimize", "raise"]
+
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Window management on a window ref via AX writes. action: move|resize|minimize|unminimize|raise. Requires Accessibility.",
+            "description": "Window management on a window ref via AX writes. action: move|resize|minimize|unminimize|raise. Always settles and returns the post-action hierarchy. Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
                     "ref": ["type": "string"],
-                    "action": ["type": "string", "enum": ["move", "resize", "minimize", "unminimize", "raise"]],
+                    "action": ["type": "string", "enum": Self.validActions],
                     "x": ["type": "number"], "y": ["type": "number"],
                     "w": ["type": "number"], "h": ["type": "number"],
-                    "observe": ["type": "string", "enum": ["none", "settle"], "description": "settle = act then return the post-action UI diff (§6). Default none."],
+                    "autoActivateApp": ["type": "boolean", "description": "Activate this window's app first if it isn't already frontmost. Defaults to true for \"raise\" (menu bar items require the owning app to be active — raising a window without activating its app leaves menu operations targeting the WRONG app), and false for move/resize/minimize/unminimize (those AX writes don't need the app frontmost)."],
                     "timeout": deferredCallTimeoutSchemaProperty()
                 ],
                 "required": ["ref", "action"]
@@ -610,30 +627,62 @@ public struct WindowTool: Tool {
 
     public func call(_ arguments: [String: Any]) -> String {
         guard isTrusted() else { return permissionError }
-        guard let ref = arguments["ref"] as? String, let action = arguments["action"] as? String else {
-            return #"{"error":"missing_ref_or_action"}"#
+        guard let ref = arguments["ref"] as? String, !ref.isEmpty else {
+            let pid = (arguments["ref"] as? String).flatMap(session.lastKnownPid(of:))
+            return JSONText.from(["success": false, "error": "missing_ref",
+                                  "guidance": "`ref` is required — the ref of a window (e.g. from control_app/app). "
+                                            + windowRefGuidance(session, pid: pid)])
+        }
+        guard let action = arguments["action"] as? String, !action.isEmpty else {
+            return JSONText.from(["success": false, "error": "missing_action", "ref": ref,
+                                  "guidance": "`action` is required. Valid actions: \(Self.validActions.joined(separator: ", "))."])
+        }
+        guard Self.validActions.contains(action) else {
+            return JSONText.from(["success": false, "error": "unknown_action", "ref": ref, "action": action,
+                                  "guidance": "\"\(action)\" isn't a valid window action. Valid actions: "
+                                            + "\(Self.validActions.joined(separator: ", "))."])
         }
         switch resolvedElement(session, ref) {
         case .element(let element):
+            guard isWindow(session, ref) else {
+                let pid = element.pid
+                return JSONText.from(["success": false, "error": "not_a_window", "ref": ref,
+                                      "guidance": "\(ref) is not a window. " + windowRefGuidance(session, pid: pid)])
+            }
+            let autoActivateApp = (arguments["autoActivateApp"] as? Bool) ?? (action == "raise")
+            if autoActivateApp, let pid = element.pid, !appIsActive(pid: pid) {
+                activateApp(pid: pid)
+            }
+            // Single source of mutation for "raise": action's own raise handling already knows how
+            // to warn when the owning app isn't frontmost and how to scope the returned hierarchy —
+            // duplicating that here would be two places deciding what "raise" means and reports.
+            if action == "raise" {
+                return ControlActionTool(registry: session, isTrusted: isTrusted).call(["ref": ref, "action": "raise"])
+            }
             let op: () -> Bool
             switch action {
             case "move":
                 guard let x = arguments["x"] as? NSNumber, let y = arguments["y"] as? NSNumber else {
-                    return #"{"error":"missing_x_or_y"}"#
+                    return JSONText.from(["success": false, "error": "missing_x_or_y", "ref": ref,
+                                          "guidance": "move requires numeric `x` and `y`."])
                 }
                 op = { element.setPosition(CGPoint(x: x.doubleValue, y: y.doubleValue)) }
             case "resize":
                 guard let w = arguments["w"] as? NSNumber, let h = arguments["h"] as? NSNumber else {
-                    return #"{"error":"missing_w_or_h"}"#
+                    return JSONText.from(["success": false, "error": "missing_w_or_h", "ref": ref,
+                                          "guidance": "resize requires numeric `w` and `h`."])
                 }
                 op = { element.setSize(CGSize(width: w.doubleValue, height: h.doubleValue)) }
             case "minimize": op = { element.setMinimized(true) }
             case "unminimize": op = { element.setMinimized(false) }
-            case "raise": op = { element.raise() }
-            default: return #"{"error":"unknown_action"}"#
+            default:
+                // Unreachable: `action` was already checked against `validActions` above, and
+                // "raise" returns earlier.
+                return JSONText.from(["success": false, "error": "unknown_action", "ref": ref, "action": action])
             }
-            return actResult(session, element, observe: arguments["observe"] as? String,
-                             base: ["ref": ref, "action": action], perform: op)
+            // Always settle — the standalone `observe` opt-out never earned its keep here; a window
+            // geometry/state change is cheap enough to always report the settled result for.
+            return actResult(session, element, observe: "settle", base: ["ref": ref, "action": action], perform: op)
         case .errorJSON(let error):
             return error
         }

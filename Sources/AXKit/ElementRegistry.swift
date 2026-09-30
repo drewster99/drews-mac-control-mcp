@@ -361,6 +361,24 @@ public final class ElementRegistry {
         return nil
     }
 
+    /// Window/dialog/sheet refs + labels from `pid`'s last-cached tree — zero new AX calls, for
+    /// building "here's what's actually available" guidance on a failed window-ref lookup.
+    public func windowRefs(forPid pid: pid_t) -> [(ref: String, label: String?)] {
+        guard let tree = controlTrees[pid] else { return [] }
+        let windowTypes: Set<String> = ["window", "dialog", "sheet"]
+        var found: [(ref: String, label: String?)] = []
+        func walk(_ node: ControlNode) {
+            if windowTypes.contains(node.type) { found.append((node.ref, node.label)) }
+            for child in node.children { walk(child) }
+        }
+        walk(tree)
+        return found
+    }
+
+    /// The pid a ref was last known to belong to, even if the ref itself is now stale/evicted —
+    /// as long as its `Stored` entry is still around. `nil` when the ref was never seen at all.
+    public func lastKnownPid(of ref: String) -> pid_t? { storage[ref]?.pid }
+
     /// Drop a single ref and its element from the tables at point of use — called when a verb finds
     /// the element destroyed (`.invalidUIElement`), so dead proxies don't linger until the batched
     /// pruning sweep. Frees the leaked object (the AXElement proxy in `storage`/`elementToRef`);

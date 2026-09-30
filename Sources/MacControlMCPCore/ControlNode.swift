@@ -249,7 +249,10 @@ public enum TextDisplay {
     /// escape pair.
     public static func quoted(_ text: String, limit: Int) -> String {
         var flat = String(text.map { $0.isNewline ? " " : $0 })
-        if flat.count > limit { flat = String(flat.prefix(limit)) + "…" }
+        // The overflow count rides in the marker itself so a truncated field is immediately
+        // actionable (e.g. via element_detail's maxValueLength) without a second round trip just
+        // to learn how much was cut.
+        if flat.count > limit { flat = String(flat.prefix(limit)) + "…[+\(flat.count - limit) more]" }
         return flat.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     }
 
@@ -449,6 +452,39 @@ public enum ControlRenderer {
     /// Shim onto the shared `TextDisplay.quoted` (call sites pass their own varying limits).
     static func display(_ text: String, _ limit: Int) -> String {
         TextDisplay.quoted(text, limit: limit)
+    }
+
+    /// First truncated field in document order (mirrors `line`'s own field limits) — one concrete,
+    /// real ref+field+size a caller can build a "fetch the rest" example from, instead of a
+    /// generic placeholder that might not even apply to this particular response.
+    public static func findTruncation(_ root: ControlNode) -> (ref: String, field: String, shown: Int, total: Int)? {
+        func hit(_ field: String, _ text: String?, _ limit: Int) -> (String, Int, Int)? {
+            guard let text, text.count > limit else { return nil }
+            return (field, limit, text.count)
+        }
+        func scan(_ node: ControlNode) -> (ref: String, field: String, shown: Int, total: Int)? {
+            let candidates: [(String, Int, Int)?] = [
+                hit("label", node.label, 120),
+                hit("identifier", node.identifier, 80),
+                node.numericValue == nil ? hit("textValue", node.textValue, 500) : nil,
+                hit("valueDescription", node.valueDescription, 80),
+                hit("url", node.url, 100),
+                hit("placeholder", node.placeholder, 120)
+            ]
+            if let (field, shown, total) = candidates.compactMap({ $0 }).first {
+                return (node.ref, field, shown, total)
+            }
+            for title in node.columnTitles ?? [] {
+                if let (field, shown, total) = hit("columnTitles", title, 40) {
+                    return (node.ref, field, shown, total)
+                }
+            }
+            for child in node.children {
+                if let found = scan(child) { return found }
+            }
+            return nil
+        }
+        return scan(root)
     }
 
     /// Compact number rendering (`%g`): `0.72`, `1`, `100`, no trailing zeros.

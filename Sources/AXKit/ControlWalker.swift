@@ -218,10 +218,14 @@ public enum ControlWalker {
         )
     }
 
-    /// Walk `root` to a `ControlNode` tree, global-BFS, bounded by `deadline`.
+    /// Walk `root` to a `ControlNode` tree, global-BFS, bounded by `deadline` and (once past the
+    /// root's own children) by `maxNodes` — walking past what the renderer's own line budget could
+    /// ever show is wasted AX round-trip work. The root's direct children are NEVER cut by
+    /// `maxNodes` (only by `deadline`): whatever ref this walk is rooted at, the caller must always
+    /// be able to see everything one level down from it, even if deeper expansion gets rationed.
     public static func build(
         root: AXElement, registry: ElementRegistry, pid: pid_t?,
-        deadline: Date, windowFilter: String? = nil
+        deadline: Date, windowFilter: String? = nil, maxNodes: Int? = nil
     ) -> ControlNode {
         let rootBuild = draft(root, registry: registry, pid: pid)
         // Guard against malformed AX trees (cycles / an element re-listed under multiple parents):
@@ -233,6 +237,14 @@ public enum ControlWalker {
             if Date() >= deadline { break }
             let node = queue[index]
             index += 1
+            // Past the node budget: report this node's own children as an (uncounted) frontier
+            // rather than reading them — a collection role's child read is itself a live AX call,
+            // so skipping it here (not just capping afterward) is what avoids the wasted work.
+            // The root is exempt: its own children are never rationed by count, only by deadline.
+            if node !== rootBuild, let maxNodes, visited.count >= maxNodes {
+                node.hidden = frontierHidden(node)
+                continue
+            }
             let (childElements, hidden) = childrenToWalk(node, isRoot: node === rootBuild, windowFilter: windowFilter)
             node.hidden = hidden
             for (offset, childElement) in childElements.enumerated() {
