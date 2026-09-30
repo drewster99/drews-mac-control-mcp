@@ -88,12 +88,12 @@ public struct BatchTool: Tool {
         var aborted = false
         var overranBudget = false
 
-        let mouseCloser = ActivityMonitor.shared.openScope(kind: .mouse, toolName: "Batch")
-        let keyboardCloser = ActivityMonitor.shared.openScope(kind: .keyboard, toolName: "Batch")
-        defer {
-            mouseCloser()
-            keyboardCloser()
-        }
+        // The batch itself opens NO input-ownership scope. Ownership is bounded to each individual
+        // synthetic operation: every step's posting path (SyntheticInput in InputKit) opens and
+        // closes its own correctly-typed `.mouse`/`.keyboard` scope, so only that one post is
+        // masked. A batch-wide scope would mask every reading for the whole run — including real
+        // human input during inter-step pauses and on read-only steps — mis-attributing it as
+        // owned, which the USER_ACTIVITY_DESIGN bounded-scope rule forbids.
 
         for (index, step) in steps.enumerated() {
             let remaining = deadline.timeIntervalSinceNow
@@ -145,11 +145,12 @@ public struct BatchTool: Tool {
                 continue
             }
             // Scope-ceiling the step so its own clamped timeout can never exceed what's left of
-            // the batch's budget.
+            // the batch's budget. Ownership is NOT wrapped here: the step's own synthetic-input
+            // path (SyntheticInput) opens and closes its correctly-typed ownership scope, bounded
+            // to that single operation — a blanket `.mouse` wrapper would mis-attribute keyboard
+            // steps, and a batch-wide scope would mask real human input between operations.
             let raw = ToolTimeout.withScopeCeiling(remaining) {
-                ActivityMonitor.shared.withOwnedInput(kind: .mouse, toolName: "Batch \(toolName)") {
-                    dispatch(toolName, stepArguments)
-                }
+                dispatch(toolName, stepArguments)
             }
             let failed = BatchTool.stepFailed(raw)
             results.append(["step": index, "tool": toolName, "ok": !failed, "result": BatchTool.parse(raw)])

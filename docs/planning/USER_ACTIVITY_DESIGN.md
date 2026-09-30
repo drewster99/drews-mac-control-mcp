@@ -417,20 +417,25 @@ Add scope tracking to `ActivityMonitor.swift` alongside `lastSyntheticMouseAt` /
 public final class ActivityMonitor: @unchecked Sendable {
     // ... existing fields ...
 
-    /// Per-group ownership scopes currently open
-    private var ownedScopes: [SyntheticKind: OwnedScope] = [:]
+    /// Per-group ownership scopes currently open. A per-kind **stack** (nested array) so a kind can
+    /// have more than one overlapping scope (a nested/overlapping op); the group is "owned" while
+    /// its stack is non-empty.
+    private var ownedScopes: [SyntheticKind: [OwnedScope]] = [:]
 
     /// Track an open scope. Returns a closure to close it.
     public func openScope(kind: SyntheticKind, toolName: String) -> () -> Void {
         lock.lock(); defer { lock.unlock() }
-        ownedScopes[kind] = OwnedScope(id: UUID(), startedAt: ProcessInfo.processInfo.systemUptime, toolName: toolName)
+        ownedScopes[kind, default: []].append(OwnedScope(id: UUID(), startedAt: ProcessInfo.processInfo.systemUptime, toolName: toolName))
         return { [weak self] in self?.closeScope(kind: kind) }
     }
 
-    /// Close the scope for a given group
+    /// Close the **innermost** scope for a given group (pop the stack); drop the group once empty.
     private func closeScope(kind: SyntheticKind) {
         lock.lock(); defer { lock.unlock() }
-        ownedScopes.removeValue(forKey: kind)
+        ownedScopes[kind]?.removeLast()
+        if ownedScopes[kind]?.isEmpty == true {
+            ownedScopes.removeValue(forKey: kind)
+        }
     }
 
     /// Is any scope currently open for the given group?
