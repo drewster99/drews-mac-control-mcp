@@ -513,7 +513,14 @@ public struct ControlActionTool: Tool {
             return json
         case .element(let element):
             let isDisclosure = (action == "disclose" || action == "collapse")
-            if !isDisclosure, !element.rawActionNames.contains(where: { ActionVocab.matches(input: action, rawName: $0) }) {
+            let raisingWindow = action == "raise" && isWindow(element)
+            let hasMatchingAction = element.rawActionNames.contains(where: { ActionVocab.matches(input: action, rawName: $0) })
+            // AXRaise is a standard action essentially every window-owning app supports; a few
+            // non-conformant toolkits honor it without advertising it in rawActionNames, so raising
+            // a window is worth attempting even past the pre-check — one cheap AX call either way,
+            // and the alternative is rejecting a raise that would have worked. Every OTHER action
+            // still requires advertisement: trying an unlisted action is usually meaningless there.
+            if !isDisclosure, !hasMatchingAction, !raisingWindow {
                 return JSONText.from(["success": false, "error": "no_such_action", "ref": ref,
                                     "valid": element.rawActionNames.map { ActionVocab.displayLabel(forRaw: $0) }])
             }
@@ -521,7 +528,6 @@ public struct ControlActionTool: Tool {
             // acted-upon ref's OWN new content what the caller actually wants next — not "one level
             // up" (the app, or the whole menu bar with every OTHER item's cached subtree too, which
             // is what produced the multi-thousand-line dumps this default scope used to return).
-            let raisingWindow = action == "raise" && isWindow(element)
             let openingMenu = ActionVocab.matches(input: action, rawName: "AXPress")
                 && (element.role == "AXMenuBarItem" || element.role == "AXMenuItem")
             let defaultScope = (raisingWindow || openingMenu) ? "self" : "parent"
@@ -533,6 +539,9 @@ public struct ControlActionTool: Tool {
                     ok = toggleDisclosure(element, action == "disclose")
                 } else if let raw = element.rawActionNames.first(where: { ActionVocab.matches(input: action, rawName: $0) }) {
                     ok = element.perform(raw)
+                } else if raisingWindow {
+                    // Not advertised in rawActionNames — attempted anyway, see the gate above.
+                    ok = element.perform("AXRaise")
                 }
             }
             if let pid = element.pid {
