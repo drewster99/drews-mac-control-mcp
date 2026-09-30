@@ -100,3 +100,29 @@ One version, three files, kept in lockstep by `scripts/bump-version.sh`:
 `Sources/MacControlMCPCore/AppVersion.swift`, `project.yml`, and `python/pyproject.toml`. A release
 must not ship a wheel whose version disagrees with the bundle inside it. Every write is read back —
 a `sed` that matches nothing still exits 0.
+
+## Cutting a release ("publish everywhere")
+
+One command does the whole thing — do not assemble the steps by hand or ask which channels to hit:
+
+```bash
+./scripts/build-release.sh --publish
+```
+
+This single invocation bumps the version, runs the tests, builds **both** install identities (system
+for the Homebrew cask, user for the PyPI wheel — see "Two install identities" above), signs, notarizes
+and staples each, uploads the wheel to PyPI, updates the cask in `drewster99/homebrew-tap`, creates
+the GitHub release (wheel + `MacControlMCP-<version>.zip` + `SHA256SUMS`), and tags + pushes `origin`.
+The script's own confirmation prompt (before anything leaves the machine) is the safety gate — that
+satisfies "confirm before irreversible action" on its own; don't add a second round of questions about
+version number, which channels, or credentials, since the script bumps the version itself and only
+needs a working notary profile.
+
+- Default notary profile: `ncc-cli-notarytool` (a working keychain entry, confirmed present — don't
+  assume it's missing just because a guessed/different profile name fails).
+- `--testpypi` rehearses on TestPyPI with no git tag and no GitHub release, for a dry run that leaves
+  no permanent trace.
+- Omitting `--publish` builds, signs, and verifies everything and stops — nothing reaches PyPI,
+  GitHub, or `origin`.
+- Full option list and the rest of the pipeline's behavior: README.md § "Cutting a release", and
+  `scripts/build-release.sh --help`.
