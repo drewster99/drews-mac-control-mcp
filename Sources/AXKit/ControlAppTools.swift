@@ -150,17 +150,31 @@ private func truncationGuidance(_ tree: ControlNode) -> [String]? {
           + "maxValueLength: \(hit.total)) for the full value."]
 }
 
+/// For a `"self"`-scoped response, prefer a revealed `menu` child over the acted-upon ref itself:
+/// pressing a menuBarItem/menuItem reveals exactly this shape (ref → one `menu` child → the actual
+/// items), and the menu's OWN items — not the menuBarItem wrapper — are what the caller almost
+/// always wants enumerated next (and guaranteed-complete at the top level, per the walk's root-
+/// exemption from the node budget). A no-op everywhere else: a raised window's direct children are
+/// never a lone `menu` node, so this never misfires there. Falls back to `node` itself when no
+/// action actually revealed a menu (e.g. a press that did nothing).
+private func drillIntoRevealedMenu(_ node: ControlNode) -> ControlNode {
+    node.children.first(where: { $0.type == "menu" }) ?? node
+}
+
 /// Full live re-walk rooted at the nearest live element at/above `ref` (parent-climb), spliced
 /// back into the stored tree. Returns the rendered subtree + the ref it resolved at + guidance on
 /// any truncated field, or `nil` when nothing live remains at/above `ref` (the caller decides how
-/// to report that).
-private func refreshSubtree(_ registry: ElementRegistry, ref: String, deadline: Date)
+/// to report that). `reportRoot`, when given, picks which node of the walked subtree is actually
+/// rendered/reported — the full subtree is still what gets spliced into the persisted tree.
+private func refreshSubtree(_ registry: ElementRegistry, ref: String, deadline: Date,
+                            reportRoot: ((ControlNode) -> ControlNode)? = nil)
     -> (hierarchy: String, usedRef: String, guidance: [String]?)? {
-    guard let (element, usedRef) = registry.liveAncestor(of: ref) else { return nil }
+    guard let (element, walkedRef) = registry.liveAncestor(of: ref) else { return nil }
     let subtree = ControlWalker.build(root: element, registry: registry, pid: element.pid, deadline: deadline,
                                       maxNodes: refreshMaxNodes)
-    registry.updateControlTree(ref: usedRef, subtree: subtree)
-    return (ControlRenderer.render(subtree, includeLegend: false), usedRef, truncationGuidance(subtree))
+    registry.updateControlTree(ref: walkedRef, subtree: subtree)
+    let reported = reportRoot?(subtree) ?? subtree
+    return (ControlRenderer.render(reported, includeLegend: false), reported.ref, truncationGuidance(reported))
 }
 
 /// `expand`/`refresh` reporting: a fresh subtree, or a loud `stale_ref` when nothing live remains.
@@ -186,15 +200,19 @@ private func actedResponse(_ registry: ElementRegistry, ref: String, deadline: D
     var obj = base
     if scope == "none" { return JSONText.from(obj) }   // fire-and-forget
     let from: String
+    let reportRoot: ((ControlNode) -> ControlNode)?
     switch scope {
     case "self":
         from = ref                                     // the acted-upon ref's own new content
+        reportRoot = drillIntoRevealedMenu
     case "window":
         from = registry.windowAncestor(of: ref) ?? (registry.parentRef(of: ref) ?? ref)
+        reportRoot = nil
     default:
         from = registry.parentRef(of: ref) ?? ref      // default: local context, one level up
+        reportRoot = nil
     }
-    if let (hierarchy, usedRef, guidance) = refreshSubtree(registry, ref: from, deadline: deadline) {
+    if let (hierarchy, usedRef, guidance) = refreshSubtree(registry, ref: from, deadline: deadline, reportRoot: reportRoot) {
         obj["hierarchy"] = hierarchy
         if usedRef != from { obj["resolvedFrom"] = usedRef }
         if let guidance { obj["guidance"] = guidance }
