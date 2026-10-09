@@ -139,6 +139,102 @@ final class GuidanceCallValidityTests: XCTestCase {
         for verb in Guidance.pidVerbs(pid: 4242) { verify(verb.call, schemas) }
     }
 
+    /// The server instructions are the first thing a client's model reads, so the example call in
+    /// them is the one most likely to be copied before any tool description is seen.
+    func testServerInstructionCallsAreCallable() throws {
+        let schemas = try toolSchemas()
+        let pattern = try NSRegularExpression(pattern: #"`([a-z_]+\(.*?\))`"#)
+        let text = MCPServer.serverInstructions
+        let calls = pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+            Range($0.range(at: 1), in: text).map { String(text[$0]) }
+        }
+        XCTAssertFalse(calls.isEmpty, "the server instructions no longer show an example call")
+        for call in calls { verify(call, schemas) }
+    }
+
+    /// Tool descriptions are read before every call, so a shorthand like `click(ref)` or
+    /// `action(press)` there is copied as-is — and neither is a call the server accepts.
+    func testToolDescriptionCallsAreCallable() throws {
+        let schemas = try toolSchemas()
+        let request = #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#
+        let data = try XCTUnwrap(makeFullServer().handleLine(request))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let result = try XCTUnwrap(object["result"] as? [String: Any])
+        for descriptor in try XCTUnwrap(result["tools"] as? [[String: Any]]) {
+            var texts = [(descriptor["description"] as? String) ?? ""]
+            let schema = descriptor["inputSchema"] as? [String: Any]
+            for case let property as [String: Any] in (schema?["properties"] as? [String: Any])?.values ?? [:].values {
+                texts.append((property["description"] as? String) ?? "")
+            }
+            for text in texts {
+                for call in embeddedCalls(in: text, toolNames: Set(schemas.keys)) { verify(call, schemas) }
+            }
+        }
+    }
+
+    /// The same rule for the strings the server builds at runtime — `howToFix` and `note` text is
+    /// read at the one moment a caller is already stuck. Those strings are only reachable from
+    /// source, so this reads the string literals of every shipped Swift file.
+    func testSourceStringLiteralCallsAreCallable() throws {
+        let schemas = try toolSchemas()
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources")
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil))
+        let literal = try NSRegularExpression(pattern: #""((?:[^"\\]|\\.)*)""#)
+        let interpolation = try NSRegularExpression(pattern: #"\\\((?:[^()]|\([^()]*\))*\)"#)
+        for case let file as URL in enumerator where file.pathExtension == "swift" {
+            let source = try String(contentsOf: file, encoding: .utf8)
+            for line in source.components(separatedBy: "\n")
+            where !line.trimmingCharacters(in: .whitespaces).hasPrefix("//") {
+                let range = NSRange(line.startIndex..., in: line)
+                for match in literal.matches(in: line, range: range) {
+                    guard let body = Range(match.range(at: 1), in: line) else { continue }
+                    // An interpolated value stands in for a placeholder the caller fills in.
+                    let raw = String(line[body])
+                    let text = interpolation.stringByReplacingMatches(
+                        in: raw, range: NSRange(raw.startIndex..., in: raw), withTemplate: "<value>")
+                        .replacingOccurrences(of: #"\""#, with: "\"")
+                    for call in embeddedCalls(in: text, toolNames: Set(schemas.keys)) {
+                        verify(call, schemas)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every `tool(…)` written inside prose, for a real tool name, with balanced parentheses.
+    /// `window(s)` is the English plural, not a call, and is the one form skipped.
+    private func embeddedCalls(in text: String, toolNames: Set<String>) -> [String] {
+        let characters = Array(text)
+        var calls: [String] = []
+        var index = 0
+        while index < characters.count {
+            let isNameStart = characters[index].isLowercase
+                && (index == 0 || !(characters[index - 1].isLetter || characters[index - 1].isNumber
+                                    || "_.".contains(characters[index - 1])))
+            guard isNameStart else { index += 1; continue }
+            var end = index
+            while end < characters.count, characters[end].isLowercase || characters[end] == "_" { end += 1 }
+            let name = String(characters[index..<end])
+            guard toolNames.contains(name), end < characters.count, characters[end] == "(" else {
+                index = end; continue
+            }
+            var depth = 0
+            var close = end
+            while close < characters.count {
+                if characters[close] == "(" { depth += 1 }
+                if characters[close] == ")" { depth -= 1; if depth == 0 { break } }
+                close += 1
+            }
+            guard close < characters.count else { break }
+            let call = String(characters[index...close])
+            if call != "window(s)" { calls.append(call) }
+            index = close + 1
+        }
+        return calls
+    }
+
     /// The generated next-step lines are the ones wired to live refs, so they are the ones most
     /// likely to be pasted verbatim.
     func testGeneratedNextStepsAreCallable() throws {

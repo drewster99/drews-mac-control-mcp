@@ -1369,7 +1369,7 @@ public struct PressByNameTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Press a control by its visible NAME (a high-level shortcut for find_elements + action(press)). Finds the ENABLED, pressable element whose label matches `name` and presses it, then settles the UI. Exact label wins, then case-insensitive, then substring; if several equally-good enabled matches remain it returns them as `candidates` to disambiguate instead of guessing. `pid` comes from control_app. Requires Accessibility.",
+            "description": "Press a control by its visible NAME (a high-level shortcut for find_elements + action(ref: \"<ref>\", action: \"press\")). Finds the ENABLED, pressable element whose label matches `name` and presses it, then settles the UI. Exact label wins, then case-insensitive, then substring; if several equally-good enabled matches remain it returns them as `candidates` to disambiguate instead of guessing. `pid` comes from control_app. Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -1409,11 +1409,11 @@ public struct PressByNameTool: Tool {
         switch PressByNameTool.select(candidates, name: name) {
         case .noMatch:
             return JSONText.from(["success": false, "error": "no_enabled_match", "name": name,
-                                "howToFix": "No enabled, pressable element's label matched. Inspect with find_elements(query:…), or press a ref directly via action(ref,\"press\")."])
+                                "howToFix": "No enabled, pressable element's label matched. Inspect with find_elements(pid: \(pid), query: \"…\"), or press a ref directly via action(ref: \"<ref>\", action: \"press\")."])
         case .ambiguous(let winners):
             return JSONText.from(["success": false, "error": "ambiguous", "name": name,
                                 "candidates": winners.map { ["ref": $0.ref, "label": $0.label, "role": $0.role] },
-                                "howToFix": "Several enabled matches share the best label rank — press one with action(ref,\"press\"), or pass a more exact name."])
+                                "howToFix": "Several enabled matches share the best label rank — press one with action(ref: \"<ref>\", action: \"press\"), or pass a more exact name."])
         case .press(let winner):
             switch resolveRef(registry, winner.ref) {
             case .error(let json):

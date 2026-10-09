@@ -16,7 +16,7 @@ public final class MCPServer {
 
     /// Server-level guidance returned in the `initialize` result's `instructions` field — the
     /// one-time orientation an MCP client shows/feeds its model before any tool call.
-    static let serverInstructions = "Drew's Mac Control MCP Server - Computer Control for MacOS: Use to inspect, understand, and control/interact with the user interface hierarchy of any app on this user's computer. Start with `app(\"Terminal\", window: \"My projects\")` to inspect an app by name (or bundle ID, process ID or window title) and optionally include the `window` parameter to get details and references to individual elements with which you can interact."
+    static let serverInstructions = "Drew's Mac Control MCP Server - Computer Control for MacOS: Use to inspect, understand, and control/interact with the user interface hierarchy of any app on this user's computer. Start with `app(identity: \"Terminal\", window: \"My projects\")` to inspect an app by name (or bundle ID, process ID or window title) and optionally include the `window` parameter to get details and references to individual elements with which you can interact."
 
     private let tools: [Tool]
 

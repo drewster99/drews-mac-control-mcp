@@ -1,6 +1,6 @@
 # MacControlMCP — Tool Reference
 
-_Server `mac-control-mcp` v0.2.26 · MCP protocol 2025-06-18 · generated from a live `tools/list`._
+_Server `mac-control-mcp` v0.2.54 · MCP protocol 2025-06-18 · generated from a live `tools/list`._
 
 > This file is generated from the server's own `tools/list` output. Regenerate after changing any tool descriptor.
 
@@ -83,7 +83,11 @@ because of it).
 
 ## Overall / server instructions
 
-The MCP `initialize` response returns `serverInfo`, `capabilities`, and `protocolVersion` but **no top-level `instructions` string** — this server ships no server-level instructions block (unlike, e.g., drews-xcode-mcp). Client-facing guidance lives entirely in the per-tool `description` fields below.
+The MCP `initialize` response carries a top-level `instructions` string, which a client shows its model before any tool call:
+
+> Drew's Mac Control MCP Server - Computer Control for MacOS: Use to inspect, understand, and control/interact with the user interface hierarchy of any app on this user's computer. Start with `app(identity: "Terminal", window: "My projects")` to inspect an app by name (or bundle ID, process ID or window title) and optionally include the `window` parameter to get details and references to individual elements with which you can interact.
+
+The rest of the client-facing guidance lives in the per-tool `description` fields below.
 
 Two cross-cutting behaviors are not visible in the schemas but govern every call:
 
@@ -92,7 +96,7 @@ Two cross-cutting behaviors are not visible in the schemas but govern every call
 - **Idle-deferred input.** Tools that drive synthetic input or steal focus (click/type/key/drag/scroll/window/menu_pick, and the `batch` scope) defer while the user is active and restore the mouse/focus afterward; read-only and semantic tools never defer.
 
 
-`serverInfo` at generation time: `name=mac-control-mcp`, `version=0.2.26`. (The `buildId` is a
+`serverInfo` at generation time: `name=mac-control-mcp`, `version=0.2.54`. (The `buildId` is a
 per-build git-sha+timestamp reported live by the `version` tool; it advances on every install and
 is intentionally not pinned here.)
 
@@ -111,10 +115,10 @@ is intentionally not pinned here.)
 | 8 | `element_detail` | Full attributes/actions/parameterized-attributes for a ref from a prior snapshot or find. Requires Accessibility. |
 | 9 | `focused_element` | The system-wide focused UI element, with a ref. Requires Accessibility. |
 | 10 | `element_at` | Hit-test the element at a screen point (top-left coordinates). Requires Accessibility. |
-| 11 | `focus_keyboard` | Give an element keyboard focus (sets AXFocused) — no click, no cursor move, does NOT bring the app frontmost. Non-disruptive. For typing, prefer change_text (semantic) or type(ref,…) (which handles frontmost+focus). Requires Accessibility. |
+| 11 | `focus_keyboard` | Give an element keyboard focus (sets AXFocused) — no click, no cursor move, does NOT bring the app frontmost. Non-disruptive. For typing, prefer change_text (semantic) or type(ref: "<ref>", text: "…") (which handles frontmost+focus). Requires Accessibility. |
 | 12 | `reveal` | Scroll an element into view (kAXScrollToVisibleAction). Requires Accessibility. |
 | 13 | `wait_for` | Actively poll an app until a condition holds (works without AX notifications). mode: idle \| appears \| disappears. Requires Accessibility. |
-| 14 | `window` | Window management on a window ref via AX writes. action: move\|resize\|minimize\|unminimize\|raise. Requires Accessibility. |
+| 14 | `window` | Window management on a window ref via AX writes. action: move\|resize\|minimize\|unminimize\|raise. Always settles and returns the post-action hierarchy. Requires Accessibility. |
 | 15 | `menu_pick` | Drive an app's menu bar by title path, e.g. ["File","Export…","PDF…"]. Requires Accessibility. |
 | 16 | `get_changes` | Diff the app's UI against the last get_changes/snapshot (added/removed/changed by ref). First call is the baseline. `partial: true` means the walk hit its time budget: removals are suppressed (unreached ≠ removed) and unreached elements may be missing. Requires Accessibility. |
 | 17 | `kill` | Terminate an app by `identity` (exact pid, or a case-insensitive substring of the bundle id or app name — several matches return `ambiguous` and kill nothing). With no `signal`, escalates gracefully: SIGHUP → wait 2s → SIGTERM → wait 2s → SIGKILL, stopping as soon as it exits. With `signal` (SIGHUP/SIGINT/SIGTERM/SIGKILL or a number), sends only that one. No Accessibility required. |
@@ -122,11 +126,11 @@ is intentionally not pinned here.)
 | 19 | `control_app` | Resolve an app by exact pid, a case-insensitive substring of its bundle id or app name (the same matching `list_app_windows` uses), or a window title, and return a compact, ref-bearing UI hierarchy to drive (with action/change_text/change_value/expand/refresh). If no running app matches, it will try to LAUNCH the identity (as a bundle id, app name, or .app path) and then drive it (response includes launched:true). When a container is still holding content back — a device/simulator screen, or children not yet loaded — a `guidance` block names it with the expand call that loads it. Requires Accessibility. |
 | 20 | `launch_app` | Launch an app and return the same ref-bearing hierarchy as control_app — ready to drive. `app` is a .app filesystem path (e.g. /Applications/Safari.app) or a bundle id (e.g. com.apple.Safari); whichever you pass, it's launched if not running (or reused if it is, launched:false), then walked once its first window appears. Use this when control_app returned no_match because the app isn't running. Requires Accessibility. |
 | 21 | `action` | Perform an action on a ref (press, menu, inc, dec, disclose, collapse, or a custom-action label), wait for the UI to settle, and return the updated hierarchy one level up. Requires Accessibility. |
-| 22 | `press` | Press a control by its visible NAME (a high-level shortcut for find_elements + action(press)). Finds the ENABLED, pressable element whose label matches `name` and presses it, then settles the UI. Exact label wins, then case-insensitive, then substring; if several equally-good enabled matches remain it returns them as `candidates` to disambiguate instead of guessing. `pid` comes from control_app. Requires Accessibility. |
+| 22 | `press` | Press a control by its visible NAME (a high-level shortcut for find_elements + action(ref: "<ref>", action: "press")). Finds the ENABLED, pressable element whose label matches `name` and presses it, then settles the UI. Exact label wins, then case-insensitive, then substring; if several equally-good enabled matches remain it returns them as `candidates` to disambiguate instead of guessing. `pid` comes from control_app. Requires Accessibility. |
 | 23 | `change_text` | Set a text element's value (semantic, no keystrokes), settle, and return the updated hierarchy one level up. Requires Accessibility. |
 | 24 | `change_value` | Set a numeric control's value (slider/scrollbar/stepper), range-enforced; settle and return the updated hierarchy one level up. Requires Accessibility. |
 | 25 | `click` | Real click on an element: brings its app frontmost, then clicks its activation point. Use when `action "press"` (semantic AXPress) misbehaves — e.g. Catalyst list cells that multi-select — or for click-only/visual targets; conversely if a click does nothing (off-screen/occluded), fall back to action "press". count=2 double-clicks (e.g. open a row in its own window). Settles and returns the updated hierarchy. Requires Accessibility. |
-| 26 | `type` | Enter text into a field. With `ref`: first tries a direct Accessibility insert (replaces the selection / inserts at the caret — no click, no clipboard); if the element doesn't support that, it clicks the field to focus it (so don't point it at buttons — a click would press them) and types keystrokes, falling back to clipboard paste if the keystrokes don't register (AppKit text views). The response's `via` says which path ran: "ax" (Accessibility insert), "keys" (synthetic keystrokes), "paste" (clipboard ⌘V), or "paste_retry" (the keystrokes read as a no-op, so the clipboard ⌘V fallback fired); `focused` reports whether the element held focus on the keystroke path. Without `ref`: types into whatever is currently focused. via=paste forces the clipboard path. Requires Accessibility. |
+| 26 | `type` | Enter text into a field by typing or pasting. With `ref`: first tries a direct Accessibility insert (replaces the selection / inserts at the caret — does NOT automatically replace the whole field. no click, no clipboard); if the element doesn't support that, it clicks the field to focus it (so don't point it at buttons — a click would press them) and types keystrokes, falling back to clipboard paste if the keystrokes don't register (AppKit text views). The response's `via` says which path ran: "ax" (Accessibility insert), "keys" (synthetic keystrokes), "paste" (clipboard ⌘V), or "paste_retry" (the keystrokes read as a no-op, so the clipboard ⌘V fallback fired); `focused` reports whether the element held focus on the keystroke path. Without `ref`: types into whatever is currently focused. via=paste forces the clipboard path. Requires Accessibility. AVOID using while the user is active as your keystrokes may be mixed with the user's and/or end up in the wrong field. |
 | 27 | `expand` | Load only the not-yet-loaded ([N hidden]) descendants under a ref, reusing already-loaded nodes, until done or the timeout. Returns the updated subtree. Requires Accessibility. |
 | 28 | `refresh` | Discard and re-read the whole subtree under a ref (authoritative), until done or the timeout. Returns the updated subtree. Requires Accessibility. |
 | 29 | `screenshot_app_window` | Screenshot specific app window(s) with ScreenCaptureKit (captures even occluded/off-screen windows). appMatch (REQUIRED): exact pid, or a case-insensitive substring of the bundle id or app name — "" or "*" = all apps. windowMatch: case-insensitive window-title substring — "" or "*" = all windows (on-screen preferred). onScreenOnly limits to on-screen windows (default false, so minimized/hidden windows still capture). excludeZeroAlpha drops fully transparent windows (default true). Optionally OCRs each image. maxScreenshots caps the count (server cap 10). Needs Screen Recording. |
@@ -135,7 +139,7 @@ is intentionally not pinned here.)
 | 32 | `list_connected_displays` | List connected displays (id, name, index, frame in points, pixel size). Feed id/index/name to screenshot_full_display. Needs Screen Recording. |
 | 33 | `list_app_windows` | List app windows (id, title, app, bundle id, pid, frame, display, onScreen, alpha). appMatch (REQUIRED): exact pid, or a case-insensitive substring of the bundle id or app name — "" or "*" = all apps. windowMatch: case-insensitive window-title substring — ""/"*" = all. onScreenOnly limits to on-screen windows (default true; pass false to include minimized/hidden ones). excludeZeroAlpha drops fully transparent windows (default true). Feed matches to screenshot_app_window. Window titles need Screen Recording. |
 | 34 | `ocr` | Recognize text in an image file (e.g. a screenshot path) via Vision. No permission required. |
-| 35 | `click_point` | Synthetic mouse click at raw screen coordinates (global top-left). AVOID unless you have an explicit coordinate to hit — to click a UI element, use `click(ref)`, which targets the element and brings its app frontmost. Rides the Accessibility grant. |
+| 35 | `click_point` | Synthetic mouse click at raw screen coordinates (global top-left). AVOID unless you have an explicit coordinate to hit — to click a UI element, use `click(ref: "<ref>")`, which targets the element and brings its app frontmost. The click goes to whatever window is stacked on top at that point, which is the commonest reason a click at correct coordinates appears to do nothing — it landed in another app. Pass `pid` and a point owned by a different app is refused instead of misdelivered; omit it and the result reports which app the click actually reached. Rides the Accessibility grant. |
 | 36 | `scroll` | Synthetic scroll wheel by pixel deltas (dy negative scrolls down). Rides the Accessibility grant. |
 | 37 | `key` | Synthetic key combo, e.g. "cmd+s", "cmd+shift+z", "return". Rides the Accessibility grant. |
 | 38 | `hover` | Move the cursor to a screen point (triggers hover/tooltips) without clicking. Rides the Accessibility grant. |
@@ -178,6 +182,7 @@ Open a file, folder, URL, or application with the macOS `open` command. `target`
 | `target` | string | yes | What to open: an absolute or ~-rooted file/folder path, a URL, an app name, a bundle identifier, or a .app path. Relative paths are rejected (the server's working directory is not yours). |
 | `application` | string | no | Optional. Open `target` using this application (name, bundle id, or absolute .app path) instead of the default handler. |
 | `newInstance` | boolean | no | Open a new instance even if the app is already running (open -n). Default false. |
+| `timeout` | number | no | Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget. |
 
 ### `check_user_activity`
 
@@ -231,7 +236,7 @@ Hit-test the element at a screen point (top-left coordinates). Requires Accessib
 
 ### `focus_keyboard`
 
-Give an element keyboard focus (sets AXFocused) — no click, no cursor move, does NOT bring the app frontmost. Non-disruptive. For typing, prefer change_text (semantic) or type(ref,…) (which handles frontmost+focus). Requires Accessibility.
+Give an element keyboard focus (sets AXFocused) — no click, no cursor move, does NOT bring the app frontmost. Non-disruptive. For typing, prefer change_text (semantic) or type(ref: "<ref>", text: "…") (which handles frontmost+focus). Requires Accessibility.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -262,17 +267,18 @@ Actively poll an app until a condition holds (works without AX notifications). m
 
 ### `window`
 
-Window management on a window ref via AX writes. action: move\|resize\|minimize\|unminimize\|raise. Requires Accessibility.
+Window management on a window ref via AX writes. action: move\|resize\|minimize\|unminimize\|raise. Always settles and returns the post-action hierarchy. Requires Accessibility.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `h` | number | no |  |
 | `w` | number | no |  |
-| `observe` | string (none, settle) | no | settle = act then return the post-action UI diff (§6). Default none. |
 | `ref` | string | yes |  |
 | `action` | string (move, resize, minimize, unminimize, raise) | yes |  |
 | `x` | number | no |  |
 | `y` | number | no |  |
+| `autoActivateApp` | boolean | no | Activate this window's app first if it isn't already frontmost. Defaults to true for "raise" (menu bar items require the owning app to be active — raising a window without activating its app leaves menu operations targeting the WRONG app), and false for move/resize/minimize/unminimize (those AX writes don't need the app frontmost). |
+| `timeout` | number | no | Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget. |
 
 ### `menu_pick`
 
@@ -283,6 +289,7 @@ Drive an app's menu bar by title path, e.g. ["File","Export…","PDF…"]. Requi
 | `path` | array | yes |  |
 | `observe` | string (none, settle) | no | settle = act then return the post-action UI diff (§6). Default none. |
 | `pid` | integer | yes |  |
+| `timeout` | number | no | Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget. |
 
 ### `get_changes`
 
@@ -300,7 +307,7 @@ Terminate an app by `identity` (exact pid, or a case-insensitive substring of th
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `signal` | string | no | Optional single signal (e.g. SIGTERM, SIGKILL, or a number). Omit for graceful SIGHUP→SIGTERM→SIGKILL escalation. |
-| `identity` | string | **yes** | Exact pid, or a case-insensitive substring of the bundle id or app name. Exact matches win; if more than one app matches, nothing is killed and the candidates are returned. |
+| `identity` | string | yes | Exact pid, or a case-insensitive substring of the bundle id or app name. Exact matches win; if more than one app matches, nothing is killed and the candidates are returned. |
 
 ### `app`
 
@@ -308,7 +315,7 @@ Curated, name-first snapshot of an app: header (name/pid/bundle id), window titl
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `identity` | string | **yes** | Exact pid, or a case-insensitive substring of the bundle id or app name (same matching as `list_app_windows` appMatch), or a window-title substring. Exact matches win; several matches return `ambiguous` with candidates. |
+| `identity` | string | yes | Exact pid, or a case-insensitive substring of the bundle id or app name (same matching as list_app_windows appMatch), or a window-title substring. Exact matches win; several matches return `ambiguous` with candidates. |
 | `activate` | boolean | no | Bring the app to the front + focus (default true). Set false to read without stealing focus. |
 | `window` | string | no | Optional window title to treat as the active window (else main/focused/first). Exact title first, else a CASE-SENSITIVE substring; if several windows fit, the first is used and the response says so. |
 | `timeout` | number | no | Seconds to read the tree (default 10). |
@@ -319,11 +326,11 @@ Resolve an app by exact pid, a case-insensitive substring of its bundle id or ap
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `window` | string | no | Optional window title to scope to one window — EXACT and case-sensitive here (unlike `app`, which also accepts a substring). On miss, the error carries `availableWindows` with the untruncated titles. |
-| `identity` | string | **yes** | Exact pid, or a case-insensitive substring of the bundle id or app name (same matching as `list_app_windows` appMatch), or a window-title substring. Exact matches win; several matches return `ambiguous` with candidates. |
+| `window` | string | no | Optional window title to scope to one window — EXACT and case-sensitive here (unlike `app`, which also accepts a substring). A miss returns window_not_found with the available titles. |
+| `identity` | string | yes | Exact pid, or a case-insensitive substring of the bundle id or app name (same matching as list_app_windows appMatch), or a window-title substring. Exact matches win; several matches return `ambiguous` with candidates. |
 | `timeout` | number | no | Seconds to spend loading the tree (default 10). Unreached nodes show as [N hidden]. |
 | `maxLines` | number | no | Max hierarchy lines to return (default 1200, max 20000). Any cut is reported inline. Prefer scoping with `window` over raising this. |
-| `maxChars` | number | no | Max hierarchy characters to return (default 40000, max 500000). This is the cap that usually bites: one node can carry a large value (a terminal's scrollback), so a small tree can still exceed what the client accepts. |
+| `maxChars` | number | no | Max hierarchy characters to return (default 40000, max 500000). This is the cap that usually bites: one node can carry a huge value (a terminal's scrollback), so a small tree can still exceed what the client accepts. |
 
 ### `launch_app`
 
@@ -343,11 +350,11 @@ Perform an action on a ref (press, menu, inc, dec, disclose, collapse, or a cust
 |-----------|------|----------|-------------|
 | `ref` | string | yes |  |
 | `action` | string | yes | Short verb, full AX name, or the displayed custom-action label. |
-| `refresh` | string (parent, window, none) | no | Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · none (just {ok}). |
+| `refresh` | string (parent, window, self, none) | no | Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · self (the acted-upon ref's own new content — the default when raising a window, or pressing a menu bar item/menu) · none (just {ok}). |
 
 ### `press`
 
-Press a control by its visible NAME (a high-level shortcut for find_elements + action(press)). Finds the ENABLED, pressable element whose label matches `name` and presses it, then settles the UI. Exact label wins, then case-insensitive, then substring; if several equally-good enabled matches remain it returns them as `candidates` to disambiguate instead of guessing. `pid` comes from control_app. Requires Accessibility.
+Press a control by its visible NAME (a high-level shortcut for find_elements + action(ref: "<ref>", action: "press")). Finds the ENABLED, pressable element whose label matches `name` and presses it, then settles the UI. Exact label wins, then case-insensitive, then substring; if several equally-good enabled matches remain it returns them as `candidates` to disambiguate instead of guessing. `pid` comes from control_app. Requires Accessibility.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -363,7 +370,7 @@ Set a text element's value (semantic, no keystrokes), settle, and return the upd
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `value` | string | yes |  |
-| `refresh` | string (parent, window, none) | no | Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · none (just {ok}). |
+| `refresh` | string (parent, window, self, none) | no | Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · self (the acted-upon ref's own new content — the default when raising a window, or pressing a menu bar item/menu) · none (just {ok}). |
 | `ref` | string | yes |  |
 
 ### `change_value`
@@ -373,7 +380,7 @@ Set a numeric control's value (slider/scrollbar/stepper), range-enforced; settle
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `ref` | string | yes |  |
-| `refresh` | string (parent, window, none) | no | Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · none (just {ok}). |
+| `refresh` | string (parent, window, self, none) | no | Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · self (the acted-upon ref's own new content — the default when raising a window, or pressing a menu bar item/menu) · none (just {ok}). |
 | `value` | number | yes |  |
 
 ### `click`
@@ -382,20 +389,22 @@ Real click on an element: brings its app frontmost, then clicks its activation p
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `refresh` | string (parent, window, none) | no | Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · none (just {ok}). |
+| `refresh` | string (parent, window, self, none) | no | Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · self (the acted-upon ref's own new content — the default when raising a window, or pressing a menu bar item/menu) · none (just {ok}). |
 | `ref` | string | yes |  |
 | `count` | integer | no | 1=single (default), 2=double, 3=triple. |
+| `timeout` | number | no | Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget. |
 
 ### `type`
 
-Enter text into a field. With `ref`: first tries a direct Accessibility insert (replaces the selection / inserts at the caret — no click, no clipboard); if the element doesn't support that, it clicks the field to focus it (so don't point it at buttons — a click would press them) and types keystrokes, falling back to clipboard paste if the keystrokes don't register (AppKit text views). The response's `via` says which path ran: "ax" (Accessibility insert), "keys" (synthetic keystrokes), "paste" (clipboard ⌘V), or "paste_retry" (the keystrokes read as a no-op, so the clipboard ⌘V fallback fired); `focused` reports whether the element held focus on the keystroke path. Without `ref`: types into whatever is currently focused. via=paste forces the clipboard path. Requires Accessibility.
+Enter text into a field by typing or pasting. With `ref`: first tries a direct Accessibility insert (replaces the selection / inserts at the caret — does NOT automatically replace the whole field. no click, no clipboard); if the element doesn't support that, it clicks the field to focus it (so don't point it at buttons — a click would press them) and types keystrokes, falling back to clipboard paste if the keystrokes don't register (AppKit text views). The response's `via` says which path ran: "ax" (Accessibility insert), "keys" (synthetic keystrokes), "paste" (clipboard ⌘V), or "paste_retry" (the keystrokes read as a no-op, so the clipboard ⌘V fallback fired); `focused` reports whether the element held focus on the keystroke path. Without `ref`: types into whatever is currently focused. via=paste forces the clipboard path. Requires Accessibility. AVOID using while the user is active as your keystrokes may be mixed with the user's and/or end up in the wrong field.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `text` | string | yes |  |
 | `via` | string (keys, paste) | no |  |
-| `refresh` | string (parent, window, none) | no | Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · none (just {ok}). |
+| `refresh` | string (parent, window, self, none) | no | Post-action refresh scope: parent (default, local context) · window (after a navigation/pane swap) · self (the acted-upon ref's own new content — the default when raising a window, or pressing a menu bar item/menu) · none (just {ok}). |
 | `ref` | string | no | Optional: the field to focus first (recommended). |
+| `timeout` | number | no | Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget. |
 
 ### `expand`
 
@@ -421,7 +430,7 @@ Screenshot specific app window(s) with ScreenCaptureKit (captures even occluded/
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `appMatch` | string | **yes** | Exact pid, or a case-insensitive substring of the bundle id or app name. ""/"*" = all. |
+| `appMatch` | string | yes | REQUIRED. Exact pid, or a case-insensitive substring of the bundle id or app name. ""/"*" = all. |
 | `windowMatch` | string | no | Window-title substring. ""/"*" = all. |
 | `onScreenOnly` | boolean | no | Only windows currently on screen (default false — minimized/hidden windows capture too). |
 | `excludeZeroAlpha` | boolean | no | Drop fully transparent (alpha 0) windows (default true). |
@@ -462,7 +471,7 @@ List app windows (id, title, app, bundle id, pid, frame, display, onScreen, alph
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `appMatch` | string | **yes** | Exact pid, or a case-insensitive substring of the bundle id or app name. ""/"*" = all. |
+| `appMatch` | string | yes | REQUIRED. Exact pid, or a case-insensitive substring of the bundle id or app name. ""/"*" = all. |
 | `windowMatch` | string | no | Window-title substring. ""/"*" = all. |
 | `onScreenOnly` | boolean | no | Only windows currently on screen (default true). |
 | `excludeZeroAlpha` | boolean | no | Drop fully transparent (alpha 0) windows (default true). |
@@ -477,16 +486,17 @@ Recognize text in an image file (e.g. a screenshot path) via Vision. No permissi
 
 ### `click_point`
 
-Synthetic mouse click at raw screen coordinates (global top-left). AVOID unless you have an explicit coordinate to hit — to click a UI element, use `click(ref)`, which targets the element and brings its app frontmost. Rides the Accessibility grant.
+Synthetic mouse click at raw screen coordinates (global top-left). AVOID unless you have an explicit coordinate to hit — to click a UI element, use `click(ref: "<ref>")`, which targets the element and brings its app frontmost. The click goes to whatever window is stacked on top at that point, which is the commonest reason a click at correct coordinates appears to do nothing — it landed in another app. Pass `pid` and a point owned by a different app is refused instead of misdelivered; omit it and the result reports which app the click actually reached. Rides the Accessibility grant.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `button` | string (left, right) | no |  |
 | `y` | number | yes |  |
-| `pid` | integer | no | App to observe when observe=settle (its UI tree is diffed). |
+| `pid` | integer | no | The app this input is meant for. Coordinate-taking tools refuse rather than post when another app owns the point, so a click cannot land in the wrong application unnoticed. Also the app whose UI tree is diffed when observe=settle. |
 | `count` | integer | no | 1=single, 2=double, 3=triple. |
 | `x` | number | yes |  |
 | `observe` | string (none, settle) | no | settle = after posting, wait for `pid`'s UI to quiesce and return the diff (§6). Synthetic input lands a beat after posting, so prefer this over an immediate re-read. |
+| `timeout` | number | no | Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget. |
 
 ### `scroll`
 
@@ -495,9 +505,10 @@ Synthetic scroll wheel by pixel deltas (dy negative scrolls down). Rides the Acc
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `dy` | integer | yes |  |
-| `pid` | integer | no | App to observe when observe=settle (its UI tree is diffed). |
+| `pid` | integer | no | The app this input is meant for. Coordinate-taking tools refuse rather than post when another app owns the point, so a click cannot land in the wrong application unnoticed. Also the app whose UI tree is diffed when observe=settle. |
 | `dx` | integer | no |  |
 | `observe` | string (none, settle) | no | settle = after posting, wait for `pid`'s UI to quiesce and return the diff (§6). Synthetic input lands a beat after posting, so prefer this over an immediate re-read. |
+| `timeout` | number | no | Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget. |
 
 ### `key`
 
@@ -506,8 +517,9 @@ Synthetic key combo, e.g. "cmd+s", "cmd+shift+z", "return". Rides the Accessibil
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `keys` | string | yes |  |
-| `pid` | integer | no | App to observe when observe=settle (its UI tree is diffed). |
+| `pid` | integer | no | The app this input is meant for. Coordinate-taking tools refuse rather than post when another app owns the point, so a click cannot land in the wrong application unnoticed. Also the app whose UI tree is diffed when observe=settle. |
 | `observe` | string (none, settle) | no | settle = after posting, wait for `pid`'s UI to quiesce and return the diff (§6). Synthetic input lands a beat after posting, so prefer this over an immediate re-read. |
+| `timeout` | number | no | Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget. |
 
 ### `hover`
 
@@ -517,8 +529,9 @@ Move the cursor to a screen point (triggers hover/tooltips) without clicking. Ri
 |-----------|------|----------|-------------|
 | `y` | number | yes |  |
 | `x` | number | yes |  |
-| `pid` | integer | no | App to observe when observe=settle (its UI tree is diffed). |
+| `pid` | integer | no | The app this input is meant for. Coordinate-taking tools refuse rather than post when another app owns the point, so a click cannot land in the wrong application unnoticed. Also the app whose UI tree is diffed when observe=settle. |
 | `observe` | string (none, settle) | no | settle = after posting, wait for `pid`'s UI to quiesce and return the diff (§6). Synthetic input lands a beat after posting, so prefer this over an immediate re-read. |
+| `timeout` | number | no | Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget. |
 
 ### `drag`
 
@@ -529,9 +542,10 @@ Drag from one screen point to another (a swipe in the simulator). Rides the Acce
 | `observe` | string (none, settle) | no | settle = after posting, wait for `pid`'s UI to quiesce and return the diff (§6). Synthetic input lands a beat after posting, so prefer this over an immediate re-read. |
 | `fromY` | number | yes |  |
 | `toX` | number | yes |  |
-| `pid` | integer | no | App to observe when observe=settle (its UI tree is diffed). |
+| `pid` | integer | no | The app this input is meant for. Coordinate-taking tools refuse rather than post when another app owns the point, so a click cannot land in the wrong application unnoticed. Also the app whose UI tree is diffed when observe=settle. |
 | `toY` | number | yes |  |
 | `fromX` | number | yes |  |
+| `timeout` | number | no | Total seconds for the whole call, the wait until you are idle included. Omit for the host's default budget. |
 
 ### `batch`
 
@@ -542,4 +556,4 @@ Run several tool calls in ONE request, in order — each step starts only after 
 | `stopOnError` | boolean | no | Abort at the first failing step (default true). |
 | `steps` | array | yes | Ordered tool calls. Each item is { tool: <tool name>, arguments: { … } } — e.g. { "tool": "action", "arguments": { "ref": "e6", "action": "press" } }. |
 | `pauseMs` | integer | no | Optional extra pause between steps, in milliseconds (default 0; steps already wait for the UI to settle). |
-
+| `timeout` | number | no | Total seconds for the whole batch (defer wait included). Steps are scope-ceilinged to what remains. |

@@ -398,7 +398,7 @@ public struct FocusKeyboardTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Give an element keyboard focus (sets AXFocused) — no click, no cursor move, does NOT bring the app frontmost. Non-disruptive. For typing, prefer change_text (semantic) or type(ref,…) (which handles frontmost+focus). Requires Accessibility.",
+            "description": "Give an element keyboard focus (sets AXFocused) — no click, no cursor move, does NOT bring the app frontmost. Non-disruptive. For typing, prefer change_text (semantic) or type(ref: \"<ref>\", text: \"…\") (which handles frontmost+focus). Requires Accessibility.",
             "inputSchema": [
                 "type": "object",
                 "properties": [

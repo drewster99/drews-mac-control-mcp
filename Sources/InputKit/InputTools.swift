@@ -98,7 +98,7 @@ private func checkPoint(_ arguments: [String: Any], x: Double, y: Double,
         "x": Int(x), "y": Int(y),
         "intended": ["pid": Int(intended), "app": intendedName],
         "actual": ["pid": Int(owner), "app": ownerName],
-        "howToFix": "\(ownerName) covers this point, so the input would have gone there instead of \(intendedName). Raise or activate \(intendedName) first, or act on the element directly with click(ref)/action(ref) which does not depend on what is stacked on top."
+        "howToFix": "\(ownerName) covers this point, so the input would have gone there instead of \(intendedName). Raise or activate \(intendedName) first, or act on the element directly with click(ref: \"<ref>\") or action(ref: \"<ref>\", action: \"press\"), which do not depend on what is stacked on top."
     ]))
 }
 
@@ -166,7 +166,7 @@ public struct ClickTool: Tool {
     public var descriptor: [String: Any] {
         [
             "name": name,
-            "description": "Synthetic mouse click at raw screen coordinates (global top-left). AVOID unless you have an explicit coordinate to hit — to click a UI element, use `click(ref)`, which targets the element and brings its app frontmost. The click goes to whatever window is stacked on top at that point, which is the commonest reason a click at correct coordinates appears to do nothing — it landed in another app. Pass `pid` and a point owned by a different app is refused instead of misdelivered; omit it and the result reports which app the click actually reached. Rides the Accessibility grant.",
+            "description": "Synthetic mouse click at raw screen coordinates (global top-left). AVOID unless you have an explicit coordinate to hit — to click a UI element, use `click(ref: \"<ref>\")`, which targets the element and brings its app frontmost. The click goes to whatever window is stacked on top at that point, which is the commonest reason a click at correct coordinates appears to do nothing — it landed in another app. Pass `pid` and a point owned by a different app is refused instead of misdelivered; omit it and the result reports which app the click actually reached. Rides the Accessibility grant.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
