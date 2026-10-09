@@ -115,6 +115,12 @@ which channels, not whether to proceed. `--yes` is required: the agent cannot an
 interactive prompt, so without it the run stalls. The exact command is allowed in
 `.claude/settings.local.json`; don't vary its flags or the allow rule won't match.
 
+If a run fails before publishing, it has already bumped the version (uncommitted). Fix the cause,
+then re-run with `./scripts/build-release.sh --publish --yes --no-bump` (also allowed) so that
+version is kept rather than skipped. A test failure saying files "couldn't be opened" / "Operation
+not permitted" is macOS privacy protection, not code: the command-line Xcode (`xcode-select -p`)
+needs Full Disk Access because the repo is under `~/Documents`; the script prints the exact fix.
+
 This single invocation bumps the version, runs the tests, builds **both** install identities (system
 for the Homebrew cask, user for the PyPI wheel — see "Two install identities" above), signs, notarizes
 and staples each, uploads the wheel to PyPI, updates the cask in `drewster99/homebrew-tap`, creates

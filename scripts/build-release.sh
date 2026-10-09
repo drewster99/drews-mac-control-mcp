@@ -320,13 +320,29 @@ apply_version() {
 # Build
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Several tests read repo files (docs, project.yml, the harnesses). When the repo sits in a
+# privacy-protected folder like ~/Documents, the xctest agent of the command-line Xcode needs that
+# folder's access in its own right, and macOS will not prompt for it — every such test fails with
+# "Operation not permitted", which reads like a code bug. Name the real cause instead.
+explain_test_file_access_denial() {
+    grep -q "Operation not permitted" "${WORK_DIR}/xcodebuild-test.log" || return 0
+    local xcode_app
+    xcode_app="$(xcode-select -p)"
+    xcode_app="${xcode_app%/Contents/Developer}"
+    printf '\n\033[1;31m    The tests could not read files in this repo (%s).\033[0m\n' "$PWD" >&2
+    printf '    That is macOS privacy protection, not a test failure: the command-line Xcode\n' >&2
+    printf '    (%s) has no access to that folder, and macOS does not prompt for it.\n' "$xcode_app" >&2
+    printf '    Fix: System Settings > Privacy & Security > Full Disk Access > add %s, then re-run\n' "$xcode_app" >&2
+    printf '    with --no-bump so the version already bumped by this run is kept.\n' >&2
+}
+
 run_tests() {
     [[ $SKIP_TESTS -eq 1 ]] && { warn "Skipping tests"; return; }
     step "Running tests"
     xcodebuild -project MacControlMCP.xcodeproj -scheme "$TEST_SCHEME" \
         -destination 'platform=macOS' \
         test > "${WORK_DIR}/xcodebuild-test.log" 2>&1 \
-        || { tail -40 "${WORK_DIR}/xcodebuild-test.log"; die "Tests failed. Full log: ${WORK_DIR}/xcodebuild-test.log"; }
+        || { tail -40 "${WORK_DIR}/xcodebuild-test.log"; explain_test_file_access_denial; die "Tests failed. Full log: ${WORK_DIR}/xcodebuild-test.log"; }
     # xcodebuild prints a per-bundle summary and repeats it for the enclosing suite, so the last
     # line is one bundle's count, not the run's. Count the bundles and sum their totals instead —
     # reporting "29 tests" for a 5-bundle run reads like most of the suite never executed.
