@@ -38,7 +38,7 @@ from mcp_client import MCPServer, ServerDied, RpcTimeout, TestAbort
 SAFE_TO_RUN = {"expand", "refresh", "element_detail", "find_elements", "control_app", "app",
                "get_changes", "ocr", "list_app_windows", "wait_for"}
 # Would change the UI or the user's data. Validated, never executed.
-MUTATING = {"action", "click", "click_point", "change_text", "change_value", "type", "set_value",
+MUTATING = {"action", "click", "click_point", "change_text", "change_value", "type",
             "press", "menu_pick", "window", "focus_keyboard", "reveal", "key", "sim", "scroll",
             "hover", "drag", "kill", "launch_app", "open"}
 

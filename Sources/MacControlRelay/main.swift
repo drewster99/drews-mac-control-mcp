@@ -27,7 +27,7 @@ func makeConnection() -> NSXPCConnection {
 // rather than launching it again — keeping transparent reconnect for the common resolve path.
 let mutatingTools: Set<String> = [
     "click", "click_point", "scroll", "key", "type", "drag", "hover",
-    "set_value", "focus_keyboard", "reveal", "window", "menu_pick", "sim",
+    "focus_keyboard", "reveal", "window", "menu_pick", "sim",
     "action", "change_text", "change_value", "launch_app", "kill", "open", "press", "batch"
 ]
 

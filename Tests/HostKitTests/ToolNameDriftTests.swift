@@ -19,7 +19,7 @@ final class ToolNameDriftTests: XCTestCase {
     /// Only unambiguous names belong here: bare words like `perform` and `screenshot` appear in
     /// ordinary prose ("perform an action") and would fire on every sentence.
     private static let retiredToolNames = [
-        "ui_snapshot", "list_apps", "type_text", "set_focus", "open_menu", "perform_action"
+        "ui_snapshot", "list_apps", "type_text", "set_focus", "open_menu", "perform_action", "set_value"
     ]
 
     /// The repo root, from this file's compile-time path (…/Tests/HostKitTests/ThisFile.swift).

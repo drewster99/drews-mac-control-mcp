@@ -86,7 +86,7 @@ def test_typing(s):
     if not area:
         check("TextEdit text area", False); return
     ref = area["ref"]
-    s.call("set_value", {"ref": ref, "value": ""})
+    s.call("change_text", {"ref": ref, "value": "", "refresh": "none"})
     s.call("focus_keyboard", {"ref": ref})
     time.sleep(0.3)
 
@@ -111,7 +111,7 @@ def test_typing(s):
 
     # observe:"settle" on a CGEvent verb (the gap this session closed): type with settle posts,
     # waits for the app to quiesce, and returns the diff — no separate read-after-wait needed.
-    s.call("set_value", {"ref": ref, "value": ""})
+    s.call("change_text", {"ref": ref, "value": "", "refresh": "none"})
     s.call("focus_keyboard", {"ref": ref})
     time.sleep(0.3)
     s.call("type", {"text": "settle me", "via": "keys"})
@@ -122,7 +122,7 @@ def test_typing(s):
           f"settledAfterMs={rs.get('settledAfterMs')} value={landed!r}")
 
     # scroll: needs content taller than the view; assert it posts without error (offset unreadable).
-    s.call("set_value", {"ref": ref, "value": "\n".join(f"line {i}" for i in range(200))})
+    s.call("change_text", {"ref": ref, "refresh": "none", "value": "\n".join(f"line {i}" for i in range(200))})
     s.call("focus_keyboard", {"ref": ref})
     time.sleep(0.2)
     rs = s.call("scroll", {"dx": 0, "dy": -400})

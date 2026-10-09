@@ -115,7 +115,7 @@ final class GuidanceCallValidityTests: XCTestCase {
         for missing in schema.required.subtracting(parsed.named) {
             XCTFail("'\(parsed.tool)' requires '\(missing)', absent from: \(call)", file: file, line: line)
         }
-        // The literal's TYPE has to match too. `set_value(ref: "x", value: true)` named every
+        // The literal's TYPE has to match too. `set_value(ref: "x", value: true)` (a since-removed tool) named every
         // parameter correctly and still could not run: the tool declares `value` a string and casts
         // with `as? String`, so a JSON bool failed with an error naming `ref`.
         for (argument, literal) in parsed.literals {

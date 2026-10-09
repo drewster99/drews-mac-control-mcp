@@ -41,8 +41,6 @@ public enum Guidance {
               purpose: "type into a field for real keystroke behavior (search-as-you-type, validation)"),
         .init(call: #"change_value(ref: "<ref>", value: 0.5)"#,
               purpose: "set a numeric value — slider, scrollbar, stepper (0–1, or the shown min–max)"),
-        .init(call: #"set_value(ref: "<ref>", value: "1")"#,
-              purpose: "write a raw string to a settable AXValue — value is a STRING here, even for a number"),
         .init(call: #"expand(ref: "<ref>")"#,
               purpose: "load children that are not in the tree yet ([N hidden], device screens)"),
         .init(call: #"refresh(ref: "<ref>")"#,

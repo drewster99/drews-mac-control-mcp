@@ -17,7 +17,7 @@ the AX act verbs are element-targeted, never global CGEvents):
     - focus_keyboard, window raise, window move (with frame read-back), menu_pick
 
   TextEdit:
-    - set_value (write text, read it back), set_value observe:"settle", focus_keyboard, reveal
+    - change_text (write text, read it back), change_text settle -> hierarchy, focus_keyboard, reveal
 
 The 6 global-input CGEvent verbs (click_point/scroll/key/type/hover/drag) are intentionally
 NOT exercised here — they post system-wide events and must be run deliberately.
@@ -177,22 +177,22 @@ def test_textedit(s):
         check("text area is value-settable",
               s.call("element_detail", {"ref": ref}).get("settable") is True)
 
-        r = s.call("set_value", {"ref": ref, "value": "Hello from set_value"})
+        r = s.call("change_text", {"ref": ref, "value": "Hello from change_text", "refresh": "none"})
         val = s.call("element_detail", {"ref": ref}).get("value") or ""
-        check("set_value writes + reads back", r.get("ok") and "Hello from set_value" in val)
+        check("change_text writes + reads back", r.get("ok") and "Hello from change_text" in val)
 
-        rs = s.call("set_value", {"ref": ref, "value": "second value", "observe": "settle"})
-        check("set_value observe:settle -> diff", "diff" in rs and "settledAfterMs" in rs)
+        rs = s.call("change_text", {"ref": ref, "value": "second value"})
+        check("change_text settles -> hierarchy", rs.get("ok") is True and "hierarchy" in rs)
 
         check("focus_keyboard", s.call("focus_keyboard", {"ref": ref}).get("ok") is True)
         check("reveal returns structured result", "ok" in s.call("reveal", {"ref": ref}))
 
         # get_changes detects a value change on a standard, identity-stable element — this is
         # the diff both get_changes and observe:settle build on. Default depth (4) reaches it.
-        s.call("set_value", {"ref": ref, "value": "ALPHA"})
+        s.call("change_text", {"ref": ref, "value": "ALPHA", "refresh": "none"})
         time.sleep(0.15)
         s.call("get_changes", {"pid": pid, "depth": 4})  # establish baseline
-        s.call("set_value", {"ref": ref, "value": "BRAVO"})
+        s.call("change_text", {"ref": ref, "value": "BRAVO", "refresh": "none"})
         time.sleep(0.15)
         gc = s.call("get_changes", {"pid": pid, "depth": 4})
         changed = [c for c in gc.get("changed", []) if c.get("ref") == ref]

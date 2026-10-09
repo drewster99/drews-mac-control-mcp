@@ -14,7 +14,7 @@ drive — plus the verbs to drive it (`action`, `change_text`, `change_value`, `
 > **Tool names here are design-era.** This document records the design as written; some
 > tools were renamed on the way in (`list_apps` → `list_running_apps`, `ui_snapshot` →
 > `control_app`, `perform` → `action`, `set_focus` → `focus_keyboard`, `open_menu` →
-> `menu_pick`, `type_text` → `type`). [MCP_TOOLS.md](./MCP_TOOLS.md) is the live surface.
+> `menu_pick`, `type_text` → `type`; `set_value` was later removed in favor of `change_text`). [MCP_TOOLS.md](./MCP_TOOLS.md) is the live surface.
 ## 1. Motivation
 
 Every existing AX tool (`ui_snapshot`, `find`, `perform_action`, …) requires a **pid**.
@@ -460,7 +460,7 @@ ref registry, not a "session"). `AXElement` keeps its name — it genuinely wrap
 
 ---
 
-## 13. set_value internals & enforcement
+## 13. change_text / change_value internals & enforcement
 
 - `change_text` → `AXUIElementSetAttributeValue(el, kAXValueAttribute, str as CFString)`.
 - `change_value` → same call with a **`CFNumber`**. Reads `AXMinValue`/`AXMaxValue` and

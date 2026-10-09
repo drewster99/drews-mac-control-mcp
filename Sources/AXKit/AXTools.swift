@@ -25,7 +25,6 @@ public enum AXTools {
             ElementDetailTool(session: session, isTrusted: isTrusted),
             FocusedElementTool(session: session, isTrusted: isTrusted),
             ElementAtTool(session: session, isTrusted: isTrusted),
-            SetValueTool(session: session, isTrusted: isTrusted),
             FocusKeyboardTool(session: session, isTrusted: isTrusted),
             RevealTool(session: session, isTrusted: isTrusted),
             WaitForTool(session: session, isTrusted: isTrusted),
@@ -384,47 +383,6 @@ public struct ElementAtTool: Tool {
 }
 
 // MARK: - Act tools (effect-causing semantic AX; CGEvent synthetic input is a later layer)
-
-public struct SetValueTool: Tool {
-    private let session: ElementRegistry
-    private let isTrusted: @Sendable () -> Bool
-
-    public init(session: ElementRegistry, isTrusted: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() }) {
-        self.session = session
-        self.isTrusted = isTrusted
-    }
-
-    public let name = "set_value"
-
-    public var descriptor: [String: Any] {
-        [
-            "name": name,
-            "description": "Set an element's AXValue (text/slider/etc.) — semantic, not keystrokes. Requires Accessibility.",
-            "inputSchema": [
-                "type": "object",
-                "properties": [
-                    "ref": ["type": "string"], "value": ["type": "string"],
-                    "observe": ["type": "string", "enum": ["none", "settle"], "description": "settle = act then return the post-action UI diff (§6). Default none."]
-                ],
-                "required": ["ref", "value"]
-            ]
-        ]
-    }
-
-    public func call(_ arguments: [String: Any]) -> String {
-        guard isTrusted() else { return permissionError }
-        guard let ref = arguments["ref"] as? String, let value = arguments["value"] as? String else {
-            return #"{"error":"missing_ref_or_value"}"#
-        }
-        switch resolvedElement(session, ref) {
-        case .element(let element):
-            return actResult(session, element, observe: arguments["observe"] as? String,
-                             base: ["ref": ref], perform: { element.setValue(value) })
-        case .errorJSON(let error):
-            return error
-        }
-    }
-}
 
 public struct FocusKeyboardTool: Tool {
     private let session: ElementRegistry
