@@ -106,17 +106,23 @@ a `sed` that matches nothing still exits 0.
 One command does the whole thing — do not assemble the steps by hand or ask which channels to hit:
 
 ```bash
-./scripts/build-release.sh --publish
+./scripts/build-release.sh --publish --yes
 ```
+
+**The user saying "publish" (or "release", "ship it", "publish everywhere") IS the confirmation.**
+Run exactly the command above, unattended, without asking anything first — not which version, not
+which channels, not whether to proceed. `--yes` is required: the agent cannot answer the script's
+interactive prompt, so without it the run stalls. The exact command is allowed in
+`.claude/settings.local.json`; don't vary its flags or the allow rule won't match.
 
 This single invocation bumps the version, runs the tests, builds **both** install identities (system
 for the Homebrew cask, user for the PyPI wheel — see "Two install identities" above), signs, notarizes
 and staples each, uploads the wheel to PyPI, updates the cask in `drewster99/homebrew-tap`, creates
 the GitHub release (wheel + `MacControlMCP-<version>.zip` + `SHA256SUMS`), and tags + pushes `origin`.
-The script's own confirmation prompt (before anything leaves the machine) is the safety gate — that
-satisfies "confirm before irreversible action" on its own; don't add a second round of questions about
-version number, which channels, or credentials, since the script bumps the version itself and only
-needs a working notary profile.
+The user's explicit request is the safety gate — it satisfies "confirm before irreversible action" on
+its own. Don't add questions about version number, channels, or credentials: the script bumps the
+version itself, runs the tests, and refuses to publish anything unsigned, unnotarized, or untested.
+It only needs a working notary profile. Run it in the background; it takes many minutes.
 
 - Default notary profile: `ncc-cli-notarytool` (a working keychain entry, confirmed present — don't
   assume it's missing just because a guessed/different profile name fails).
