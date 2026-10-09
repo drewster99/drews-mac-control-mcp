@@ -2,7 +2,7 @@
 
 _Server `mac-control-mcp` v0.2.54 · MCP protocol 2025-06-18 · generated from a live `tools/list`._
 
-> This file is generated from the server's own `tools/list` output. Regenerate after changing any tool descriptor.
+> This file is generated from the server's own `tools/list` output by `scripts/gen-tools-doc.sh`. Regenerate it after changing any tool descriptor; `ToolNameDriftTests` fails until you do.
 
 ## `type` reports when it ran out of budget
 

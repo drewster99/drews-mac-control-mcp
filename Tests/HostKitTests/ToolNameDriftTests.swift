@@ -114,6 +114,88 @@ final class ToolNameDriftTests: XCTestCase {
         XCTAssertEqual(live.subtracting(documented), [], "live tool with no section in MCP_TOOLS.md")
     }
 
+    /// The reference doc is generated, so it must say exactly what `tools/list` says. It sat at
+    /// 0.2.26 for months while tools gained and lost parameters, because only the set of section
+    /// names was checked. Fix a failure here with `scripts/gen-tools-doc.sh`, never by hand.
+    func testReferenceDocMatchesLiveDescriptors() throws {
+        let request = #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#
+        let data = try XCTUnwrap(makeFullServer().handleLine(request))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let result = try XCTUnwrap(object["result"] as? [String: Any])
+        let descriptors = try XCTUnwrap(result["tools"] as? [[String: Any]])
+        let doc = try String(contentsOf: repoRoot.appendingPathComponent("docs/MCP_TOOLS.md"), encoding: .utf8)
+        let sections = Self.documentedSections(in: doc)
+        let fix = "— run scripts/gen-tools-doc.sh"
+
+        for descriptor in descriptors {
+            let name = try XCTUnwrap(descriptor["name"] as? String)
+            guard let section = sections[name] else { continue }   // a missing section fails elsewhere
+            let description = Self.tableCell((descriptor["description"] as? String) ?? "")
+            XCTAssertEqual(section.description, description, "MCP_TOOLS.md describes '\(name)' differently \(fix)")
+            XCTAssertTrue(doc.contains("| `\(name)` | \(description) |"),
+                          "MCP_TOOLS.md's All tools row for '\(name)' is stale \(fix)")
+
+            let schema = descriptor["inputSchema"] as? [String: Any]
+            let properties = (schema?["properties"] as? [String: Any]) ?? [:]
+            let required = Set((schema?["required"] as? [String]) ?? [])
+            XCTAssertEqual(Set(section.parameters.keys), Set(properties.keys),
+                           "MCP_TOOLS.md lists different parameters for '\(name)' \(fix)")
+            for (parameter, row) in section.parameters {
+                guard let property = properties[parameter] as? [String: Any] else { continue }
+                XCTAssertEqual(row.isRequired, required.contains(parameter),
+                               "MCP_TOOLS.md has the wrong Required for '\(name).\(parameter)' \(fix)")
+                XCTAssertEqual(row.description, Self.tableCell((property["description"] as? String) ?? ""),
+                               "MCP_TOOLS.md describes '\(name).\(parameter)' differently \(fix)")
+            }
+        }
+    }
+
+    private struct DocumentedParameter {
+        let isRequired: Bool
+        let description: String
+    }
+
+    private struct DocumentedSection {
+        let description: String
+        let parameters: [String: DocumentedParameter]
+    }
+
+    /// The form the generator writes a description in: one line, with `|` escaped for tables.
+    private static func tableCell(_ text: String) -> String {
+        text.split(whereSeparator: \.isWhitespace).joined(separator: " ").replacingOccurrences(of: "|", with: "\\|")
+    }
+
+    /// Each `### \`tool\`` section: the description line under it and its parameter table rows.
+    private static func documentedSections(in doc: String) -> [String: DocumentedSection] {
+        var sections: [String: DocumentedSection] = [:]
+        let lines = doc.components(separatedBy: "\n")
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            guard line.hasPrefix("### `"), line.hasSuffix("`") else { index += 1; continue }
+            let name = String(line.dropFirst(5).dropLast())
+            let description = index + 2 < lines.count ? lines[index + 2] : ""
+            var parameters: [String: DocumentedParameter] = [:]
+            index += 3
+            while index < lines.count, !lines[index].hasPrefix("### ") {
+                let row = lines[index]
+                if row.hasPrefix("| `") {
+                    // `| \`name\` | type | yes/no | description |` — the description may hold `\|`.
+                    let cells = row.dropFirst(2).dropLast(2).components(separatedBy: " | ")
+                    if cells.count >= 4 {
+                        let parameter = cells[0].trimmingCharacters(in: CharacterSet(charactersIn: "`"))
+                        parameters[parameter] = DocumentedParameter(
+                            isRequired: cells[2] == "yes",
+                            description: cells[3...].joined(separator: " | ").trimmingCharacters(in: .whitespaces))
+                    }
+                }
+                index += 1
+            }
+            sections[name] = DocumentedSection(description: description, parameters: parameters)
+        }
+        return sections
+    }
+
     /// Tool lookup is `tools.first(where: { $0.name == name })`, so a duplicate name would make one
     /// of the two permanently unreachable — silently, and only for whichever was registered second.
     func testToolNamesAreUnique() throws {
