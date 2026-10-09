@@ -190,7 +190,17 @@ preflight() {
         # bump this script makes is the one exception, so the check runs before it.
         # Skipped when finishing a stranded publish: the previous run's version bump is legitimately
         # sitting uncommitted, which is exactly the state we are recovering from.
-        if [[ $FINISH_PUBLISH -eq 0 && -n "$(git -C "$REPO_ROOT" status --porcelain)" ]]; then
+        # Also skipped for a --no-bump re-run whose only changes are the three version files: that
+        # is the bump an earlier run made before failing, and publish() commits it like its own.
+        local dirty
+        dirty="$(git -C "$REPO_ROOT" status --porcelain)"
+        if [[ $NO_BUMP -eq 1 && -n "$dirty" ]] \
+            && ! git -C "$REPO_ROOT" status --porcelain \
+                 | grep -vxE ' M (Sources/MacControlMCPCore/AppVersion\.swift|project\.yml|python/pyproject\.toml)' >/dev/null; then
+            info "Keeping the version bump an earlier run left uncommitted"
+            dirty=""
+        fi
+        if [[ $FINISH_PUBLISH -eq 0 && -n "$dirty" ]]; then
             git -C "$REPO_ROOT" status --short
             die "Working tree is not clean. Commit or stash first."
         fi
