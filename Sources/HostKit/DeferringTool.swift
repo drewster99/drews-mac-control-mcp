@@ -38,6 +38,7 @@ public struct InterruptionProfile: Sendable {
 public struct DeferringTool: Tool {
     private let inner: Tool
     private let profile: InterruptionProfile
+    private let activityMonitor: ActivityMonitor
     private let idle: @Sendable () -> TimeInterval
     private let config: @Sendable () -> ActivityConfig
     private let saveMouse: @Sendable () -> CGPoint?
@@ -54,7 +55,8 @@ public struct DeferringTool: Tool {
     public init(
         inner: Tool,
         profile: InterruptionProfile,
-        idle: @escaping @Sendable () -> TimeInterval = { ActivityMonitor.shared.userIdleSeconds(mouseOrKeyboard: .mouse) },
+        activityMonitor: ActivityMonitor = .shared,
+        idle: (@Sendable () -> TimeInterval)? = nil,
         config: @escaping @Sendable () -> ActivityConfig = { ActivityConfigStore.shared.current },
         saveMouse: @escaping @Sendable () -> CGPoint? = { CGEvent(source: nil)?.location },
         restoreMouse: @escaping @Sendable (CGPoint) -> Void = { CGWarpMouseCursorPosition($0) },
@@ -64,7 +66,9 @@ public struct DeferringTool: Tool {
         gate: GlobalInputGate = .shared
     ) {
         self.inner = inner; self.profile = profile
-        self.idle = idle; self.config = config
+        self.activityMonitor = activityMonitor
+        self.idle = idle ?? { activityMonitor.userIdleSeconds() }
+        self.config = config
         self.saveMouse = saveMouse; self.restoreMouse = restoreMouse
         self.saveApp = saveApp; self.restoreApp = restoreApp
         self.pollInterval = pollInterval
@@ -148,7 +152,7 @@ public struct DeferringTool: Tool {
         let workStart = Date()
         // Batch is a single defer scope, so it doesn't restore mouse/focus per-step.
         // But it still needs a sampler to advance the baseline if the user interrupts the batch.
-        let sampler = IdleSampler(interval: 0.15, activityMonitor: .shared, kind: .mouse, handler: idle)
+        let sampler = IdleSampler(interval: 0.15, activityMonitor: activityMonitor, kind: .mouse, handler: idle)
         defer { sampler.cancel() }
 
         let result = inner.call(innerArguments)

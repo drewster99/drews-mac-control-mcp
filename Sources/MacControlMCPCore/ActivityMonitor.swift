@@ -16,7 +16,15 @@ import Foundation
 
 public final class ActivityMonitor: @unchecked Sendable {
     public static let shared = ActivityMonitor()
-    public init() {}
+
+    /// Reads one input group's raw idle counter: seconds since its most recent event, synthetic or
+    /// real. Injected so the idle policy built on it can be exercised without real HID input.
+    public typealias RawIdleSource = @Sendable (SyntheticKind) -> TimeInterval
+    private let rawIdleSource: RawIdleSource
+
+    public init(rawIdleSource: @escaping RawIdleSource = ActivityMonitor.quartzIdleSeconds) {
+        self.rawIdleSource = rawIdleSource
+    }
 
     /// Which input group a synthetic post belongs to — mouse and keyboard idle counters are
     /// independent, so masking must be tracked per group.
@@ -96,12 +104,14 @@ public final class ActivityMonitor: @unchecked Sendable {
     ]
     private static let keyboardTypes: [CGEventType] = [.keyDown, .flagsChanged]
 
-    private func idleSeconds(_ types: [CGEventType]) -> TimeInterval {
-        types.map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }.min() ?? 0
+    /// The production idle source: the HID system's own per-event-type counters.
+    @Sendable public static func quartzIdleSeconds(_ kind: SyntheticKind) -> TimeInterval {
+        let types = kind == .mouse ? mouseTypes : keyboardTypes
+        return types.map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }.min() ?? 0
     }
 
-    public func mouseIdleSeconds() -> TimeInterval { idleSeconds(Self.mouseTypes) }
-    public func keyboardIdleSeconds() -> TimeInterval { idleSeconds(Self.keyboardTypes) }
+    public func mouseIdleSeconds() -> TimeInterval { rawIdleSource(.mouse) }
+    public func keyboardIdleSeconds() -> TimeInterval { rawIdleSource(.keyboard) }
     /// Time since the last observed input event (mouse OR keyboard), synthetic or real.
     public func combinedIdleSeconds() -> TimeInterval { min(mouseIdleSeconds(), keyboardIdleSeconds()) }
 
@@ -165,6 +175,12 @@ public final class ActivityMonitor: @unchecked Sendable {
     /// advance at 1s/s, so the match is elapsed-time-invariant. Unmasked readings advance a monotonic
     /// last-user-event baseline; masked groups report the age of that baseline instead of the raw
     /// counter. Errs toward "active" (never interrupt) when no baseline exists yet.
+    public func userIdleSeconds() -> TimeInterval {
+        let sample = readings()
+        return min(sample.mouse.userIdle, sample.keyboard.userIdle)
+    }
+
+    /// Time since the last input event in either group, synthetic or real.
     public func rawIdleSeconds() -> TimeInterval {
         return min(mouseIdleSeconds(), keyboardIdleSeconds())
     }

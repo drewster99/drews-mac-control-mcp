@@ -34,6 +34,35 @@ final class DeferringToolTests: XCTestCase {
                       pollInterval: 0.02)
     }
 
+    /// Protects: with no `idle` override, an interrupting tool counts BOTH mouse and keyboard as
+    /// user activity, so it never acts while the user is typing with the mouse still (or vice versa).
+    /// Fails if: the default idle source reads only one input group (51d9f04 regressed it to
+    /// mouse-only, so typing never deferred anything), or always reports busy.
+    func testDefaultIdleSourceCountsMouseAndKeyboard() throws {
+        struct Case { let label: String; let mouseIdle: TimeInterval; let keyboardIdle: TimeInterval; let runs: Bool }
+        let cases = [
+            Case(label: "typing, mouse still", mouseIdle: 60, keyboardIdle: 0.2, runs: false),
+            Case(label: "mouse moving, keyboard still", mouseIdle: 0.2, keyboardIdle: 60, runs: false),
+            Case(label: "both idle", mouseIdle: 60, keyboardIdle: 60, runs: true)
+        ]
+        let config = ActivityConfig(minIdleSeconds: 5, deferBudgetSeconds: 0, onDeferTimeout: .reportBusy,
+                                    deferOnUserActivity: true)
+        for testCase in cases {
+            let spy = SpyTool()
+            let monitor = ActivityMonitor(rawIdleSource: { kind in
+                kind == .mouse ? testCase.mouseIdle : testCase.keyboardIdle
+            })
+            let deferring = DeferringTool(inner: spy, profile: alwaysProfile,
+                                          activityMonitor: monitor, config: { config },
+                                          saveMouse: { nil }, restoreMouse: { _ in },
+                                          saveApp: { nil }, restoreApp: { _ in },
+                                          pollInterval: 0.02)
+            let out = try parse(deferring.call([:]))
+            XCTAssertEqual(spy.callCount, testCase.runs ? 1 : 0, testCase.label)
+            XCTAssertEqual(out["error"] as? String, testCase.runs ? nil : "user_busy", testCase.label)
+        }
+    }
+
     func testFeatureOffRunsImmediately() throws {
         let spy = SpyTool()
         let d = tool(spy, alwaysProfile, idle: { 0 }, config: .disabled)   // master toggle off = off
